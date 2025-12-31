@@ -1,4 +1,3 @@
-
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -18,7 +17,7 @@ script_dir = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
 from dynamics_dual import PDEDynamics
-from models.policy import ControlNet
+from models.policy import DecentralizedControlNet
 import data_utils
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -57,7 +56,7 @@ def load_params(model, filepath, n_pde=100, n_agents=8):
 
 def rollout_uncontrolled(z_init, xi_init, dynamics, T_steps):
     """Rollout with zero control inputs."""
-    from tesseracts.solverHeat_centralized import solver
+    from tesseracts.solverHeat_decentralized import solver
     
     def step_fn(carry, _):
         z_curr, xi_curr = carry
@@ -142,7 +141,7 @@ def create_comparison_figure(x_grid, z_init, z_target, z_traj_ctrl, z_traj_unctr
         ax2.scatter(xi_final, z_ctrl[-1, idx], s=150, color=colors_agents[j], 
                    edgecolors='black', linewidth=2, zorder=15, marker='o')
     
-    ax2.set_title(r"Evolution (DPC Control)", fontsize=title_fs, fontweight='bold')
+    ax2.set_title(r"Evolution (Decentralized DPC)", fontsize=title_fs, fontweight='bold')
     ax2.set_xlabel(r"Position $x$", fontsize=label_fs)
     ax2.grid(True, alpha=0.3)
     ax2.set_xlim([0, 1])
@@ -164,8 +163,6 @@ def create_comparison_figure(x_grid, z_init, z_target, z_traj_ctrl, z_traj_unctr
     ax3.set_ylabel(r"Position $\xi_i$", fontsize=label_fs)
     ax3.set_ylim([-0.05, 1.05])
     ax3.grid(True, alpha=0.3)
-    # if n_agents <= 8:
-    #     ax3.legend(loc='right', fontsize=40)
     
     # ────────────────────────────────────────────────────────────────────────
     # Panel 4: Control Intensity u (Row 2, Col 1)
@@ -207,7 +204,7 @@ def create_comparison_figure(x_grid, z_init, z_target, z_traj_ctrl, z_traj_unctr
     time_err = np.arange(len(mse_ctrl))
     
     ax6.semilogy(time_err, mse_unctrl, 'b-', lw=3.0, label='Uncontrolled', alpha=0.8)
-    ax6.semilogy(time_err, mse_ctrl, 'r-', lw=3.0, label='DPC Controlled', alpha=0.8)
+    ax6.semilogy(time_err, mse_ctrl, 'r-', lw=3.0, label='Decentralized DPC', alpha=0.8)
     ax6.fill_between(time_err, mse_ctrl, mse_unctrl, alpha=0.15, color='green')
     
     ax6.set_title(r"Tracking Error (MSE)", fontsize=title_fs, fontweight='bold')
@@ -244,7 +241,7 @@ def create_comparison_figure(x_grid, z_init, z_target, z_traj_ctrl, z_traj_unctr
     
     plt.tight_layout(rect=[0, 0.06, 1, 1])
     
-    save_path = f'heat_dpc_visualization_ex{example_idx}.png'
+    save_path = f'heat_dpc_decentralized_ex{example_idx}.png'
     plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
     print(f"✓ Saved: {save_path}")
     plt.close()
@@ -334,7 +331,7 @@ def create_agent_analysis_figure(xi_traj, u_traj, v_traj, z_traj, z_target, exam
     )
     
     plt.tight_layout(rect=[0, 0.06, 1, 1])
-    save_path = f'heat_dpc_agents_ex{example_idx}.png'
+    save_path = f'heat_dpc_decentralized_agents_ex{example_idx}.png'
     plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
     print(f"✓ Saved: {save_path}")
     plt.close()
@@ -343,26 +340,27 @@ def create_agent_analysis_figure(xi_traj, u_traj, v_traj, z_traj, z_target, exam
 
 def main():
     print("=" * 60)
-    print("  HEAT EQUATION DPC - CONFERENCE VISUALIZATION")
+    print("  HEAT EQUATION DECENTRALIZED DPC - CONFERENCE VISUALIZATION")
     print("=" * 60)
     
     n_pde, n_agents, T_steps = 100, 8, 300
-    n_examples = 3  # Number of test cases
+    n_examples = 3  # Number of test cases (same as centralized)
     
-    solver_ts = Tesseract.from_image("solver_heat_centralized:latest")
+    solver_ts = Tesseract.from_image("solver_heat_decentralized:latest")
     
     with solver_ts:
-        model = ControlNet(features=(64, 64))
+        model = DecentralizedControlNet(features=(64, 64))
         dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
         
         try:
-            params = load_params(model, 'centralized_params.msgpack', n_pde, n_agents)
+            params = load_params(model, 'decentralized_params.msgpack', n_pde, n_agents)
             print(f"✓ Loaded trained parameters ({n_agents} agents)")
         except FileNotFoundError:
-            print("✗ Error: centralized_params.msgpack not found")
+            print("✗ Error: decentralized_params.msgpack not found")
             return
         
         x_grid = jnp.linspace(0, 1, n_pde)
+        # SAME random seed as centralized for comparison
         key = jax.random.PRNGKey(42)
         
         saved_files = []
@@ -371,6 +369,7 @@ def main():
             print(f"\n▶ Generating Example {i+1}/{n_examples}...")
             
             key, k1, k2 = jax.random.split(key, 3)
+            # SAME initial conditions as centralized
             _, z_init = data_utils.generate_grf(k1, n_points=n_pde, length_scale=0.15 + i*0.05)
             _, z_target = data_utils.generate_grf(k2, n_points=n_pde, length_scale=0.35 + i*0.05)
             xi_init = jnp.linspace(0.15, 0.85, n_agents)
@@ -390,8 +389,7 @@ def main():
             )
             saved_files.append(f1)
             
-            # Create agent analysis figure (only for first example)
-            # if i == 0:
+            # Create agent analysis figure
             f2 = create_agent_analysis_figure(
                 xi_traj, u_traj, v_traj, z_traj_ctrl, z_target, example_idx=i+1
             )
