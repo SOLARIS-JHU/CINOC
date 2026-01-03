@@ -27,7 +27,7 @@ def load_params(model, filepath, n_pde=100, n_agents=8):
     return flax.serialization.from_bytes(init_params, serialized_bytes)
 
 def main():
-    n_pde, n_agents, T_steps = 100, 6, 300 
+    n_pde, n_agents, T_steps = 100, 8, 300 
     solver_ts = Tesseract.from_image("solver_heat_centralized:latest") # Use the image with the flat-vector API
     
     with solver_ts:
