@@ -90,7 +90,7 @@ def loss_fn(params, z_init, xi_init, z_target, dynamics):
     l_accel = jnp.mean(jnp.sum(jnp.diff(v_traj, axis=0)**2, axis=-1))
 
     total_loss = 5.0 * l_track + 0.001 * l_effort + 100.0 * l_bound + \
-                 1.0 * l_coll + 0.1 * l_accel
+                 20.0 * l_coll + 0.1 * l_accel
 
     return total_loss, (l_track, l_effort, l_coll, l_bound)
 
