@@ -20,7 +20,6 @@ import flax.serialization
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
-# Ensure these point to your updated centralized logic
 from dynamics_dual import PDEDynamics 
 from models.policy import ControlNet
 from data_utils import generate_grf

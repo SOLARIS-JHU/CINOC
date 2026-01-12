@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from typing import Sequence
+import flax.linen as nn
 
 class ControlNet(nn.Module):
     """
@@ -397,3 +398,170 @@ class DecentralizedHeat2DControlNet(nn.Module):
         v_raw = nn.Dense(2)(h)
 
         return self.u_max * jnp.tanh(u_raw), self.v_max * jnp.tanh(v_raw)
+    
+def circular_pad(x, pad_width):
+    """
+    Pads the spatial dimensions (H, W) periodically.
+    x shape: (H, W, C) or (Batch, H, W, C)
+    """
+    # Assuming x is (H, W, C) based on your branch logic
+    # We pad axis 0 (H) and axis 1 (W)
+    return jnp.pad(x, ((pad_width, pad_width), (pad_width, pad_width), (0, 0)), mode='wrap')
+
+class GS2DControlNet(nn.Module):
+    features: Sequence[int] = (16, 32, 64)
+    u_max: float = 40.0
+    v_max: float = 2.0
+    n_grid: int = 100
+
+    @nn.compact
+    def __call__(self, s_curr, s_target, xi_curr):
+        # --- 1. Periodic Gradient Calculation ---
+        # error shape: (2, N, N) -> [U_err, V_err]
+        error = s_curr - s_target
+        dx = 1.0 / self.n_grid
+        
+        # Central difference with jnp.roll handles the periodic wrap perfectly
+        grad_ux = (jnp.roll(error[0], -1, axis=1) - jnp.roll(error[0], 1, axis=1)) / (2 * dx)
+        grad_uy = (jnp.roll(error[0], -1, axis=0) - jnp.roll(error[0], 1, axis=0)) / (2 * dx)
+        grad_vx = (jnp.roll(error[1], -1, axis=1) - jnp.roll(error[1], 1, axis=1)) / (2 * dx)
+        grad_vy = (jnp.roll(error[1], -1, axis=0) - jnp.roll(error[1], 1, axis=0)) / (2 * dx)
+
+        # --- 2. Branch: Periodic CNN ---
+        # Stack into (N, N, 6) for CNN processing
+        x = jnp.stack([error[0], error[1], grad_ux, grad_uy, grad_vx, grad_vy], axis=-1)
+        
+        for feat in self.features:
+            # Wrap edges before convolution to maintain topology
+            x = circular_pad(x, pad_width=1)
+            x = nn.Conv(feat, kernel_size=(3, 3), padding='VALID')(x)
+            x = nn.relu(x)
+
+        # Global context: Flatten and compress
+        branch_out = x.reshape(-1)
+        branch_out = branch_out / (jnp.linalg.norm(branch_out) + 1e-6)
+        branch_out = nn.Dense(128)(branch_out)
+        branch_out = nn.tanh(branch_out)
+
+        # --- 3. Trunk: Periodic Fourier Encoding ---
+        # Base frequency of 2*PI ensures sin(0) == sin(1) in the [0, 1] domain
+        freqs = jnp.array([1.0, 2.0, 4.0, 8.0]) * 2.0 * jnp.pi
+        
+        # xi_curr shape: (M, 2)
+        angle_x = xi_curr[:, 0, None] * freqs
+        angle_y = xi_curr[:, 1, None] * freqs
+        
+        trunk_out = jnp.concatenate([
+            jnp.sin(angle_x), jnp.cos(angle_x), 
+            jnp.sin(angle_y), jnp.cos(angle_y)
+        ], axis=-1)
+        
+        for feat in [64, 64]:
+            trunk_out = nn.Dense(feat)(nn.tanh(trunk_out))
+
+        # --- 4. Fusion and Head ---
+        # Broadcast global context to each of the M actuators
+        branch_repeated = jnp.tile(branch_out, (xi_curr.shape[0], 1))
+        combined = jnp.concatenate([branch_repeated, trunk_out], axis=-1)
+        
+        h = nn.Dense(64)(nn.tanh(nn.Dense(64)(combined)))
+        
+        # Output: u (intensities) and v (2D velocities)
+        u = self.u_max * jnp.tanh(nn.Dense(1)(h).squeeze(-1))
+        v = self.v_max * jnp.tanh(nn.Dense(2)(h))
+
+        return u, v
+    
+    
+class DecentralizedGS2DControlNet(nn.Module):
+    features: Sequence[int] = (16, 32)
+    patch_size: int = 16 
+    u_max: float = 15.0  # Damped for stability
+    v_max: float = 0.5   # Damped for stability
+    n_grid: int = 100
+
+    def setup(self):
+        # 2*PI ensures topological continuity (sin(0) == sin(1))
+        self.freqs = jnp.array([1.0, 2.0, 4.0, 8.0]) * 2.0 * jnp.pi
+
+    def extract_periodic_patch(self, field_6ch, xi):
+        """Extracts a local 2D patch by rolling the field to handle torus wrap."""
+        # Convert [0, 1] coords to grid indices
+        center_i = (xi[1] * self.n_grid).astype(int)
+        center_j = (xi[0] * self.n_grid).astype(int)
+        
+        # Roll the field so the agent is always at the array center
+        shift_i = (self.n_grid // 2) - center_i
+        shift_j = (self.n_grid // 2) - center_j
+        rolled = jnp.roll(field_6ch, (shift_i, shift_j), axis=(0, 1))
+        
+        # Slice from center of the rolled field
+        start_i = (self.n_grid // 2) - (self.patch_size // 2)
+        start_j = (self.n_grid // 2) - (self.patch_size // 2)
+        
+        return jax.lax.dynamic_slice(
+            rolled, 
+            (start_i, start_j, 0), 
+            (self.patch_size, self.patch_size, 6)
+        )
+
+    def branch_net(self, p):
+        """Processes the 2D local patch using self-normalization."""
+        for feat in self.features:
+            p = nn.Conv(feat, kernel_size=(3, 3))(p)
+            # Self-normalization instead of LayerNorm/GroupNorm
+            p = p / (jnp.linalg.norm(p) + 1.0) 
+            p = nn.tanh(p)
+        
+        p = p.reshape(-1)
+        p = nn.Dense(64)(p)
+        p = p / (jnp.linalg.norm(p) + 1.0)
+        return nn.tanh(p)
+
+    def trunk_net(self, xi):
+        """Fourier encoding for periodic 2D positions."""
+        angle_x = xi[:, 0, None] * self.freqs
+        angle_y = xi[:, 1, None] * self.freqs
+        encoded = jnp.concatenate([
+            jnp.sin(angle_x), jnp.cos(angle_x), 
+            jnp.sin(angle_y), jnp.cos(angle_y)
+        ], axis=-1)
+        
+        for feat in [32, 32]:
+            encoded = nn.Dense(feat)(encoded)
+            encoded = nn.tanh(encoded)
+        return encoded
+
+    @nn.compact
+    def __call__(self, s_curr, s_target, xi_curr):
+        # 1. Periodic Gradient Calculation (6 Channels)
+        error = s_curr - s_target
+        grad_ux = (jnp.roll(error[0], -1, axis=1) - jnp.roll(error[0], 1, axis=1))
+        grad_uy = (jnp.roll(error[0], -1, axis=0) - jnp.roll(error[0], 1, axis=0))
+        grad_vx = (jnp.roll(error[1], -1, axis=1) - jnp.roll(error[1], 1, axis=1))
+        grad_vy = (jnp.roll(error[1], -1, axis=0) - jnp.roll(error[1], 1, axis=0))
+
+        # Stack into (N, N, 6) for spatial processing
+        full_field = jnp.stack([error[0], error[1], grad_ux, grad_uy, grad_vx, grad_vy], axis=-1)
+
+        # 2. Extract Patches & Process (Branch)
+        patches = jax.vmap(self.extract_periodic_patch, in_axes=(None, 0))(full_field, xi_curr)
+        branch_outs = jax.vmap(self.branch_net)(patches)
+        
+        # 3. Process Position (Trunk)
+        trunk_outs = self.trunk_net(xi_curr)
+
+        # 4. Fusion and Output
+        combined = jnp.concatenate([branch_outs, trunk_outs], axis=-1)
+        x = nn.Dense(64)(combined)
+        x = x / (jnp.linalg.norm(x) + 1.0) # Final stability normalization
+        x = nn.tanh(x)
+        
+        # Output: u (scalar intensity) and v (2D velocity vector)
+        u = self.u_max * jnp.tanh(nn.Dense(1)(x).squeeze(-1))
+        v = self.v_max * jnp.tanh(nn.Dense(2)(x))
+
+        return u, v
+    
+    
+    
