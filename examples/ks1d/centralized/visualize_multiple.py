@@ -16,7 +16,7 @@ script_dir = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
 from examples.ks1d.centralized.dynamics_dual import PDEDynamics
-from models.policy_ks import ControlNet
+from models.policy_ks1d import ControlNet
 import tesseracts.ks1d.solver as solver 
 
 # ═══════════════════════════════════════════════════════════════════════════════

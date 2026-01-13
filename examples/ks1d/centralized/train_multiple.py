@@ -15,7 +15,7 @@ script_dir = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
 from examples.ks1d.centralized.dynamics_dual import PDEDynamics 
-from models.policy_ks import ControlNet
+from models.policy_ks1d import ControlNet
 from examples.ks1d.centralized.data_utils import get_batch_initial_conditions
 
 # --- 1. Multi-Scenario Configuration ---
