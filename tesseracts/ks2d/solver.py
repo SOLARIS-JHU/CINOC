@@ -26,6 +26,26 @@ def forcing_fn_2d(xi_fixed, u_intensities, N, L, sigma):
     forcings = jax.vmap(single_actuator)(xi_fixed, u_intensities)
     return jnp.sum(forcings, axis=0)
 
+# def forcing_fn_2d(xi_fixed, u_intensities, N, L, sigma):
+#     x = jnp.linspace(0, L, N, endpoint=False)
+#     y = jnp.linspace(0, L, N, endpoint=False)
+#     X, Y = jnp.meshgrid(x, y, indexing='ij') 
+    
+#     def single_actuator(pos, intensity):
+#         dx = jnp.abs(X - pos[0])
+#         dx = jnp.minimum(dx, L - dx)
+#         dy = jnp.abs(Y - pos[1])
+#         dy = jnp.minimum(dy, L - dy)
+#         dist_sq = dx**2 + dy**2
+        
+#         # --- Normalize Gaussian so force doesn't vanish when sigma shrinks ---
+#         # Peak is roughly intensity / (2*pi*sigma^2)
+#         norm_factor = 1.0 / (2 * jnp.pi * sigma**2)
+#         return intensity * norm_factor * jnp.exp(-dist_sq / (2 * sigma**2))
+    
+#     forcings = jax.vmap(single_actuator)(xi_fixed, u_intensities)
+#     return jnp.sum(forcings, axis=0)
+
 def precompute_etdrk4_coeffs(L_linear, dt):
     """Precomputes the stability coefficients for ETDRK4."""
     ch = L_linear * dt
@@ -58,43 +78,12 @@ def get_nonlinear(u_hat, kx, ky, dealias_mask, N):
     nl_hat = nl_hat.at[0, 0].set(0.0) 
     return nl_hat
 
-# def ks_spectral_step_etdrk4(u_hat, u_curr_dummy, xi_fixed, u_control, kx, ky, etdrk4_coeffs, dealias_mask, N=128, L=64.0, dt=0.05, sigma=2.5):
-#     E, E2, Q, P1, P2, P3, P4 = etdrk4_coeffs
-#     f_field = forcing_fn_2d(xi_fixed, u_control, N, L, sigma)
-#     f_hat = jnp.fft.rfftn(f_field)
-    
-#     def NL_fn(uh):
-#         return get_nonlinear(uh, kx, ky, dealias_mask, N) + f_hat
-
-#     Nu_n = NL_fn(u_hat)
-#     a = E2 * u_hat + Q * Nu_n * 0.5
-#     Na = NL_fn(a)
-#     b = E2 * u_hat + Q * Na * 0.5
-#     Nb = NL_fn(b)
-#     c = E2 * a + Q * (2.0 * Nb - Nu_n) * 0.5 
-#     Nc = NL_fn(c)
-    
-#     u_hat_next = (E * u_hat + P1 * Nu_n + P2 * Na + P3 * Nb + P4 * Nc)
-#     u_next = jnp.fft.irfftn(u_hat_next, s=(N, N))
-#     return u_hat_next, u_next
-
-def ks_spectral_step_etdrk4(u_hat, u_curr_dummy, xi_fixed, u_control, kx, ky, etdrk4_coeffs, dealias_mask, N=128, L=64.0, dt=0.05, sigma=2.5):
+def ks_spectral_step_etdrk4(u_hat, u_curr_dummy, xi_fixed, u_control, kx, ky, etdrk4_coeffs, dealias_mask, N=128, L=64.0, dt=0.05, sigma=1.2):
     E, E2, Q, P1, P2, P3, P4 = etdrk4_coeffs
-    
-    # 1. Compute Forcing
     f_field = forcing_fn_2d(xi_fixed, u_control, N, L, sigma)
     f_hat = jnp.fft.rfftn(f_field)
     
-    # --- CRITICAL FIX: Zero Mean Condition ---
-    # We remove the DC component (index 0,0) from the force.
-    # This ensures the actuators "stir" the fluid without adding "mass" (drift).
-    f_hat = f_hat.at[0, 0].set(0.0) 
-    
-    # Optional: Apply de-aliasing to force to keep numerics clean
-    f_hat = f_hat * dealias_mask
-
     def NL_fn(uh):
-        # Now f_hat is safe to add because it has 0 mean
         return get_nonlinear(uh, kx, ky, dealias_mask, N) + f_hat
 
     Nu_n = NL_fn(u_hat)
@@ -108,6 +97,37 @@ def ks_spectral_step_etdrk4(u_hat, u_curr_dummy, xi_fixed, u_control, kx, ky, et
     u_hat_next = (E * u_hat + P1 * Nu_n + P2 * Na + P3 * Nb + P4 * Nc)
     u_next = jnp.fft.irfftn(u_hat_next, s=(N, N))
     return u_hat_next, u_next
+
+# def ks_spectral_step_etdrk4(u_hat, u_curr_dummy, xi_fixed, u_control, kx, ky, etdrk4_coeffs, dealias_mask, N=128, L=64.0, dt=0.05, sigma=1.2):
+#     E, E2, Q, P1, P2, P3, P4 = etdrk4_coeffs
+    
+#     # 1. Compute Forcing
+#     f_field = forcing_fn_2d(xi_fixed, u_control, N, L, sigma)
+#     f_hat = jnp.fft.rfftn(f_field)
+    
+#     # --- Zero Mean Condition ---
+#     # We remove the DC component (index 0,0) from the force.
+#     # This ensures the actuators "stir" the fluid without adding "mass" (drift).
+#     f_hat = f_hat.at[0, 0].set(0.0) 
+    
+#     # Optional: Apply de-aliasing to force to keep numerics clean
+#     f_hat = f_hat * dealias_mask
+
+#     def NL_fn(uh):
+#         # Now f_hat is safe to add because it has 0 mean
+#         return get_nonlinear(uh, kx, ky, dealias_mask, N) + f_hat
+
+#     Nu_n = NL_fn(u_hat)
+#     a = E2 * u_hat + Q * Nu_n * 0.5
+#     Na = NL_fn(a)
+#     b = E2 * u_hat + Q * Na * 0.5
+#     Nb = NL_fn(b)
+#     c = E2 * a + Q * (2.0 * Nb - Nu_n) * 0.5 
+#     Nc = NL_fn(c)
+    
+#     u_hat_next = (E * u_hat + P1 * Nu_n + P2 * Na + P3 * Nb + P4 * Nc)
+#     u_next = jnp.fft.irfftn(u_hat_next, s=(N, N))
+#     return u_hat_next, u_next
 
 # --- 2. NEW: Smooth Initial Condition Generator ---
 
@@ -153,7 +173,7 @@ def solve_with_policy(
     N_grid=128, 
     L=64.0, 
     dt=0.01, 
-    sigma=2.5
+    sigma=1.2
 ):
     """
     Full simulation loop controllable by a policy with Action Repetition.
@@ -268,7 +288,7 @@ if __name__ == "__main__":
         ax = axes[i]
         time = idx * DT
         im = ax.imshow(u_history[idx], extent=[0, L_DOMAIN, 0, L_DOMAIN], 
-                       origin='lower', cmap='RdBu_r', vmin=-2.5, vmax=2.5)
+                       origin='lower', cmap='RdBu_r', vmin=-1.2, vmax=1.2)
         ax.set_title(f"t = {time:.2f}")
 
     fig.subplots_adjust(right=0.85)
