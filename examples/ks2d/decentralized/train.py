@@ -1,5 +1,5 @@
 """
-Centralized Training Script for 2D Kuramoto-Sivashinsky (KS)
+Decentralized Training Script for 2D Kuramoto-Sivashinsky (KS)
 Trains a Neural Policy to stabilize chaotic 2D turbulence.
 """
 
@@ -31,17 +31,17 @@ from tesseracts.ks2d.solver import ks_spectral_step_etdrk4, precompute_etdrk4_co
 CONFIG = {
     'N_grid': 64,         
     'L_domain': 32.0,      
-    'dt': 0.05,
+    'dt': 0.005,
     
     # Action Repetition settings
-    'substeps': 5,        # Physics steps per Control step
+    'substeps': 20,        # Physics steps per Control step
     'T_steps': 50,         # Number of Control steps
     # Total Physics Time = 50 * 20 * 0.005 = 5.0 seconds
     
     # Training
-    'n_agents': 49,       
+    'n_agents': 144,       
     'batch_size': 1,
-    'epochs': 500,
+    'epochs': 40,
     'pool_size': 1,       
     
     # Files
@@ -95,7 +95,7 @@ def loss_fn(params, u_init, xi_fixed, u_target, dynamics):
         N_grid=CONFIG['N_grid'],
         L=CONFIG['L_domain'],
         dt=CONFIG['dt'],
-        sigma=2.5 # !!!!
+        sigma=1.2 # !!!!
     )
     
     # 1. Tracking Loss (Stabilize to Target)
@@ -143,7 +143,7 @@ if __name__ == "__main__":
     model = DecentralizedKS2DControlNet(
         features=(64, 128), 
         domain_size=(CONFIG['L_domain'], CONFIG['L_domain']),
-        u_max=2.0
+        u_max=5.0
     )
     
     key, init_key = jax.random.split(key)
@@ -153,7 +153,7 @@ if __name__ == "__main__":
     
     # Optimizer
     lr_schedule = optax.warmup_cosine_decay_schedule(
-        init_value=1e-4, peak_value=1e-3, warmup_steps=50, # warmup was 50 
+        init_value=1e-4, peak_value=1e-3, warmup_steps=10, # warmup was 50 !!!
         decay_steps=CONFIG['epochs'], end_value=1e-5
     )
     optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(lr_schedule))

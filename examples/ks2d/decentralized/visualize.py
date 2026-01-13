@@ -1,6 +1,6 @@
 """
 Conference-Quality Visualization for KS-2D Centralized Control.
-Generates a "Chaos -> Control" transition figure with 2D snapshots and energy metrics.
+Adapted for High-Density Control (144 Agents, Sigma=1.2).
 """
 
 import jax
@@ -12,7 +12,7 @@ import sys
 import flax.serialization
 from pathlib import Path
 
-# Force CPU for visualization
+# Force CPU for visualization (avoids OOM on small GPUs during plotting)
 jax.config.update("jax_platform_name", "cpu")
 jax.config.update("jax_enable_x64", True)
 
@@ -25,26 +25,26 @@ from models.policy_ks2d import DecentralizedKS2DControlNet
 from data_utils import get_batch_initial_conditions
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 1. CONFIGURATION (Matched to Memorization Experiment)
+# 1. CONFIGURATION (Matched to Your LATEST Training)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 CONFIG = {
     'N_grid': 64,
     'L_domain': 32.0,
-    'dt': 0.05,            
     
-    # Must match training exactly
-    'substeps': 5,         
-    'n_agents': 49,         
+    # --- CRITICAL: MATCH TRAINING EXACTLY ---
+    'dt': 0.005,           # High-res physics
+    'substeps': 20,        # 20 physics steps per control step
+    'n_agents': 144,       # 12x12 Grid
     
     # Visualization Timeline 
-    'T_chaos_steps': 50,    
-    'T_control_steps': 50, 
+    # Control Step size = 20 * 0.005 = 0.1s
+    'T_chaos_steps': 20,   # 2.0 seconds of chaos
+    'T_control_steps': 50, # 5.0 seconds of control (slightly longer than training)
     
     # Snapshots to display (Physical Time)
-    # T=0 is control ON. 
-    # Horizon is 150 * 20 * 0.005 = 15.0 seconds
-    'snapshot_times': [-2.0, 0.0, 2.0, 5.0, 14.0], 
+    # T=0 is the moment Control turns ON.
+    'snapshot_times': [-1.0, 0.0, 1., 2.5, 5.], 
     
     'params_file': 'ks2d_centralized_params.msgpack'
 }
@@ -87,25 +87,25 @@ def generate_transition_data(key, model, params):
     u_target = jnp.zeros_like(u0)
     
     # 3. Phase 1: Run Uncontrolled
-    print(f"  [Sim] Running Chaos Phase...")
+    print(f"  [Sim] Running Chaos Phase ({CONFIG['T_chaos_steps']*CONFIG['substeps']*CONFIG['dt']:.1f}s)...")
     u_traj_chaos, _, _, _ = dyn_chaos.unroll_controlled(
         u0, xi_fixed, u_target, params,
         t_steps=CONFIG['T_chaos_steps'],
         substeps=CONFIG['substeps'],
         N_grid=CONFIG['N_grid'], L=CONFIG['L_domain'], dt=CONFIG['dt'], 
-        sigma=2.5 
+        sigma=1.2 # Match training sigma!
     )
     
     # 4. Phase 2: Run Controlled
     u_handoff = u_traj_chaos[-1]
     
-    print(f"  [Sim] Running Control Phase...")
+    print(f"  [Sim] Running Control Phase ({CONFIG['T_control_steps']*CONFIG['substeps']*CONFIG['dt']:.1f}s)...")
     u_traj_ctrl, _, u_force_ctrl, _ = dyn_control.unroll_controlled(
         u_handoff, xi_fixed, u_target, params,
         t_steps=CONFIG['T_control_steps'],
         substeps=CONFIG['substeps'],
         N_grid=CONFIG['N_grid'], L=CONFIG['L_domain'], dt=CONFIG['dt'], 
-        sigma=2.5 # <--- CRITICAL: Match Training Sigma (was 1.0)
+        sigma=1.2 # <--- CRITICAL: Match Training Sigma (was 2.5 in old script)
     )
     
     # 5. Stitch
@@ -122,8 +122,9 @@ def generate_transition_data(key, model, params):
     return t_full, u_full, u_force_ctrl
 
 def get_actuator_grid():
-    """Reconstructs the 7x7 grid."""
+    """Reconstructs the 12x12 grid automatically from n_agents."""
     grid_dim = int(np.sqrt(CONFIG['n_agents']))
+    # Calculate exact positions used in training
     x_lin = np.linspace(0, CONFIG['L_domain'], grid_dim, endpoint=False) + (CONFIG['L_domain']/grid_dim)/2
     xv, yv = np.meshgrid(x_lin, x_lin)
     return jnp.stack([xv.flatten(), yv.flatten()], axis=-1)
@@ -145,6 +146,7 @@ def setup_academic_style():
 def plot_2d_transition(t_full, u_full, u_force_ctrl, save_name="ks2d_transition.png"):
     setup_academic_style()
     
+    # Calculate Energy (L2 norm)
     energy = jnp.mean(u_full**2, axis=(1,2))
     
     fig = plt.figure(figsize=(16, 9))
@@ -154,6 +156,7 @@ def plot_2d_transition(t_full, u_full, u_force_ctrl, save_name="ks2d_transition.
     target_times = np.array(CONFIG['snapshot_times'])
     snap_indices = []
     
+    # Find closest frames to target times
     for t_req in target_times:
         idx = (np.abs(t_full - t_req)).argmin()
         snap_indices.append(idx)
@@ -179,6 +182,7 @@ def plot_2d_transition(t_full, u_full, u_force_ctrl, save_name="ks2d_transition.
         ax.set_xticks([0, CONFIG['L_domain']])
         ax.set_xlabel(r"$x$")
         
+        # Title Logic
         if t_snap < -1e-3:
             status = "Chaos"
             color = 'firebrick'
@@ -189,20 +193,22 @@ def plot_2d_transition(t_full, u_full, u_force_ctrl, save_name="ks2d_transition.
             status = "Switching"
             color = 'black'
             
+        # Add colored border for clarity
         for spine in ax.spines.values():
             spine.set_edgecolor(color)
             spine.set_linewidth(2.0)
             
         ax.set_title(f"t = {t_snap:.1f}s\n{status}", color=color, fontweight='bold')
         
+        # Plot Actuators (small dots)
         xi = get_actuator_grid()
-        ax.scatter(xi[:,0], xi[:,1], c='k', s=20, alpha=0.3) # Increased size slightly for 7x7
+        ax.scatter(xi[:,0], xi[:,1], c='k', s=10, alpha=0.3, marker='x') 
 
     cax = fig.add_axes([0.92, 0.55, 0.015, 0.3])
     cb = plt.colorbar(im, cax=cax)
     cb.set_label(r"Vorticity $u(x,y)$")
 
-    # --- Row 2: Energy ---
+    # --- Row 2: Energy Trace ---
     ax_ts = fig.add_subplot(gs[1])
     
     mask_chaos = t_full <= 0
@@ -218,9 +224,14 @@ def plot_2d_transition(t_full, u_full, u_force_ctrl, save_name="ks2d_transition.
     ax_ts.set_xlabel("Time (s)")
     ax_ts.legend(loc='upper right')
     ax_ts.grid(True, which='both', linestyle='--', alpha=0.3)
-    ax_ts.set_title("(b) System Stabilization", loc='left', fontweight='bold')
+    
+    # Annotate final energy
+    final_e = energy[-1]
+    ax_ts.text(t_full[-1], final_e, f" Final: {final_e:.2e}", va='center', ha='right', fontweight='bold')
 
-    plt.suptitle(f"2D KS Stabilization (Substeps={CONFIG['substeps']}, Grid={CONFIG['n_agents']})", y=0.98, fontsize=18)
+    ax_ts.set_title("(b) System Stabilization (Log Scale)", loc='left', fontweight='bold')
+
+    plt.suptitle(f"2D KS Stabilization (144 Agents, $\sigma$=1.2, $u_{{max}}$=5.0)", y=0.98, fontsize=18)
     plt.savefig(save_name, dpi=150, bbox_inches='tight')
     print(f"✓ Saved visualization to {save_name}")
     plt.close()
@@ -230,12 +241,13 @@ def plot_2d_transition(t_full, u_full, u_force_ctrl, save_name="ks2d_transition.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("--- 2D KS Visualization Script (Memorization Check) ---")
+    print("--- 2D KS Visualization Script (High Density) ---")
     
+    # 1. Re-Initialize Model with correct u_max
     model = DecentralizedKS2DControlNet(
         features=(64, 128), 
         domain_size=(CONFIG['L_domain'], CONFIG['L_domain']),
-        u_max=2.0
+        u_max=5.0  # <--- MUST MATCH TRAINING
     )
     
     try:
@@ -246,7 +258,7 @@ if __name__ == "__main__":
         print("Run training first to generate parameters.")
         sys.exit(1)
         
-    key = jax.random.PRNGKey(42)
+    key = jax.random.PRNGKey(101) # Change seed to see different initial states
     t_full, u_full, u_force = generate_transition_data(key, model, params)
     
     plot_2d_transition(t_full, u_full, u_force)

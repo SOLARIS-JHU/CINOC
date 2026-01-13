@@ -87,7 +87,7 @@ def evolve_to_attractor(key, N_grid, L, warmup_time=200.0, dt=0.005):
         u_hat_next, u_next = ks_spectral_step_etdrk4(
             u_hat_curr, u_curr, xi_dummy, u_control_dummy,
             KX, KY, etdrk4_coeffs, dealias_mask,
-            N=N_grid, L=L, dt=dt, sigma=2.5
+            N=N_grid, L=L, dt=dt, sigma=1.2
         )
         return (u_hat_next, u_next), None
 
