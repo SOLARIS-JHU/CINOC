@@ -37,7 +37,7 @@ from models.policy_ns2d import NS2DControlNet
 # Grid/physics from config (loaded at runtime)
 # These are set as module constants for sharing with visualize.py
 N_AGENTS = 9         # 4x4 grid of stationary agents
-T_STEPS = 100         # Simulation horizon
+T_STEPS = 150         # Simulation horizon
 BATCH_SIZE = 2        # Reduced for memory
 EPOCHS = 1000
 
@@ -48,7 +48,7 @@ SIGMA_PUSH = 0.2      # Wide push influence
 
 # Control limits
 U_MAX = 1.0           # Max injection intensity
-PUSH_MAX = 0.2        # Max push velocity (new!)
+PUSH_MAX = 0.8       # Max push velocity (new!)
 FEATURES = (16, 32)   # CNN feature channels
 
 # Loss weights (tuned for blob transport)
@@ -58,9 +58,9 @@ W_SHAPE = 0.0         # Shape matching - DISABLED
 # Constraints: prevent bad behavior
 W_EFFORT = 0.001      # Effort regularization (keep controls reasonable)
 W_BOUND = 20.0        # Boundary penalty (agents stay in domain)
-W_COLL = 400.0         # Collision avoidance (agents don't overlap)
+W_COLL = 1000.0       # Collision avoidance - STRONG to prevent collapse
 W_ACCEL = 0.05        # Acceleration smoothness (smooth control signals)
-R_SAFE = 0.08         # Collision radius
+R_SAFE = 0.15         # Collision radius - increased for 9 agents
 
 
 # =============================================================================

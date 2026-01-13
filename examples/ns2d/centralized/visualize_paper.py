@@ -378,7 +378,7 @@ def main():
     
     # Load config
     data_dir = Path(__file__).parent.parent / 'data'
-    config = np.load(data_dir / 'config.npz')
+    config = np.load(data_dir / 'config.npz', allow_pickle=True)
     Nx = int(config['Nx'])
     Ny = int(config['Ny'])
     dt = float(config['dt'])
@@ -387,7 +387,7 @@ def main():
     print(f"\nGrid: {Nx}x{Ny}, Agents: {n_agents}")
     
     # Load test data
-    test_data = np.load(data_dir / 'test_data.npz')
+    test_data = np.load(data_dir / 'test_data.npz', allow_pickle=True)
     
     # Load model
     model = NS2DControlNet(features=FEATURES, v_max=PUSH_MAX)
@@ -469,7 +469,7 @@ def main():
             sample_idx=sample_idx,
             output_gif=str(save_dir / f'ns2d_sample_{sample_idx+1}.gif'),
             output_mp4=str(save_dir / f'ns2d_sample_{sample_idx+1}.mp4'),
-            fps=10, skip_frames=5
+            fps=9, skip_frames=2
         )
     
     # Print summary

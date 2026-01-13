@@ -26,32 +26,6 @@ from phi.jax.flow import *
 # JAX-Compatible NS2D Step Function
 # =============================================================================
 
-def create_inflow_field(
-    xi: jnp.ndarray,           # Agent positions (n_agents, 2) in [0,1] normalized coords
-    intensities: jnp.ndarray,  # Injection intensities (n_agents,)
-    Nx: int,
-    Ny: int,
-    sigma: float = 0.05
-) -> jnp.ndarray:
-    """
-    Create smoke inflow field from Gaussian agents (JAX-compatible).
-    
-    Returns: Inflow field (Nx, Ny)
-    """
-    # Grid coordinates in normalized space [0,1] x [0, Ly/Lx]
-    x = jnp.linspace(0, 1, Nx)
-    y = jnp.linspace(0, 1.25, Ny)  # Domain aspect ratio
-    X, Y = jnp.meshgrid(x, y, indexing='ij')
-    
-    def single_agent_kernel(pos, intensity):
-        dist_sq = (X - pos[0])**2 + (Y - pos[1])**2
-        kernel = jnp.exp(-dist_sq / (2 * sigma**2))
-        return intensity * kernel
-    
-    # Vectorized over agents
-    inflows = jax.vmap(single_agent_kernel)(xi, intensities)
-    return jnp.sum(inflows, axis=0)
-
 
 def create_velocity_field(
     xi: jnp.ndarray,           # Agent positions (n_agents, 2)
@@ -142,13 +116,19 @@ def ns2d_step_jax(
     sigma_push: float = 0.2,      # Wide influence
     Nx: int = 64,
     Ny: int = 80,
-    advect_strength: float = 0.3  # How strongly fans push (0-1)
+    advect_strength: float = 0.3,  # How strongly fans push (0-1)
+    natural_advection: float = 0.003,  # Background upward drift velocity
+    diffusion_coef: float = 0.01      # Diffusion coefficient for spreading
 ) -> jnp.ndarray:
     """
     NS2D step with semi-Lagrangian advection for stability.
     
     Uses backtracing with bilinear interpolation for stable advection.
     Boundary conditions: zero-flux (Neumann).
+    
+    Natural dynamics: Even without control, smoke will:
+    - Drift upward naturally (like hot smoke rising)
+    - Diffuse/spread over time
     """
     # 1. Fan-only mode: No injection (intensities are always zero)
     # The inflow step is skipped for stability in fan-only control
@@ -156,17 +136,23 @@ def ns2d_step_jax(
     # 2. Create velocity field from agent push controls
     u_control, v_control = create_velocity_field(xi, push_velocities, Nx, Ny, sigma_push)
     
-    # 3. Add weak buoyancy
-    v_total = v_control + buoyancy * smoke
-    u_total = u_control
+    # 3. Add NATURAL background advection (upward drift like buoyancy/convection)
+    # This makes uncontrolled evolution interesting - smoke rises naturally
+    v_natural = jnp.ones((Nx, Ny)) * natural_advection
+    u_natural = jnp.zeros((Nx, Ny))  # No horizontal drift by default
     
-    # Scale velocities by advect_strength for controllable pushing
-    # Use a MUCH smaller advect_strength to prevent smoke from disappearing
-    effective_advect = advect_strength * 0.1  # Reduce by 10x
-    u_total = u_total * effective_advect
-    v_total = v_total * effective_advect
+    # 4. Add weak buoyancy (density-dependent upward flow)
+    v_buoyancy = buoyancy * smoke
     
-    # 4. Semi-Lagrangian advection (stable for any CFL)
+    # 5. Combine all velocity components
+    u_total = u_control + u_natural
+    v_total = v_control + v_natural + v_buoyancy
+    
+    # Apply control with full strength (advect_strength scales control authority)
+    u_total = u_control * advect_strength + u_natural
+    v_total = v_control * advect_strength + v_natural + v_buoyancy
+    
+    # 6. Semi-Lagrangian advection (stable for any CFL)
     # Create grid coordinates
     ix = jnp.arange(Nx)
     iy = jnp.arange(Ny)
@@ -179,8 +165,9 @@ def ns2d_step_jax(
     u_grid = u_total * (Nx - 1)  # Convert to grid units
     v_grid = v_total * (Ny - 1) / 1.25  # Account for aspect ratio
     
-    # CFL limiter: clamp max displacement to 0.5 grid cells per timestep
-    # This prevents smoke from being advected too aggressively
+
+    # CFL limiter: clamp max displacement per timestep
+    # Relaxed to allow stronger control authority
     max_cfl = 0.5
     displacement_mag = jnp.sqrt(u_grid**2 + v_grid**2)
     scale_factor = jnp.where(displacement_mag > max_cfl, 
@@ -196,22 +183,30 @@ def ns2d_step_jax(
     # Sample smoke from source locations (with clamped boundaries)
     smoke_advected = bilinear_sample(smoke, X_src, Y_src)
     
-    # 5. Minimal diffusion for smoothing (optional, can be disabled)
-    # Using a conservative kernel that sums to 1.0
-    kernel = jnp.array([[0.002, 0.004, 0.002],
-                        [0.004, 0.976, 0.004],
-                        [0.002, 0.004, 0.002]])
+    # 7. Diffusion - spreads smoke over time (Gaussian kernel convolution)
+    # Larger diffusion_coef = more spreading
+    # Kernel is parameterized by diffusion coefficient
+    center_weight = 1.0 - 4 * diffusion_coef
+    edge_weight = diffusion_coef
+    kernel = jnp.array([[0.0, edge_weight, 0.0],
+                        [edge_weight, center_weight, edge_weight],
+                        [0.0, edge_weight, 0.0]])
     from jax.scipy.signal import convolve2d
     smoke_new = convolve2d(smoke_advected, kernel, mode='same')
     
-    # 6. Enforce zero-flux boundaries by copying edge values
-    # This prevents smoke from "leaking" out
-    smoke_new = smoke_new.at[0, :].set(smoke_new[1, :])
-    smoke_new = smoke_new.at[-1, :].set(smoke_new[-2, :])
-    smoke_new = smoke_new.at[:, 0].set(smoke_new[:, 1])
-    smoke_new = smoke_new.at[:, -1].set(smoke_new[:, -2])
+    # 8. NO-FLOW BOUNDARIES: Enforce zero-flux (Neumann) with multi-cell buffer
+    # Copy edge values to prevent smoke from leaking out
+    # Use 2-cell buffer for stability
+    smoke_new = smoke_new.at[0, :].set(smoke_new[2, :])
+    smoke_new = smoke_new.at[1, :].set(smoke_new[2, :])
+    smoke_new = smoke_new.at[-1, :].set(smoke_new[-3, :])
+    smoke_new = smoke_new.at[-2, :].set(smoke_new[-3, :])
+    smoke_new = smoke_new.at[:, 0].set(smoke_new[:, 2])
+    smoke_new = smoke_new.at[:, 1].set(smoke_new[:, 2])
+    smoke_new = smoke_new.at[:, -1].set(smoke_new[:, -3])
+    smoke_new = smoke_new.at[:, -2].set(smoke_new[:, -3])
     
-    # 7. Clip to valid range (smoke density must be non-negative)
+    # 9. Clip to valid range (smoke density must be non-negative)
     smoke_new = jnp.clip(smoke_new, 0, 5)
     
     return smoke_new
@@ -368,9 +363,8 @@ def unroll_with_full_loss(
             sigma_push=sigma_push, Nx=Nx, Ny=Ny
         )
         
-        # Mobile agents: move in push direction (agents follow their push)
-        # Reduced speed factor (0.1 instead of 0.5) to prevent boundary piling
-        xi_new = xi + dt * push_vel * 0.1
+        # Mobile agents: move slowly in push direction
+        xi_new = xi + dt * push_vel * 0.01
         xi_new = jnp.clip(xi_new, domain_margin, jnp.array([1.0 - domain_margin, 1.25 - domain_margin]))
         
         return (smoke_new, xi_new), (smoke_new, xi_new, intensities, push_vel)
@@ -395,10 +389,10 @@ def unroll_with_full_loss(
     # vmap over time dimension to get loss at each timestep
     track_losses = jax.vmap(tracking_loss_at_t)(smoke_traj)  # (T,)
     
-    # Mean over time + extra weight on final timestep for terminal accuracy
+    # Uniform sum over time (reach + hold objective) + terminal for stability
     l_track_mean = jnp.mean(track_losses)
     l_track_terminal = compute_smooth_loss(smoke_final, rho_target)
-    l_track = 0.5 * l_track_mean + 0.5 * l_track_terminal  # Balance running + terminal
+    l_track = l_track_mean + 1.0 * l_track_terminal  # Equal weighting for stability
     
     # 2. Effort loss (already accumulated)
     l_effort = jnp.mean(u_traj ** 2) + 0.1 * jnp.mean(jnp.sum(v_traj ** 2, axis=-1))
@@ -429,30 +423,6 @@ def unroll_with_full_loss(
     return smoke_final, xi_final, l_track, l_effort, l_bound, l_coll, l_accel, l_shape
 
 
-# Legacy function for backward compatibility
-@partial(jax.jit, static_argnames=['policy_apply_fn', 't_steps', 'Nx', 'Ny'])
-def unroll_with_loss(
-    smoke_init: jnp.ndarray,
-    xi_init: jnp.ndarray,
-    rho_target: jnp.ndarray,
-    params,
-    policy_apply_fn: Callable,
-    t_steps: int,
-    Nx: int = 64,
-    Ny: int = 80,
-    dt: float = 1.0,
-    buoyancy: float = 0.5,
-    sigma: float = 0.05,
-    u_max: float = 1.0,
-    v_max: float = 0.1
-) -> Tuple[jnp.ndarray, jnp.ndarray, float, float]:
-    """Legacy wrapper - returns only track and effort losses."""
-    smoke_final, xi_final, l_track, l_effort, _, _, _ = unroll_with_full_loss(
-        smoke_init, xi_init, rho_target, params, policy_apply_fn, t_steps,
-        Nx=Nx, Ny=Ny, n_agents=xi_init.shape[0], dt=dt, buoyancy=buoyancy,
-        sigma=sigma, u_max=u_max, v_max=v_max
-    )
-    return smoke_final, xi_final, l_track, l_effort
 
 
 @partial(jax.jit, static_argnames=['policy_apply_fn', 't_steps', 'Nx', 'Ny'])
@@ -500,9 +470,8 @@ def unroll_controlled(
             sigma_push=sigma_push, Nx=Nx, Ny=Ny
         )
         
-        # Mobile agents: move in push direction
-        # Reduced speed factor (0.1 instead of 0.5) to prevent boundary piling
-        xi_new = xi + dt * push_vel * 0.1
+        # Mobile agents: move slowly in push direction
+        xi_new = xi + dt * push_vel * 0.01
         xi_new = jnp.clip(xi_new, 0.1, jnp.array([0.9, 1.15]))
         
         return (smoke_new, xi_new), (smoke_new, xi_new, intensities, push_vel)
@@ -528,24 +497,22 @@ if __name__ == "__main__":
     n_agents = 4
     t_steps = 50
     
-    # Dummy policy (zero control)
+    # Dummy policy (zero control - fan only)
     def dummy_policy(params, smoke, target, xi):
-        n_agents = xi.shape[0]
-        return jnp.ones(n_agents) * 0.5, jnp.zeros((n_agents, 2))
+        n = xi.shape[0]
+        return jnp.zeros(n), jnp.zeros((n, 2))  # No injection, no push
     
     # Initial conditions
-    key = jax.random.PRNGKey(42)
     smoke_init = jnp.zeros((Nx, Ny))
     xi_init = jnp.array([[0.25, 0.1], [0.4, 0.1], [0.6, 0.1], [0.75, 0.1]])
     rho_target = jnp.zeros((Nx, Ny))
     
-    # Test rollout
-    smoke_final, xi_final, l_track, l_effort = unroll_with_loss(
+    # Test rollout using unroll_controlled
+    smoke_traj, xi_traj, u_traj, v_traj = unroll_controlled(
         smoke_init, xi_init, rho_target, None, dummy_policy, t_steps,
         Nx=Nx, Ny=Ny
     )
     
-    print(f"Smoke final range: [{float(smoke_final.min()):.3f}, {float(smoke_final.max()):.3f}]")
-    print(f"Tracking loss: {float(l_track):.4f}")
-    print(f"Effort loss: {float(l_effort):.4f}")
+    print(f"Smoke trajectory shape: {smoke_traj.shape}")
+    print(f"Smoke range: [{float(smoke_traj.min()):.3f}, {float(smoke_traj.max()):.3f}]")
     print("Done!")
