@@ -26,7 +26,7 @@ from tqdm import trange, tqdm
 import flax.serialization
 import numpy as np
 
-from examples.ns2d.centralized.dynamics import unroll_with_loss, unroll_controlled
+from examples.ns2d.centralized.dynamics import unroll_with_full_loss, unroll_controlled
 from models.policy_ns2d import NS2DControlNet
 
 
@@ -36,16 +36,31 @@ from models.policy_ns2d import NS2DControlNet
 
 # Grid/physics from config (loaded at runtime)
 # These are set as module constants for sharing with visualize.py
-N_AGENTS = 25         # 5x5 grid of agents
+N_AGENTS = 9         # 4x4 grid of stationary agents
 T_STEPS = 100         # Simulation horizon
-BATCH_SIZE = 4        # Reduced for CNN memory
-EPOCHS = 500
-U_MAX = 10.0          # Max injection intensity
-V_MAX = 0.5           # Max agent velocity
-SIGMA = 0.05          # Agent kernel width
-W_TRACK = 1.0         # Tracking loss weight
-W_EFFORT = 0.01       # Effort loss weight
+BATCH_SIZE = 2        # Reduced for memory
+EPOCHS = 1000
+
+# Physics parameters (conservative for fan control)
+BUOYANCY = 0.0        # NO buoyancy - smoke only moves when pushed by fans
+SIGMA_INJECT = 0.08   # Not used in fan-only mode
+SIGMA_PUSH = 0.2      # Wide push influence
+
+# Control limits
+U_MAX = 1.0           # Max injection intensity
+PUSH_MAX = 0.2        # Max push velocity (new!)
 FEATURES = (16, 32)   # CNN feature channels
+
+# Loss weights (tuned for blob transport)
+# Primary objective: reach target position with correct shape
+W_TRACK = 10.0        # Tracking loss - MAIN objective
+W_SHAPE = 0.0         # Shape matching - DISABLED
+# Constraints: prevent bad behavior
+W_EFFORT = 0.001      # Effort regularization (keep controls reasonable)
+W_BOUND = 20.0        # Boundary penalty (agents stay in domain)
+W_COLL = 400.0         # Collision avoidance (agents don't overlap)
+W_ACCEL = 0.05        # Acceleration smoothness (smooth control signals)
+R_SAFE = 0.08         # Collision radius
 
 
 # =============================================================================
@@ -68,13 +83,14 @@ def main():
     Nx = int(config['Nx'])
     Ny = int(config['Ny'])
     dt = float(config['dt'])
-    buoyancy = float(config['buoyancy'])
     
-    # Use module-level constants (not from config)
+    # Use module-level constants
     n_agents = N_AGENTS
-    sigma = SIGMA
+    buoyancy = BUOYANCY
+    sigma_inject = SIGMA_INJECT
+    sigma_push = SIGMA_PUSH
     
-    print(f"\nGrid: {Nx}x{Ny}, Agents: {n_agents}")
+    print(f"\nGrid: {Nx}x{Ny}, Agents: {n_agents} (stationary)")
     
     train_data = np.load(data_dir / 'train_data.npz')
     pool_size = len(train_data['rho_init'])
@@ -85,15 +101,12 @@ def main():
     batch_size = BATCH_SIZE
     epochs = EPOCHS
     u_max = U_MAX
-    v_max = V_MAX
-    w_track = W_TRACK
-    w_effort = W_EFFORT
+    push_max = PUSH_MAX
     
-    # Model (CNN-based, no pooling)
+    # Model (Fan-only - agents push smoke, don't inject)
     model = NS2DControlNet(
         features=FEATURES,
-        u_max=u_max,
-        v_max=v_max
+        v_max=push_max  # Only push velocity matters
     )
     
     key = jax.random.PRNGKey(42)
@@ -118,14 +131,20 @@ def main():
     )
     opt_state = optimizer.init(params)
     
-    # Loss function
+    # Loss function with velocity control and shape preservation
     def loss_fn(params, smoke_init, xi_init, rho_target):
-        smoke_final, xi_final, l_track, l_effort = unroll_with_loss(
+        smoke_final, xi_final, l_track, l_effort, l_bound, l_coll, l_accel, l_shape = unroll_with_full_loss(
             smoke_init, xi_init, rho_target, params, model.apply, T_steps,
-            Nx=Nx, Ny=Ny, dt=dt, buoyancy=buoyancy, sigma=sigma,
-            u_max=u_max, v_max=v_max
+            Nx=Nx, Ny=Ny, n_agents=n_agents, dt=dt, buoyancy=buoyancy,
+            sigma_inject=sigma_inject, sigma_push=sigma_push,
+            u_max=u_max, push_max=push_max, R_safe=R_SAFE
         )
-        return w_track * l_track + w_effort * l_effort, (l_track, l_effort)
+        
+        total_loss = W_TRACK * l_track + W_EFFORT * l_effort + \
+                     W_BOUND * l_bound + W_COLL * l_coll + W_ACCEL * l_accel + \
+                     W_SHAPE * l_shape
+        
+        return total_loss, (l_track, l_effort, l_coll, l_shape)
     
     batched_loss_fn = jax.vmap(loss_fn, in_axes=(None, 0, 0, 0))
     
@@ -166,11 +185,13 @@ def main():
         )
         
         if epoch % 10 == 0:
-            l_track, l_effort = aux
-            metrics.append((epoch, float(loss), float(l_track), float(l_effort)))
+            l_track, l_effort, l_coll, l_shape = aux
+            metrics.append((epoch, float(loss), float(l_track), float(l_effort), 
+                          float(l_coll), float(l_shape)))
             
             if epoch % 50 == 0:
-                tqdm.write(f"Ep {epoch} | Loss: {loss:.4f} | Track: {l_track:.4f} | Effort: {l_effort:.4f}")
+                tqdm.write(f"Ep {epoch} | Loss: {loss:.4f} | Track: {l_track:.4f} | " +
+                          f"Effort: {l_effort:.4f} | Coll: {l_coll:.4f} | Shape: {l_shape:.4f}")
     
     elapsed = time.time() - start_time
     print(f"\nTraining completed in {elapsed:.1f}s")
@@ -181,21 +202,31 @@ def main():
         f.write(flax.serialization.to_bytes(params))
     print(f"Saved: {save_path}")
     
-    # Plot training curves
+    # Plot training curves (2x2 like heat2D)
     metrics = np.array(metrics)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     
-    axes[0].plot(metrics[:, 0], metrics[:, 1])
-    axes[0].set_title('Total Loss')
-    axes[0].set_xlabel('Epoch')
-    axes[0].set_yscale('log')
+    axes[0, 0].plot(metrics[:, 0], metrics[:, 1])
+    axes[0, 0].set_title('Total Loss')
+    axes[0, 0].set_xlabel('Epoch')
+    axes[0, 0].set_yscale('log')
     
-    axes[1].plot(metrics[:, 0], metrics[:, 2], label='Tracking')
-    axes[1].plot(metrics[:, 0], metrics[:, 3], label='Effort')
-    axes[1].set_title('Loss Components')
-    axes[1].set_xlabel('Epoch')
-    axes[1].set_yscale('log')
-    axes[1].legend()
+    axes[0, 1].plot(metrics[:, 0], metrics[:, 2])
+    axes[0, 1].set_title('Tracking Loss')
+    axes[0, 1].set_xlabel('Epoch')
+    axes[0, 1].set_yscale('log')
+    
+    axes[1, 0].plot(metrics[:, 0], metrics[:, 3])
+    axes[1, 0].set_title('Effort Loss')
+    axes[1, 0].set_xlabel('Epoch')
+    axes[1, 0].set_yscale('log')
+    
+    axes[1, 1].plot(metrics[:, 0], metrics[:, 4], label='Collision')
+    axes[1, 1].plot(metrics[:, 0], metrics[:, 5], label='Shape')
+    axes[1, 1].set_title('Collision & Shape Loss')
+    axes[1, 1].set_xlabel('Epoch')
+    axes[1, 1].set_yscale('log')
+    axes[1, 1].legend()
     
     plt.tight_layout()
     plt.savefig(Path(__file__).parent / 'training_curves.png', dpi=150)

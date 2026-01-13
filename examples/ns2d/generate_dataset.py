@@ -190,15 +190,14 @@ def generate_dataset(
     n_samples: int,
     Nx: int = 64,
     Ny: int = 80,
-    seed: int = 42
+    seed: int = 42,
+    shape_type: str = 'blob'  # Focus on simpler shapes for learning
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate training/test dataset of structured (initial, target) pairs.
     
-    Distribution: translation
-    # - 50% translation (blob/ring/double)
-    # - 25% expansion
-    # - 25% concentration
+    For advection learning, we focus on blob translation which is the
+    most learnable task for fan-only control.
     """
     rng = np.random.default_rng(seed)
     
@@ -206,18 +205,8 @@ def generate_dataset(
     rho_target = np.zeros((n_samples, Nx, Ny))
     
     for i in range(n_samples):
-        # Choose task type
-        # task_type = rng.choice(['translate', 'expand', 'concentrate'], 
-        #                        p=[0.5, 0.25, 0.25])
-        task_type = 'translate'
-        
-        if task_type == 'translate':
-            shape = rng.choice(['blob', 'ring', 'double_blob'])
-            init, target = generate_translation_pair(Nx, Ny, shape, rng)
-        elif task_type == 'expand':
-            init, target = generate_expansion_pair(Nx, Ny, rng)
-        else:
-            init, target = generate_concentration_pair(Nx, Ny, rng)
+        # Use specified shape type for consistency
+        init, target = generate_translation_pair(Nx, Ny, shape_type, rng)
         
         rho_init[i] = init
         rho_target[i] = target
@@ -308,11 +297,13 @@ def visualize_task_types(Nx, Ny, seed=42, filename='task_types.png'):
 
 def main():
     parser = argparse.ArgumentParser(description='Generate NS2D shape formation dataset')
-    parser.add_argument('--n_train', type=int, default=200, help='Number of training samples')
-    parser.add_argument('--n_test', type=int, default=50, help='Number of test samples')
+    parser.add_argument('--n_train', type=int, default=1000, help='Number of training samples')
+    parser.add_argument('--n_test', type=int, default=100, help='Number of test samples')
     parser.add_argument('--Nx', type=int, default=64, help='Grid resolution X')
     parser.add_argument('--Ny', type=int, default=80, help='Grid resolution Y')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--shape', type=str, default='blob', choices=['blob', 'ring', 'double_blob'],
+                        help='Shape type for translation task')
     args = parser.parse_args()
     
     print("="*60)
@@ -338,18 +329,19 @@ def main():
     print(f"Agents: {config['n_agents']}")
     print(f"Training samples: {args.n_train}")
     print(f"Test samples: {args.n_test}")
+    print(f"Shape type: {args.shape}")
     
     # Generate training data
     print("\nGenerating training data...")
-    print("  Task distribution: 50% translation, 25% expansion, 25% concentration")
+    print(f"  Shape type: {args.shape} (blob-only for easier learning)")
     rho_init_train, rho_target_train = generate_dataset(
-        args.n_train, args.Nx, args.Ny, seed=args.seed
+        args.n_train, args.Nx, args.Ny, seed=args.seed, shape_type=args.shape
     )
     
     # Generate test data
     print("Generating test data...")
     rho_init_test, rho_target_test = generate_dataset(
-        args.n_test, args.Nx, args.Ny, seed=args.seed + 1000
+        args.n_test, args.Nx, args.Ny, seed=args.seed + 1000, shape_type=args.shape
     )
     
     # Save

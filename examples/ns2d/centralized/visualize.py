@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 import flax.serialization
 from examples.ns2d.centralized.dynamics import unroll_controlled
 from examples.ns2d.centralized.train import (
-    N_AGENTS, T_STEPS, U_MAX, V_MAX, SIGMA, FEATURES
+    N_AGENTS, T_STEPS, PUSH_MAX, SIGMA_INJECT, SIGMA_PUSH, BUOYANCY, FEATURES
 )
 from models.policy_ns2d import NS2DControlNet
 
@@ -190,18 +190,16 @@ def main():
     Nx = int(config['Nx'])
     Ny = int(config['Ny'])
     dt = float(config['dt'])
-    buoyancy = float(config['buoyancy'])
     
     # Use imported constants from train.py
     n_agents = N_AGENTS
-    sigma = SIGMA
     
-    print(f"\nGrid: {Nx}x{Ny}, Agents: {n_agents}")
+    print(f"\nGrid: {Nx}x{Ny}, Agents: {n_agents} (fan-only control)")
     
     test_data = np.load(data_dir / 'test_data.npz')
     
-    # Load model with same parameters as training
-    model = NS2DControlNet(features=FEATURES, u_max=U_MAX, v_max=V_MAX)
+    # Load model with fan-only parameters
+    model = NS2DControlNet(features=FEATURES, v_max=PUSH_MAX)
     
     params_path = Path(__file__).parent / 'ns2d_params.msgpack'
     if not params_path.exists():
@@ -217,11 +215,6 @@ def main():
     
     print("Loaded trained parameters")
     
-    # Test sample
-    idx = 0
-    smoke_init = jnp.array(test_data['rho_init'][idx])
-    rho_target = jnp.array(test_data['rho_target'][idx])
-    
     # Agent grid (matching train.py)
     n_side = int(np.sqrt(n_agents))
     xi_init = jnp.stack(jnp.meshgrid(
@@ -229,14 +222,79 @@ def main():
         jnp.linspace(0.15, 1.0, n_side)
     ), axis=-1).reshape(-1, 2)
     
-    # Run controlled simulation with same T_STEPS as training
     T_steps = T_STEPS
-    print(f"\nRunning controlled simulation (T={T_steps})...")
+    save_dir = Path(__file__).parent
+    
+    # Zero policy for uncontrolled comparison
+    def zero_policy(params, smoke, target, xi):
+        n = xi.shape[0]
+        return jnp.zeros(n), jnp.zeros((n, 2))
+    
+    # =========================================================================
+    # Visualize multiple test samples (at least 5)
+    # =========================================================================
+    n_test_samples = min(5, len(test_data['rho_init']))
+    print(f"\nVisualizing {n_test_samples} test samples...")
+    
+    # Create multi-sample comparison figure
+    fig = plt.figure(figsize=(16, 4 * n_test_samples))
+    gs = fig.add_gridspec(n_test_samples, 4, width_ratios=[1, 1, 1, 0.05], wspace=0.15, hspace=0.3)
+    
+    vmin, vmax = 0, 1
+    
+    for sample_idx in range(n_test_samples):
+        print(f"  Sample {sample_idx + 1}/{n_test_samples}...")
+        
+        smoke_init = jnp.array(test_data['rho_init'][sample_idx])
+        rho_target = jnp.array(test_data['rho_target'][sample_idx])
+        
+        # Run controlled simulation
+        smoke_traj, xi_traj, intensity_traj, vel_traj = unroll_controlled(
+            smoke_init, xi_init, rho_target, params, model.apply, T_steps,
+            Nx=Nx, Ny=Ny, dt=dt, buoyancy=BUOYANCY,
+            sigma_inject=SIGMA_INJECT, sigma_push=SIGMA_PUSH,
+            u_max=0.0, push_max=PUSH_MAX
+        )
+        smoke_traj = np.array(smoke_traj)
+        smoke_controlled_final = smoke_traj[-1]
+        
+        # Plot: Initial | Controlled | Target
+        data = [np.array(smoke_init), smoke_controlled_final, np.array(rho_target)]
+        labels = ['Initial', 'Controlled', 'Target']
+        
+        for col_idx, (arr, label) in enumerate(zip(data, labels)):
+            ax = fig.add_subplot(gs[sample_idx, col_idx])
+            im = ax.imshow(arr.T, origin='lower', cmap='hot', vmin=vmin, vmax=vmax, aspect='auto')
+            if sample_idx == 0:
+                ax.set_title(label, fontsize=16, fontweight='bold')
+            if col_idx == 0:
+                ax.set_ylabel(f'Sample {sample_idx + 1}', fontsize=14, fontweight='bold')
+            ax.set_xticks([])
+            ax.set_yticks([])
+    
+    # Shared colorbar
+    cax = fig.add_subplot(gs[:, 3])
+    cbar = fig.colorbar(im, cax=cax, orientation='vertical')
+    cbar.set_label(r'Smoke Density $\rho$', fontsize=14)
+    
+    plt.suptitle('NS2D Shape Formation: Multiple Test Samples', fontsize=20, fontweight='bold', y=0.98)
+    plt.savefig(save_dir / 'ns2d_multi_samples.png', dpi=300, bbox_inches='tight', facecolor='white')
+    print(f"Saved: ns2d_multi_samples.png")
+    
+    # =========================================================================
+    # Also create detailed visualization for first sample
+    # =========================================================================
+    print("\nGenerating detailed visualization for sample 0...")
+    
+    idx = 0
+    smoke_init = jnp.array(test_data['rho_init'][idx])
+    rho_target = jnp.array(test_data['rho_target'][idx])
     
     smoke_traj, xi_traj, intensity_traj, vel_traj = unroll_controlled(
         smoke_init, xi_init, rho_target, params, model.apply, T_steps,
-        Nx=Nx, Ny=Ny, dt=dt, buoyancy=buoyancy, sigma=sigma,
-        u_max=U_MAX, v_max=V_MAX
+        Nx=Nx, Ny=Ny, dt=dt, buoyancy=BUOYANCY,
+        sigma_inject=SIGMA_INJECT, sigma_push=SIGMA_PUSH,
+        u_max=0.0, push_max=PUSH_MAX
     )
     
     smoke_traj = np.array(smoke_traj)
@@ -245,9 +303,6 @@ def main():
     vel_traj = np.array(vel_traj)
     
     print(f"Smoke range: [{smoke_traj.min():.3f}, {smoke_traj.max():.3f}]")
-    
-    # Visualize
-    save_dir = Path(__file__).parent
     
     plot_evolution_comparison(
         np.array(smoke_init), smoke_traj, np.array(rho_target), xi_traj,
@@ -259,24 +314,34 @@ def main():
         filename=str(save_dir / 'ns2d_controls.png')
     )
     
-    # Initial/Final/Target comparison
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    # Run UNCONTROLLED simulation
+    print("Running uncontrolled simulation...")
+    smoke_traj_unctrl, _, _, _ = unroll_controlled(
+        smoke_init, xi_init, rho_target, None, zero_policy, T_steps,
+        Nx=Nx, Ny=Ny, dt=dt, buoyancy=BUOYANCY,
+        sigma_inject=SIGMA_INJECT, sigma_push=SIGMA_PUSH,
+        u_max=0.0, push_max=0.0
+    )
+    smoke_unctrl_final = np.array(smoke_traj_unctrl)[-1]
     
-    axes[0].imshow(np.array(smoke_init).T, origin='lower', cmap='hot', vmin=0, vmax=1)
-    axes[0].set_title('Initial', fontsize=16, fontweight='bold')
-    axes[0].axis('off')
+    # Initial/Uncontrolled/Final/Target comparison
+    fig = plt.figure(figsize=(20, 5))
+    gs = fig.add_gridspec(1, 5, width_ratios=[1, 1, 1, 1, 0.05], wspace=0.15)
     
-    axes[1].imshow(smoke_traj[-1].T, origin='lower', cmap='hot', vmin=0, vmax=1)
-    axes[1].set_title('Final (Controlled)', fontsize=16, fontweight='bold')
-    axes[1].axis('off')
+    labels = ['Initial', 'Uncontrolled', 'Controlled', 'Target']
+    data = [np.array(smoke_init), smoke_unctrl_final, smoke_traj[-1], np.array(rho_target)]
     
-    im = axes[2].imshow(np.array(rho_target).T, origin='lower', cmap='hot', vmin=0, vmax=1)
-    axes[2].set_title('Target', fontsize=16, fontweight='bold')
-    axes[2].axis('off')
+    for i, (label, arr) in enumerate(zip(labels, data)):
+        ax = fig.add_subplot(gs[0, i])
+        im = ax.imshow(arr.T, origin='lower', cmap='hot', vmin=vmin, vmax=vmax, aspect='auto')
+        ax.set_title(label, fontsize=16, fontweight='bold')
+        ax.axis('off')
     
-    plt.colorbar(im, ax=axes, shrink=0.8, label='Smoke Density')
-    plt.suptitle('NS2D Shape Formation Result', fontsize=18, fontweight='bold')
-    plt.tight_layout()
+    cax = fig.add_subplot(gs[0, 4])
+    cbar = fig.colorbar(im, cax=cax, orientation='vertical')
+    cbar.set_label(r'Smoke Density $\rho$', fontsize=14)
+    
+    plt.suptitle('NS2D Shape Formation Result', fontsize=20, fontweight='bold', y=1.02)
     plt.savefig(save_dir / 'ns2d_result.png', dpi=300, bbox_inches='tight', facecolor='white')
     print(f"Saved: ns2d_result.png")
     

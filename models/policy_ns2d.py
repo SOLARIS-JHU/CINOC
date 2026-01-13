@@ -16,17 +16,20 @@ from typing import Sequence
 
 class NS2DControlNet(nn.Module):
     """
-    Centralized Controller for 2D Navier-Stokes Smoke Control.
+    Fan-Only Controller for 2D Navier-Stokes Smoke Control.
     
-    Architecture similar to Heat2DControlNet:
+    Agents act as "fans" that push smoke without injecting new smoke.
+    Policy outputs only push velocity direction.
+    
+    Architecture:
     - CNN branch processes error field and gradients (no pooling)
     - Fourier trunk encodes 2D agent positions
     - Fusion combines global context with local position info
-    - Output heads for injection intensity and velocity
+    - Output: push velocity only (injection disabled)
     """
     features: Sequence[int] = (16, 32)  # CNN channels
-    u_max: float = 1.0   # Max injection intensity
-    v_max: float = 0.1   # Max agent velocity
+    v_max: float = 0.5   # Max push velocity
+    u_max: float = 0.0   # No injection (kept for API compatibility)
     
     def setup(self):
         self.frequencies = jnp.array([1.0, 2.0, 4.0, 8.0])
@@ -34,14 +37,6 @@ class NS2DControlNet(nn.Module):
     def branch_net(self, error, error_grad_x, error_grad_y):
         """
         CNN branch for 2D spatial error processing (NO POOLING).
-        
-        Args:
-            error: (Nx, Ny) pointwise error
-            error_grad_x: (Nx, Ny) x-gradient
-            error_grad_y: (Nx, Ny) y-gradient
-            
-        Returns:
-            Global context vector (feature_dim,)
         """
         # Stack into 3-channel input: [error, ∂error/∂x, ∂error/∂y]
         x = jnp.stack([error, error_grad_x, error_grad_y], axis=-1)  # (Nx, Ny, 3)
@@ -51,9 +46,10 @@ class NS2DControlNet(nn.Module):
             x = nn.Conv(feat, kernel_size=(3, 3), padding='SAME')(x)
             x = nn.relu(x)
         
-        # Flatten and normalize (analogous to Heat2DControlNet)
+        # Flatten and normalize
         x = x.reshape(-1)
-        x = x / (jnp.linalg.norm(x) + 1.0)  # L2 normalization
+        # Proper L2 normalization for numerical stability
+        x = x / (jnp.linalg.norm(x) + 1e-8)
         x = nn.Dense(64)(x)
         x = nn.tanh(x)
         
@@ -62,12 +58,6 @@ class NS2DControlNet(nn.Module):
     def trunk_net(self, xi):
         """
         Fourier encoding for 2D actuator positions.
-        
-        Args:
-            xi: (M, 2) actuator positions [x, y] in [0,1]
-            
-        Returns:
-            (M, trunk_dim) encoded positions
         """
         # Fourier features for each coordinate
         angle_x = xi[:, 0, None] * self.frequencies * jnp.pi
@@ -89,7 +79,7 @@ class NS2DControlNet(nn.Module):
     @nn.compact
     def __call__(self, smoke_curr, smoke_target, xi_curr):
         """
-        Forward pass.
+        Forward pass - FAN ONLY, no injection.
         
         Args:
             smoke_curr: (Nx, Ny) current smoke density
@@ -97,8 +87,8 @@ class NS2DControlNet(nn.Module):
             xi_curr: (M, 2) actuator positions in [0,1] normalized coords
             
         Returns:
-            u: (M,) injection intensities
-            v: (M, 2) actuator velocities
+            u: (M,) zeros (no injection)
+            v: (M, 2) push velocities (fan direction)
         """
         # Clip positions to domain
         xi_curr = jnp.clip(xi_curr, 0.0, 1.0)
@@ -123,13 +113,12 @@ class NS2DControlNet(nn.Module):
         h = nn.Dense(64)(combined)
         h = nn.tanh(h)
         
-        # Output heads
-        u_raw = nn.Dense(1)(h).squeeze(-1)  # (M,) scalar injection
-        v_raw = nn.Dense(2)(h)               # (M, 2) 2D velocity
-        
-        # Apply saturation limits (sigmoid for u since injection is non-negative)
-        u = self.u_max * nn.sigmoid(u_raw)
+        # Output: PUSH VELOCITY ONLY (no injection)
+        v_raw = nn.Dense(2)(h)  # (M, 2) 2D push direction
         v = self.v_max * jnp.tanh(v_raw)
+        
+        # Return zeros for injection (for API compatibility)
+        u = jnp.zeros(xi_curr.shape[0])
         
         return u, v
 
@@ -189,7 +178,8 @@ class DecentralizedNS2DControlNet(nn.Module):
             x = nn.relu(x)
         
         x = x.reshape(-1)
-        x = x / (jnp.linalg.norm(x) + 1.0)
+        # Proper L2 normalization for numerical stability
+        x = x / (jnp.linalg.norm(x) + 1e-8)
         x = nn.Dense(32)(x)
         x = nn.tanh(x)
         
