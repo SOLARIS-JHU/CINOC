@@ -1,6 +1,7 @@
 """
 Conference-Quality Visualization for KS-2D Centralized Control.
-Adapted for High-Density Control (144 Agents, Sigma=1.2).
+Adapted for High-Density Control (N Agents, Sigma=1.2).
+Generates 3 Distinct Examples with Different Random Seeds.
 """
 
 import jax
@@ -35,12 +36,12 @@ CONFIG = {
     # --- CRITICAL: MATCH TRAINING EXACTLY ---
     'dt': 0.005,           # High-res physics
     'substeps': 20,        # 20 physics steps per control step
-    'n_agents': 144,       # 12x12 Grid
+    'n_agents': 100,       # 12x12 Grid
     
     # Visualization Timeline 
     # Control Step size = 20 * 0.005 = 0.1s
     'T_chaos_steps': 20,   # 2.0 seconds of chaos
-    'T_control_steps': 50, # 5.0 seconds of control (slightly longer than training)
+    'T_control_steps': 50, # 5.0 seconds of control
     
     # Snapshots to display (Physical Time)
     # T=0 is the moment Control turns ON.
@@ -80,6 +81,7 @@ def generate_transition_data(key, model, params):
     dyn_chaos   = PDEDynamics2D(policy_apply_fn=get_zero_policy())
     
     # 2. Get Initial Chaotic State
+    # We use the specific key passed in to ensure diversity
     print("  [Sim] Generating initial state...")
     u0 = get_batch_initial_conditions(key, 1, CONFIG['N_grid'], CONFIG['L_domain'])[0]
     
@@ -93,7 +95,7 @@ def generate_transition_data(key, model, params):
         t_steps=CONFIG['T_chaos_steps'],
         substeps=CONFIG['substeps'],
         N_grid=CONFIG['N_grid'], L=CONFIG['L_domain'], dt=CONFIG['dt'], 
-        sigma=1.2 # Match training sigma!
+        sigma=1.2 
     )
     
     # 4. Phase 2: Run Controlled
@@ -105,7 +107,7 @@ def generate_transition_data(key, model, params):
         t_steps=CONFIG['T_control_steps'],
         substeps=CONFIG['substeps'],
         N_grid=CONFIG['N_grid'], L=CONFIG['L_domain'], dt=CONFIG['dt'], 
-        sigma=1.2 # <--- CRITICAL: Match Training Sigma (was 2.5 in old script)
+        sigma=1.2 
     )
     
     # 5. Stitch
@@ -143,7 +145,7 @@ def setup_academic_style():
         "axes.titlesize": 16,
     })
 
-def plot_2d_transition(t_full, u_full, u_force_ctrl, save_name="ks2d_transition.png"):
+def plot_2d_transition(t_full, u_full, u_force_ctrl, example_id=1, save_name="ks2d_transition.png"):
     setup_academic_style()
     
     # Calculate Energy (L2 norm)
@@ -229,9 +231,10 @@ def plot_2d_transition(t_full, u_full, u_force_ctrl, save_name="ks2d_transition.
     final_e = energy[-1]
     ax_ts.text(t_full[-1], final_e, f" Final: {final_e:.2e}", va='center', ha='right', fontweight='bold')
 
-    ax_ts.set_title("(b) System Stabilization (Log Scale)", loc='left', fontweight='bold')
+    # Update Title with Example Number
+    ax_ts.set_title(f"(b) System Stabilization - Example {example_id}", loc='left', fontweight='bold')
 
-    plt.suptitle(f"2D KS Stabilization (144 Agents, $\sigma$=1.2, $u_{{max}}$=5.0)", y=0.98, fontsize=18)
+    plt.suptitle(f"2D KS Stabilization (Example {example_id} | {CONFIG['n_agents']} Agents, $\sigma$=1.2)", y=0.98, fontsize=18)
     plt.savefig(save_name, dpi=150, bbox_inches='tight')
     print(f"✓ Saved visualization to {save_name}")
     plt.close()
@@ -241,13 +244,13 @@ def plot_2d_transition(t_full, u_full, u_force_ctrl, save_name="ks2d_transition.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("--- 2D KS Visualization Script (High Density) ---")
+    print("--- 2D KS Visualization Script (Generating 3 Examples) ---")
     
     # 1. Re-Initialize Model with correct u_max
     model = DecentralizedKS2DControlNet(
         features=(64, 128), 
         domain_size=(CONFIG['L_domain'], CONFIG['L_domain']),
-        u_max=5.0  # <--- MUST MATCH TRAINING
+        u_max=5.0
     )
     
     try:
@@ -258,7 +261,22 @@ if __name__ == "__main__":
         print("Run training first to generate parameters.")
         sys.exit(1)
         
-    key = jax.random.PRNGKey(101) # Change seed to see different initial states
-    t_full, u_full, u_force = generate_transition_data(key, model, params)
+    # 2. Loop for 3 Examples
+    # We start with a base key and split it to ensure distinct randomness
+    base_key = jax.random.PRNGKey(55) 
+    num_examples = 3
     
-    plot_2d_transition(t_full, u_full, u_force)
+    for i in range(num_examples):
+        print(f"\n═══ Generating Example {i+1} / {num_examples} ═══")
+        
+        # Split key for this iteration
+        rng_run, base_key = jax.random.split(base_key)
+        
+        # Generate Data
+        t_full, u_full, u_force = generate_transition_data(rng_run, model, params)
+        
+        # Plot
+        filename = f"ks2d_transition_ex{i+1}.png"
+        plot_2d_transition(t_full, u_full, u_force, example_id=i+1, save_name=filename)
+        
+    print("\nAll examples generated successfully.")

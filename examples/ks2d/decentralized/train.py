@@ -39,10 +39,10 @@ CONFIG = {
     # Total Physics Time = 50 * 20 * 0.005 = 5.0 seconds
     
     # Training
-    'n_agents': 144,       
-    'batch_size': 1,
-    'epochs': 40,
-    'pool_size': 1,       
+    'n_agents': 100,       
+    'batch_size': 4,
+    'epochs': 500,
+    'pool_size': 500,       
     
     # Files
     'ic_filename': 'ks2d_chaotic_ics_64.pkl',
@@ -153,7 +153,7 @@ if __name__ == "__main__":
     
     # Optimizer
     lr_schedule = optax.warmup_cosine_decay_schedule(
-        init_value=1e-4, peak_value=1e-3, warmup_steps=10, # warmup was 50 !!!
+        init_value=5e-4, peak_value=1e-3, warmup_steps=50, # warmup was 50 !!!
         decay_steps=CONFIG['epochs'], end_value=1e-5
     )
     optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(lr_schedule))
