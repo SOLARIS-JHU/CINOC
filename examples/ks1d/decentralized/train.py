@@ -18,7 +18,7 @@ script_dir = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
 from examples.ks1d.centralized.dynamics_dual import PDEDynamics 
-from models.policy_ks import DecentralizedControlNet
+from models.policy_ks1d import DecentralizedControlNet
 from examples.ks1d.centralized.data_utils import get_batch_initial_conditions
 
 # --- 1. Configuration & Initialization ---
