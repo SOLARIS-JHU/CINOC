@@ -102,7 +102,7 @@ class DecentralizedTurbulenceNet(nn.Module):
     features: Sequence[int] = (16, 32)
     domain_size: Tuple[float, float] = (1.0, 1.0)
     u_max: float = 75.0
-    patch_size: int = 16 # Larger patch for turbulence structures
+    patch_size: int = 20 # Larger patch for turbulence structures
 
     def setup(self):
         self.frequencies = jnp.array([1.0, 2.0, 4.0, 8.0])
@@ -227,4 +227,4 @@ class DecentralizedTurbulenceNet(nn.Module):
         u_raw = nn.Dense(1)(h).squeeze(-1)
 
         # Output: Control Intensity
-        return 0*self.u_max * jnp.tanh(u_raw)
+        return self.u_max * jnp.tanh(u_raw)

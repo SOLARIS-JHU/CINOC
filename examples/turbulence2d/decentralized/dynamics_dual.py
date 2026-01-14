@@ -29,7 +29,7 @@ class PDEDynamics2D:
         substeps=16, # Physics steps per control step
         viscosity=5e-5,
         actuator_grid_shape=(8, 8),
-        sigma=0.2
+        sigma=0.05#0.2
     ):
         """
         Differentiable Unroll for Training.

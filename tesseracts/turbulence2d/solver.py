@@ -159,7 +159,7 @@ def solve_with_policy(
     dt=0.02,
     t_max=6.0,
     actuator_grid_shape=(8, 8),
-    sigma=0.2
+    sigma=0.05#0.2
 ):
     # 1. Setup Grid & Physics Constants
     N = grid_res

@@ -28,27 +28,38 @@ from data_utils import get_batch_initial_conditions
 # 1. CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# In viz.py
+
 CONFIG = {
-    'N_grid': 128,          
-    'L_domain': 1.0,        
+    'N_grid': 128,
+    'L_domain': 1.0,
+
+    # --- FIX 1: Use a realistic Control Interval ---
+    # dt should be the time between policy actions. 
+    # 0.02s is standard for this Reynolds number.
+    'dt': 0.02,           
     
-    # Physics Match
-    'dt': 0.0005,           
-    'viscosity': 5e-5,      
+    # Physics fidelity
+    # 0.02 / 20 = 0.001s physics step (Good for RK4 stability)
     'substeps': 20,         
     
+    'viscosity': 5e-5,      
     'n_agents': 64,         
     'grid_shape': (8, 8),   
+
+    # --- FIX 2: Adjust steps to hit target times ---
+    # Chaos: 25 steps * 0.02s = 0.5s
+    'T_chaos_steps': 25,    
     
-    # Visualization Timeline 
-    'T_chaos_steps': 50,    # 0.5s of chaos
-    'T_control_steps': 200, # 2.0s of control
-    
+    # Control: 100 steps * 0.02s = 2.0s
+    'T_control_steps': 100, 
+
     # Snapshots (Physical Time)
     'snapshot_times': [-0.25, 0.0, 0.25, 0.75, 1.5], 
     
     'params_file': 'turbulence_params.msgpack'
 }
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. HELPER FUNCTIONS
@@ -147,7 +158,7 @@ def generate_transition_data(key, model, params):
     # 5. Stitch (Both are now Physical)
     w_full = jnp.concatenate([w_traj_chaos, w_traj_ctrl], axis=0)
     
-    dt_effective = CONFIG['substeps'] * CONFIG['dt']
+    dt_effective = CONFIG['dt']
     n_chaos = CONFIG['T_chaos_steps']
     n_ctrl = CONFIG['T_control_steps']
     

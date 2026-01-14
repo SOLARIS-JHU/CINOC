@@ -29,13 +29,13 @@ from data_utils import get_batch_initial_conditions
 
 # --- 1. Configuration ---
 CONFIG = {
-    'N_grid': 64,         
+    'N_grid': 128,         
     'L_domain': 1.0,      # Domain size L=1.0 for Turbulence
     'dt': 0.01,           # Physics timestep
-    'viscosity': 5e-4,    # Fluid viscosity
+    'viscosity': 1e-4,    # Fluid viscosity
     
     # Action Repetition settings
-    'substeps': 5,       # 16 Physics steps per Control step (matches solver stability)
+    'substeps': 10,       # 16 Physics steps per Control step (matches solver stability)
     'T_steps': 150,        # 50 Control steps
     
     # Training
@@ -45,7 +45,7 @@ CONFIG = {
     'pool_size': 1,      
     
     # Files
-    'ic_filename': 'turbulence_chaotic_ics_64_real.pkl',
+    'ic_filename': 'turbulence_chaotic_ics_64.pkl',
     'model_save_name': 'turbulence_params.msgpack'
 }
 
@@ -147,7 +147,6 @@ if __name__ == "__main__":
     # Initialize Model
     model = DecentralizedTurbulenceNet(
         features=(32, 64), 
-        patch_size=16,
         domain_size=(CONFIG['L_domain'], CONFIG['L_domain']),
         u_max=40.0
     )
