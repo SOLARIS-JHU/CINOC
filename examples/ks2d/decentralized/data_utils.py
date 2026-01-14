@@ -13,7 +13,6 @@ from pathlib import Path
 # Enable x64 (Crucial for spectral accuracy)
 jax.config.update("jax_enable_x64", True)
 
-# --- IMPORT CORE PHYSICS FROM SOLVER ---
 from tesseracts.ks2d.solver import ks_spectral_step_etdrk4, precompute_etdrk4_coeffs
 
 # --- 1. Initialization Logic ---
