@@ -405,12 +405,13 @@ def unroll_with_full_loss(
     
     # Time weights: [0.5, 0.6, ..., 1.5, 2.0, 2.5] - increasing over time
     # time_weights = 0.5 + 2.0 * jnp.linspace(0, 1, t_steps)  # Linear increase
-    time_weights = 1.0
+    # time_weights = 1.0
+    time_weights = jnp.ones(t_steps)
     l_hold = jnp.sum(hold_losses * time_weights) / jnp.sum(time_weights)
     
     # Also add strong terminal penalty (Wasserstein)
     l_hold_terminal = compute_wasserstein_loss(smoke_final, rho_target)
-    l_hold = l_hold + 10.0 * l_hold_terminal  # Extra emphasis on final state
+    l_hold = l_hold + 3.0 * l_hold_terminal  # Extra emphasis on final state
     
     # =========================================================================
     # 3. FIND LOSS: Agents should approach smoke to push it

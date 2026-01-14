@@ -64,16 +64,16 @@ PATCH_SIZE = 12
 # W_MASS = 80.0         #50# NEW: Preserve smoke mass
 # R_SAFE = 0.15         # Safe radius for collision
 
-W_TRANSPORT = 1.0   #20# PRIMARY: push smoke centroid → target centroid
-W_HOLD = 10.0         #10# TERMINAL: smoke must stay at target (time-weighted)
-W_FIND = 1.0         # EXPLORATION: agents approach smoke
+W_TRANSPORT = 0.0   #20# PRIMARY: push smoke centroid → target centroid
+W_HOLD = 10.0 #0.3        #10# TERMINAL: smoke must stay at target (time-weighted)
+W_FIND = 0.0         # EXPLORATION: agents approach smoke
 W_SURROUND = 0.0     #15# Agents form ring around target
 W_BRAKE = 0.0        # Slow down when at target
-W_COLL = 100.0        # Avoid other agents
+W_COLL = 70.0        # Avoid other agents
 W_BOUND = 10.0        # Stay in domain
 W_SMOOTH = 0.1        # Velocity smoothness
 W_EFFORT = 0.001      # Control energy
-W_MASS = 20.0         #50# NEW: Preserve smoke mass
+W_MASS = 30.0         #50# NEW: Preserve smoke mass
 R_SAFE = 0.15         # Safe radius for collision
 
 
