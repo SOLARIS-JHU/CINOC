@@ -40,12 +40,12 @@ CONFIG = {
     
     # Training
     'n_agents': 64,       # 64 Agents (8x8 Grid)
-    'batch_size': 1,
+    'batch_size': 4,
     'epochs': 50,
-    'pool_size': 1,      
+    'pool_size': 500,      
     
     # Files
-    'ic_filename': 'turbulence_chaotic_ics_64_real.pkl',
+    'ic_filename': 'turbulence_chaotic_ics_64_more.pkl',
     'model_save_name': 'turbulence_params.msgpack'
 }
 
