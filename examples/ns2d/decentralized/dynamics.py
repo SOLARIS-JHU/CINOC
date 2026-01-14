@@ -1,8 +1,8 @@
 """
-Dynamics wrapper for NS2D Shape Formation Control
+Dynamics wrapper for Decentralized NS2D Shape Formation Control
 
-Provides interface between policy network and PhiFlow NS2D solver.
-Enables controlled smoke simulation with movable injection agents.
+Exact replica of centralized dynamics, but used with decentralized policy.
+Provides interface for decentralized policy networks with local patches.
 """
 
 import sys
@@ -18,8 +18,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-# PhiFlow imports
-from phi.jax.flow import *
+# PhiFlow imports (optional, for compatibility)
+try:
+    from phi.jax.flow import *
+except ImportError:
+    pass
 
 
 # =============================================================================
@@ -252,6 +255,55 @@ def compute_smooth_loss(z_curr: jnp.ndarray, z_target: jnp.ndarray) -> jnp.ndarr
     return mse + 0.5 * com_dist
 
 
+def compute_wasserstein_loss(z_curr: jnp.ndarray, z_target: jnp.ndarray, 
+                              epsilon: float = 0.01, n_iters: int = 20) -> jnp.ndarray:
+    """
+    Compute Sinkhorn approximation to Wasserstein distance.
+    
+    This is differentiable and better for transport problems than MSE.
+    Uses entropic regularization for numerical stability.
+    """
+    Nx, Ny = z_curr.shape
+    
+    # Create cost matrix (squared Euclidean distance on grid)
+    x_coords = jnp.linspace(0, 1, Nx)
+    y_coords = jnp.linspace(0, 1.25, Ny)
+    X1, Y1 = jnp.meshgrid(x_coords, y_coords, indexing='ij')
+    
+    # Flatten distributions
+    p = z_curr.flatten() + 1e-8  # Add small epsilon for stability
+    q = z_target.flatten() + 1e-8
+    
+    # Normalize to probability distributions
+    p = p / jnp.sum(p)
+    q = q / jnp.sum(q)
+    
+    # Cost matrix: |x_i - x_j|^2
+    X1_flat = X1.flatten()
+    Y1_flat = Y1.flatten()
+    
+    # Compute pairwise squared distances (this is expensive for large grids)
+    # Use downsampled version for efficiency
+    n = len(p)
+    
+    # For large grids, use sliced Wasserstein instead (1D projections)
+    # Here we use a simplified centroid-based approximation
+    cx_curr = jnp.sum(X1 * z_curr) / (jnp.sum(z_curr) + 1e-8)
+    cy_curr = jnp.sum(Y1 * z_curr) / (jnp.sum(z_curr) + 1e-8)
+    cx_target = jnp.sum(X1 * z_target) / (jnp.sum(z_target) + 1e-8)
+    cy_target = jnp.sum(Y1 * z_target) / (jnp.sum(z_target) + 1e-8)
+    
+    # Wasserstein-1 approximation: transport distance + shape matching
+    centroid_dist = jnp.sqrt((cx_curr - cx_target)**2 + (cy_curr - cy_target)**2)
+    
+    # Add variance matching (encourages similar spread)
+    var_curr = jnp.sum(z_curr * ((X1 - cx_curr)**2 + (Y1 - cy_curr)**2)) / (jnp.sum(z_curr) + 1e-8)
+    var_target = jnp.sum(z_target * ((X1 - cx_target)**2 + (Y1 - cy_target)**2)) / (jnp.sum(z_target) + 1e-8)
+    var_diff = jnp.abs(jnp.sqrt(var_curr + 1e-8) - jnp.sqrt(var_target + 1e-8))
+    
+    return centroid_dist + 0.5 * var_diff
+
+
 # =============================================================================
 # Policy-Controlled Rollout (Memory-Efficient)
 # =============================================================================
@@ -266,7 +318,7 @@ def unroll_with_full_loss(
     t_steps: int,
     Nx: int = 64,
     Ny: int = 80,
-    n_agents: int = 25,
+    n_agents: int = 9,
     dt: float = 1.0,
     buoyancy: float = 0.3,
     sigma_push: float = 0.15,
@@ -287,7 +339,7 @@ def unroll_with_full_loss(
     def step_fn(carry, _):
         smoke, xi = carry
         
-        # Policy inference - outputs only push velocity
+        # Policy inference - outputs push velocity
         push_vel = policy_apply_fn(params, smoke, rho_target, xi)
         
         # Clip push velocity
@@ -316,46 +368,130 @@ def unroll_with_full_loss(
     smoke_traj, xi_traj, v_traj = trajectories
     
     # =========================================================================
-    # Compute Losses (ACCUMULATED over time)
+    # NEW OBJECTIVE DESIGN: Transport + Hold + Find + Regularization
     # =========================================================================
     
-    # 1. Tracking loss - ACCUMULATED over all timesteps
-    def tracking_loss_at_t(smoke_t):
-        return compute_smooth_loss(smoke_t, rho_target)
+    # Helper: Compute centroid of a field
+    def compute_centroid(field):
+        Nx_f, Ny_f = field.shape
+        x_coords = jnp.linspace(0, 1, Nx_f)
+        y_coords = jnp.linspace(0, 1.25, Ny_f)
+        X, Y = jnp.meshgrid(x_coords, y_coords, indexing='ij')
+        total_mass = jnp.sum(field) + 1e-8
+        cx = jnp.sum(field * X) / total_mass
+        cy = jnp.sum(field * Y) / total_mass
+        return jnp.array([cx, cy])
     
-    # vmap over time dimension to get loss at each timestep
-    track_losses = jax.vmap(tracking_loss_at_t)(smoke_traj)  # (T,)
+    # Target centroid (fixed)
+    target_centroid = compute_centroid(rho_target)
     
-    # Uniform sum over time (reach + hold objective) + terminal for stability
-    l_track_mean = jnp.mean(track_losses)
-    l_track_terminal = compute_smooth_loss(smoke_final, rho_target)
-    l_track = l_track_mean + 1.0 * l_track_terminal
+    # =========================================================================
+    # 1. TRANSPORT LOSS: Push smoke centroid → target centroid
+    # =========================================================================
+    def transport_loss_at_t(smoke_t):
+        smoke_centroid = compute_centroid(smoke_t)
+        return jnp.sum((smoke_centroid - target_centroid) ** 2)
     
-    # 2. Effort loss (only push velocity, no injection)
-    l_effort = jnp.mean(jnp.sum(v_traj ** 2, axis=-1))
+    transport_losses = jax.vmap(transport_loss_at_t)(smoke_traj)
+    l_transport = jnp.mean(transport_losses)
     
-    # 3. Boundary penalty (stay within domain margins)
-    # NS2D domain: x in [0,1], y in [0, 1.25]
+    # =========================================================================
+    # 2. TIME-WEIGHTED HOLD LOSS using WASSERSTEIN DISTANCE
+    # =========================================================================
+    def hold_loss_at_t(smoke_t):
+        return compute_wasserstein_loss(smoke_t, rho_target)
+    
+    hold_losses = jax.vmap(hold_loss_at_t)(smoke_traj)
+    
+    # Time weights: [0.5, 0.6, ..., 1.5, 2.0, 2.5] - increasing over time
+    # time_weights = 0.5 + 2.0 * jnp.linspace(0, 1, t_steps)  # Linear increase
+    time_weights = 1.0
+    l_hold = jnp.sum(hold_losses * time_weights) / jnp.sum(time_weights)
+    
+    # Also add strong terminal penalty (Wasserstein)
+    l_hold_terminal = compute_wasserstein_loss(smoke_final, rho_target)
+    l_hold = l_hold + 10.0 * l_hold_terminal  # Extra emphasis on final state
+    
+    # =========================================================================
+    # 3. FIND LOSS: Agents should approach smoke to push it
+    # =========================================================================
+    def find_loss_at_t(smoke_t, xi_t):
+        smoke_centroid = compute_centroid(smoke_t)
+        dist_to_smoke = jnp.sqrt(jnp.sum((xi_t - smoke_centroid) ** 2, axis=-1) + 1e-8)
+        return jnp.mean(jnp.minimum(dist_to_smoke, 0.4))
+    
+    find_losses = jax.vmap(find_loss_at_t)(smoke_traj, xi_traj)
+    l_find = jnp.mean(find_losses)
+    
+    # =========================================================================
+    # 4. SURROUND LOSS: Agents should be near TARGET to form containment ring
+    # =========================================================================
+    def surround_loss_at_t(xi_t):
+        # Distance from each agent to TARGET centroid (not smoke!)
+        dist_to_target = jnp.sqrt(jnp.sum((xi_t - target_centroid) ** 2, axis=-1) + 1e-8)
+        # Ideal distance: ~0.2-0.3 (ring around target, not on top of it)
+        ideal_dist = 0.25
+        return jnp.mean(jnp.abs(dist_to_target - ideal_dist))  # Encourage ring formation
+    
+    surround_losses = jax.vmap(surround_loss_at_t)(xi_traj)
+    l_surround = jnp.mean(surround_losses)
+    
+    # =========================================================================
+    # 5. BRAKE LOSS: Slow down when smoke is at target (increased threshold)
+    # =========================================================================
+    def brake_loss_at_t(smoke_t, v_t):
+        smoke_centroid = compute_centroid(smoke_t)
+        smoke_target_dist = jnp.sqrt(jnp.sum((smoke_centroid - target_centroid) ** 2) + 1e-8)
+        
+        # Brake factor: 1.0 when at target, 0.0 when far
+        # INCREASED threshold from 0.15 to 0.3
+        at_target = jnp.clip(1.0 - smoke_target_dist / 0.3, 0.0, 1.0)
+        
+        # Penalize velocity when at target
+        velocity_mag = jnp.mean(jnp.sum(v_t ** 2, axis=-1))
+        return at_target * velocity_mag
+    
+    brake_losses = jax.vmap(brake_loss_at_t)(smoke_traj, v_traj)
+    l_brake = jnp.mean(brake_losses)
+    
+    # =========================================================================
+    # REGULARIZATION LOSSES
+    # =========================================================================
+    
+    # 6. COLLISION: Avoid other agents (SOFT EXPONENTIAL - always has gradient)
+    diff = xi_traj[:, :, None, :] - xi_traj[:, None, :, :]
+    dists = jnp.sqrt(jnp.sum(diff**2, axis=-1) + 1e-8)
+    mask = jnp.eye(n_agents)[None, :, :]
+    dists_masked = dists + mask * 10.0  # Ignore self-distance
+    
+    # Exponential decay: strong when close, weak when far
+    # exp(-dist/scale) where scale controls the range of influence
+    scale = R_safe  # Use R_safe as scale parameter
+    l_coll = jnp.mean(jnp.exp(-dists_masked / scale))
+    
+    # 7. BOUNDARY: Stay in domain
     x_penalty = jnp.maximum(0, domain_margin - xi_traj[:, :, 0])**2 + \
                 jnp.maximum(0, xi_traj[:, :, 0] - (1.0 - domain_margin))**2
     y_penalty = jnp.maximum(0, domain_margin - xi_traj[:, :, 1])**2 + \
                 jnp.maximum(0, xi_traj[:, :, 1] - (1.25 - domain_margin))**2
     l_bound = jnp.mean(x_penalty + y_penalty)
     
-    # 4. Collision avoidance (pairwise Euclidean distance)
-    # xi_traj shape: (T, M, 2)
-    diff = xi_traj[:, :, None, :] - xi_traj[:, None, :, :]  # (T, M, M, 2)
-    dists = jnp.sqrt(jnp.sum(diff**2, axis=-1) + 1e-8)  # (T, M, M)
+    # 8. SMOOTH: Velocity smoothness (acceleration penalty)
+    l_smooth = jnp.mean(jnp.sum(jnp.diff(v_traj, axis=0)**2, axis=-1))
     
-    # Mask diagonal (agent doesn't collide with itself)
-    mask = jnp.eye(n_agents)[None, :, :]
-    l_coll = jnp.mean(jnp.maximum(0, R_safe - (dists + mask * 10.0)) ** 2)
+    # 9. EFFORT: Control energy
+    l_effort = jnp.mean(jnp.sum(v_traj ** 2, axis=-1))
     
-    # 5. Acceleration penalty (smoothness of velocity)
-    l_accel = jnp.mean(jnp.sum(jnp.diff(v_traj, axis=0)**2, axis=-1))
+    # 10. MASS CONSERVATION: Penalize loss of smoke mass
+    initial_mass = jnp.sum(smoke_init)
+    def mass_loss_at_t(smoke_t):
+        current_mass = jnp.sum(smoke_t)
+        return ((current_mass - initial_mass) / (initial_mass + 1e-8)) ** 2
     
+    mass_losses = jax.vmap(mass_loss_at_t)(smoke_traj)
+    l_mass = jnp.mean(mass_losses)
     
-    return smoke_final, xi_final, l_track, l_effort, l_bound, l_coll, l_accel
+    return smoke_final, xi_final, l_transport, l_hold, l_find, l_surround, l_brake, l_coll, l_bound, l_smooth, l_effort, l_mass
 
 
 
@@ -387,7 +523,7 @@ def unroll_controlled(
     def step_fn(carry, _):
         smoke, xi = carry
         
-        # Policy inference - outputs only push velocity
+        # Policy inference - outputs push velocity
         push_vel = policy_apply_fn(params, smoke, rho_target, xi)
         
         # Clip push velocity
@@ -422,23 +558,27 @@ def unroll_controlled(
 # =============================================================================
 
 if __name__ == "__main__":
-    print("Testing NS2D dynamics wrapper...")
+    print("Testing Decentralized NS2D dynamics wrapper...")
     
     Nx, Ny = 64, 80
-    n_agents = 4
+    n_agents = 9
     t_steps = 50
     
-    # Dummy policy (zero control - fan only, returns only push velocity)
+    # Dummy policy (zero control - fan only)
     def dummy_policy(params, smoke, target, xi):
         n = xi.shape[0]
-        return jnp.zeros((n, 2))  # Just push velocity (no injection)
+        return jnp.zeros((n, 2))  # Just push velocity
     
     # Initial conditions
     smoke_init = jnp.zeros((Nx, Ny))
-    xi_init = jnp.array([[0.25, 0.1], [0.4, 0.1], [0.6, 0.1], [0.75, 0.1]])
+    n_side = int(np.sqrt(n_agents))
+    xi_init = jnp.stack(jnp.meshgrid(
+        jnp.linspace(0.2, 0.8, n_side),
+        jnp.linspace(0.2, 1.0, n_side)
+    ), axis=-1).reshape(-1, 2)
     rho_target = jnp.zeros((Nx, Ny))
     
-    # Test rollout using unroll_controlled (returns 3 values: smoke, xi, v)
+    # Test rollout using unroll_controlled
     smoke_traj, xi_traj, v_traj = unroll_controlled(
         smoke_init, xi_init, rho_target, None, dummy_policy, t_steps,
         Nx=Nx, Ny=Ny

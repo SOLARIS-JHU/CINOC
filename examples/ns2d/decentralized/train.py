@@ -1,8 +1,9 @@
 """
-Centralized Training for NS2D Shape Formation Control
+Decentralized Training for NS2D Shape Formation Control
 
-Train a policy network to control movable smoke injectors to achieve
-target smoke shapes.
+Train a decentralized policy network where each agent observes only
+a local patch around its position. Exact replica of centralized training
+but uses DecentralizedNS2DControlNet instead.
 """
 
 import sys
@@ -26,20 +27,20 @@ from tqdm import trange, tqdm
 import flax.serialization
 import numpy as np
 
-from examples.ns2d.centralized.dynamics import unroll_with_full_loss, unroll_controlled
-from models.policy_ns2d import NS2DControlNet
+from examples.ns2d.decentralized.dynamics import unroll_with_full_loss, unroll_controlled
+from models.policy_ns2d import DecentralizedNS2DControlNet
 
 
 # =============================================================================
-# Hyperparameters (can be imported by visualize.py)
+# Hyperparameters (IDENTICAL to centralized, except policy)
 # =============================================================================
 
 # Grid/physics from config (loaded at runtime)
 # These are set as module constants for sharing with visualize.py
-N_AGENTS = 9         # 4x4 grid of stationary agents
+N_AGENTS = 9         # 3x3 grid of stationary agents
 T_STEPS = 150         # Simulation horizon
-BATCH_SIZE = 2        # Reduced for memory
-EPOCHS = 1000
+BATCH_SIZE = 4        # Reduced for memory
+EPOCHS = 1000         # Train longer for decentralized
 
 # Physics parameters (fan-only mode)
 BUOYANCY = 0.0        # NO buoyancy - smoke only moves when pushed by fans
@@ -47,17 +48,33 @@ SIGMA_PUSH = 0.2      # Wide push influence
 
 # Control limits (fan-only: no injection, just push velocity)
 PUSH_MAX = 0.8        # Max push velocity
-FEATURES = (16, 32)   # CNN feature channels
+FEATURES = (16, 32)   # CNN feature channels - keep same
+PATCH_SIZE = 12      
 
-# Loss weights (tuned for blob transport)
-# Primary objective: reach target position with correct shape
-W_TRACK = 10.0        # Tracking loss - MAIN objective
-# Constraints: prevent bad behavior
-W_EFFORT = 0.001      # Effort regularization (keep controls reasonable)
-W_BOUND = 20.0        # Boundary penalty (agents stay in domain)
-W_COLL = 1000.0       # Collision avoidance - STRONG to prevent collapse
-W_ACCEL = 0.05        # Acceleration smoothness (smooth control signals)
-R_SAFE = 0.15         # Collision radius
+# Loss weights - NEW OBJECTIVE DESIGN
+# W_TRANSPORT = 10.0   #20# PRIMARY: push smoke centroid → target centroid
+# W_HOLD = 50.0         #10# TERMINAL: smoke must stay at target (time-weighted)
+# W_FIND = 10.0         # EXPLORATION: agents approach smoke
+# W_SURROUND = 10.0     #15# Agents form ring around target
+# W_BRAKE = 40.0        # Slow down when at target
+# W_COLL = 1500.0        # Avoid other agents
+# W_BOUND = 20.0        # Stay in domain
+# W_SMOOTH = 0.1        # Velocity smoothness
+# W_EFFORT = 0.001      # Control energy
+# W_MASS = 80.0         #50# NEW: Preserve smoke mass
+# R_SAFE = 0.15         # Safe radius for collision
+
+W_TRANSPORT = 1.0   #20# PRIMARY: push smoke centroid → target centroid
+W_HOLD = 10.0         #10# TERMINAL: smoke must stay at target (time-weighted)
+W_FIND = 1.0         # EXPLORATION: agents approach smoke
+W_SURROUND = 0.0     #15# Agents form ring around target
+W_BRAKE = 0.0        # Slow down when at target
+W_COLL = 100.0        # Avoid other agents
+W_BOUND = 10.0        # Stay in domain
+W_SMOOTH = 0.1        # Velocity smoothness
+W_EFFORT = 0.001      # Control energy
+W_MASS = 20.0         #50# NEW: Preserve smoke mass
+R_SAFE = 0.15         # Safe radius for collision
 
 
 # =============================================================================
@@ -66,7 +83,7 @@ R_SAFE = 0.15         # Collision radius
 
 def main():
     print("="*60)
-    print("NS2D Shape Formation - Centralized Training")
+    print("NS2D Shape Formation - Decentralized Training")
     print("="*60)
     
     # Load data
@@ -86,7 +103,7 @@ def main():
     buoyancy = BUOYANCY
     sigma_push = SIGMA_PUSH
     
-    print(f"\nGrid: {Nx}x{Ny}, Agents: {n_agents} (stationary)")
+    print(f"\nGrid: {Nx}x{Ny}, Agents: {n_agents} (decentralized)")
     
     train_data = np.load(data_dir / 'train_data.npz')
     pool_size = len(train_data['rho_init'])
@@ -98,10 +115,11 @@ def main():
     epochs = EPOCHS
     push_max = PUSH_MAX
     
-    # Model (Fan-only - agents push smoke, don't inject)
-    model = NS2DControlNet(
+    # Model (Decentralized - local patch observation)
+    model = DecentralizedNS2DControlNet(
         features=FEATURES,
-        v_max=push_max  # Only push velocity matters
+        v_max=push_max,
+        patch_size=PATCH_SIZE
     )
     
     key = jax.random.PRNGKey(42)
@@ -126,18 +144,19 @@ def main():
     )
     opt_state = optimizer.init(params)
     
-    # Loss function (fan-only velocity control)
+    # Loss function - with mass conservation
     def loss_fn(params, smoke_init, xi_init, rho_target):
-        smoke_final, xi_final, l_track, l_effort, l_bound, l_coll, l_accel = unroll_with_full_loss(
+        smoke_final, xi_final, l_transport, l_hold, l_find, l_surround, l_brake, l_coll, l_bound, l_smooth, l_effort, l_mass = unroll_with_full_loss(
             smoke_init, xi_init, rho_target, params, model.apply, T_steps,
             Nx=Nx, Ny=Ny, n_agents=n_agents, dt=dt, buoyancy=buoyancy,
             sigma_push=sigma_push, push_max=push_max, R_safe=R_SAFE
         )
         
-        total_loss = W_TRACK * l_track + W_EFFORT * l_effort + \
-                     W_BOUND * l_bound + W_COLL * l_coll + W_ACCEL * l_accel
+        total_loss = W_TRANSPORT * l_transport + W_HOLD * l_hold + W_FIND * l_find + \
+                     W_SURROUND * l_surround + W_BRAKE * l_brake + W_MASS * l_mass + \
+                     W_COLL * l_coll + W_BOUND * l_bound + W_SMOOTH * l_smooth + W_EFFORT * l_effort
         
-        return total_loss, (l_track, l_effort, l_coll)
+        return total_loss, (l_transport, l_hold, l_find, l_surround, l_brake, l_coll, l_bound, l_smooth, l_effort, l_mass)
     
     batched_loss_fn = jax.vmap(loss_fn, in_axes=(None, 0, 0, 0))
     
@@ -152,8 +171,8 @@ def main():
         params = optax.apply_updates(params, updates)
         return params, opt_state, loss, aux
     
-    # Initial agent positions (5x5 grid covering domain)
-    n_side = int(np.sqrt(n_agents))  # Should be 5 for 25 agents
+    # Initial agent positions (3x3 grid covering domain)
+    n_side = int(np.sqrt(n_agents))
     xi_template = jnp.stack(jnp.meshgrid(
         jnp.linspace(0.15, 0.85, n_side),  # Cover x
         jnp.linspace(0.15, 1.0, n_side)     # Cover y (full height)
@@ -178,19 +197,21 @@ def main():
         )
         
         if epoch % 10 == 0:
-            l_track, l_effort, l_coll = aux
-            metrics.append((epoch, float(loss), float(l_track), float(l_effort), 
-                          float(l_coll)))
+            l_transport, l_hold, l_find, l_surround, l_brake, l_coll, l_bound, l_smooth, l_effort, l_mass = aux
+            metrics.append((epoch, float(loss), float(l_transport), float(l_hold), float(l_find), 
+                          float(l_surround), float(l_brake), float(l_coll), float(l_bound), 
+                          float(l_smooth), float(l_effort), float(l_mass)))
             
             if epoch % 50 == 0:
-                tqdm.write(f"Ep {epoch} | Loss: {loss:.4f} | Track: {l_track:.4f} | " +
-                          f"Effort: {l_effort:.4f} | Coll: {l_coll:.4f}")
+                tqdm.write(f"Ep {epoch:4d} | Loss: {loss:.3f} | Trans: {l_transport:.4f} | Hold: {l_hold:.4f} | Find: {l_find:.4f}")
+                tqdm.write(f"         | Surr: {l_surround:.4f} | Brake: {l_brake:.4f} | Coll: {l_coll:.6f} | Bound: {l_bound:.6f}")
+                tqdm.write(f"         | Smooth: {l_smooth:.6f} | Effort: {l_effort:.6f} | Mass: {l_mass:.4f}")
     
     elapsed = time.time() - start_time
     print(f"\nTraining completed in {elapsed:.1f}s")
     
     # Save
-    save_path = Path(__file__).parent / 'ns2d_params.msgpack'
+    save_path = Path(__file__).parent / 'ns2d_decentralized_params.msgpack'
     with open(save_path, 'wb') as f:
         f.write(flax.serialization.to_bytes(params))
     print(f"Saved: {save_path}")
