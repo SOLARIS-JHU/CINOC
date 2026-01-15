@@ -117,11 +117,10 @@ def get_batch_initial_conditions(key, batch_size, N_grid, L, warmup_time=2.0):
 if __name__ == "__main__":
     print("--- 2D Turbulence Data Generation ---")
     
-
     import matplotlib.pyplot as plt
     import numpy as np
     
-    # Config matching your RL Training Script
+    # Configuration
     L_domain = 1.0
     N_grid = 128
     n_samples = 3
@@ -163,7 +162,7 @@ if __name__ == "__main__":
         plt.savefig("turbulence_ic_preview.png")
         print("Preview saved to 'turbulence_ic_preview.png'")
         
-        # Save Data (Saving the SPECTRAL states is usually preferred for exact restarts)
+        # Save Data (Saving the SPECTRAL states)
         save_path = "turbulence_chaotic_ics_128.pkl"
         with open(save_path, 'wb') as f:
             pickle.dump(w_hat_samples, f)

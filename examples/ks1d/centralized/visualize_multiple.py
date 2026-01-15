@@ -1,3 +1,9 @@
+"""
+Generate visualizations for multiple Kuramoto-Sivashinsky (KS) 1D scenarios
+using pre-trained centralized controllers. Each scenario varies in domain size,
+grid resolution, and number of actuators. The resulting state and control
+evolution are stitched together and visualized in a paper-style format.
+"""
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt

@@ -113,7 +113,7 @@ class DecentralizedControlNet(nn.Module):
         window_size = 4 
         half_window = window_size // 2
 
-        # 2. PAD with 'wrap' for PERIODIC BCs (Crucial for KS)
+        # 2. PAD with 'wrap' for PERIODIC BCs
         # This ensures agents at x=32 can 'see' neighbors at x=0
         padded_error = jnp.pad(error, (half_window, half_window), mode='wrap')
         padded_grad = jnp.pad(error_grad, (half_window, half_window), mode='wrap')

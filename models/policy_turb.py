@@ -3,96 +3,96 @@ import jax.numpy as jnp
 from flax import linen as nn
 from typing import Sequence, Tuple
 
-class TurbulenceControlNet(nn.Module):
-    """
-    Centralized Controller for 2D Decaying Turbulence (Vorticity Formulation).
+# NOTE: THIS centralized controller wont be used for now, keeping it just in case.
+# class TurbulenceControlNet(nn.Module):
+#     """
+#     Centralized Controller for 2D Decaying Turbulence (Vorticity Formulation).
     
-    Structure:
-    - Branch: CNN processing of the full Vorticity field (w).
-    - Trunk: Fourier encoding of actuator positions.
-    - Output: Forcing intensity.
-    """
-    features: Sequence[int] = (16, 32)
-    domain_size: Tuple[float, float] = (1.0, 1.0) # Matches Solver L=1.0
-    u_max: float = 75.0  # Limits max forcing to prevent instability
+#     Structure:
+#     - Branch: CNN processing of the full Vorticity field (w).
+#     - Trunk: Fourier encoding of actuator positions.
+#     - Output: Forcing intensity.
+#     """
+#     features: Sequence[int] = (16, 32)
+#     domain_size: Tuple[float, float] = (1.0, 1.0) # Matches Solver L=1.0
+#     u_max: float = 75.0  # Limits max forcing to prevent instability
     
-    def setup(self):
-        # Frequencies for Fourier Feature mapping
-        self.frequencies = jnp.array([1.0, 2.0, 4.0, 8.0])
+#     def setup(self):
+#         # Frequencies for Fourier Feature mapping
+#         self.frequencies = jnp.array([1.0, 2.0, 4.0, 8.0])
 
-    def branch_net(self, w_field, w_grad_x, w_grad_y):
-        """
-        CNN branch processes the global vorticity state.
-        Input: Vorticity (w) and its spatial gradients (dissipation/shear).
-        """
-        # (N, N, 3) input
-        x = jnp.stack([w_field, w_grad_x, w_grad_y], axis=-1)
+#     def branch_net(self, w_field, w_grad_x, w_grad_y):
+#         """
+#         CNN branch processes the global vorticity state.
+#         Input: Vorticity (w) and its spatial gradients (dissipation/shear).
+#         """
+#         # (N, N, 3) input
+#         x = jnp.stack([w_field, w_grad_x, w_grad_y], axis=-1)
 
-        for feat in self.features:
-            x = nn.Conv(feat, kernel_size=(3, 3), padding='SAME')(x)
-            x = nn.relu(x)
+#         for feat in self.features:
+#             x = nn.Conv(feat, kernel_size=(3, 3), padding='SAME')(x)
+#             x = nn.relu(x)
 
-        # Flatten and global normalization
-        x = x.reshape(-1)
+#         # Flatten and global normalization
+#         x = x.reshape(-1)
         
-        # Soft Normalization (Critical for preventing saturation near zero state)
-        x = x / (jnp.linalg.norm(x) + 1.0)
+#         # Soft Normalization (Critical for preventing saturation near zero state)
+#         x = x / (jnp.linalg.norm(x) + 1.0)
         
-        x = nn.Dense(64)(x)
-        x = nn.tanh(x)
-        return x
+#         x = nn.Dense(64)(x)
+#         x = nn.tanh(x)
+#         return x
 
-    def trunk_net(self, xi_norm):
-        """Fourier encoding for normalized 2D actuator positions."""
-        angle_x = xi_norm[:, 0, None] * self.frequencies * jnp.pi
-        angle_y = xi_norm[:, 1, None] * self.frequencies * jnp.pi
+#     def trunk_net(self, xi_norm):
+#         """Fourier encoding for normalized 2D actuator positions."""
+#         angle_x = xi_norm[:, 0, None] * self.frequencies * jnp.pi
+#         angle_y = xi_norm[:, 1, None] * self.frequencies * jnp.pi
 
-        encoded = jnp.concatenate([
-            jnp.sin(angle_x), jnp.cos(angle_x),
-            jnp.sin(angle_y), jnp.cos(angle_y)
-        ], axis=-1)
+#         encoded = jnp.concatenate([
+#             jnp.sin(angle_x), jnp.cos(angle_x),
+#             jnp.sin(angle_y), jnp.cos(angle_y)
+#         ], axis=-1)
 
-        for feat in [64, 64]:
-            encoded = nn.Dense(feat)(encoded)
-            encoded = nn.tanh(encoded)
-        return encoded
+#         for feat in [64, 64]:
+#             encoded = nn.Dense(feat)(encoded)
+#             encoded = nn.tanh(encoded)
+#         return encoded
 
-    @nn.compact
-    def __call__(self, params, obs):
-        """
-        Args:
-            params: (Ignored in Flax functional calls, kept for API compatibility)
-            obs: (1, N, N) Vorticity field [Batch dim handled by vmap in training]
+#     @nn.compact
+#     def __call__(self, params, obs):
+#         """
+#         Args:
+#             params: (Ignored in Flax functional calls, kept for API compatibility)
+#             obs: (1, N, N) Vorticity field [Batch dim handled by vmap in training]
         
-        Note: The centralized net implicitly needs actuator positions. 
-        In this implementation, we assume they are fixed and stored in the class 
-        or passed via a slightly different API. For the Decentralized version below,
-        it is explicit.
-        """
-        # Remove batch dim if present (1, N, N) -> (N, N)
-        w_curr = obs.squeeze()
+#         Note: The centralized net implicitly needs actuator positions. 
+#         In this implementation, we assume they are fixed and stored in the class 
+#         or passed via a slightly different API. For the Decentralized version below,
+#         it is explicit.
+#         """
+#         # Remove batch dim if present (1, N, N) -> (N, N)
+#         w_curr = obs.squeeze()
         
-        # Calculate gradients (Enstrophy density related)
-        grads = jnp.gradient(w_curr)
-        grad_y, grad_x = grads[0], grads[1] # Axis 0 is Y in 'xy' indexing
+#         # Calculate gradients (Enstrophy density related)
+#         grads = jnp.gradient(w_curr)
+#         grad_y, grad_x = grads[0], grads[1] # Axis 0 is Y in 'xy' indexing
 
-        # Branch processing
-        # Note: Centralized net doesn't use Trunk in the same way as DeepONet 
-        # unless querying specific points. Here we simplify to a global CNN.
-        # Ideally, you would inject actuator positions here if they move.
+#         # Branch processing
+#         # Note: Centralized net doesn't use Trunk in the same way as DeepONet 
+#         # unless querying specific points. Here we simplify to a global CNN.
+#         # Ideally, you would inject actuator positions here if they move.
         
-        # For compatibility with the dual-structure:
-        x = jnp.stack([w_curr, grad_x, grad_y], axis=-1)
-        for feat in self.features:
-            x = nn.Conv(feat, kernel_size=(3, 3), padding='SAME')(x)
-            x = nn.relu(x)
-        x = x.reshape(-1)
-        x = nn.Dense(128)(x)
-        x = nn.relu(x)
+#         # For compatibility with the dual-structure:
+#         x = jnp.stack([w_curr, grad_x, grad_y], axis=-1)
+#         for feat in self.features:
+#             x = nn.Conv(feat, kernel_size=(3, 3), padding='SAME')(x)
+#             x = nn.relu(x)
+#         x = x.reshape(-1)
+#         x = nn.Dense(128)(x)
+#         x = nn.relu(x)
         
-        # Output head for N actuators (assuming N is known or output size is fixed)
-        # This part is illustrative; use Decentralized for multi-agent.
-        return x 
+#         # Output head for N actuators
+#         return x 
 
 class DecentralizedTurbulenceNet(nn.Module):
     """

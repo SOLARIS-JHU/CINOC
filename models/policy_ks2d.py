@@ -3,95 +3,96 @@ import jax.numpy as jnp
 from flax import linen as nn
 from typing import Sequence, Tuple
 
-class KS2DControlNet(nn.Module):
-    """
-    Centralized Controller for 2D Kuramoto-Sivashinsky on Periodic Boundary.
+# NOTE: THIS centralized controller wont be used for now, keeping it just in case.  
+# class KS2DControlNet(nn.Module):
+#     """
+#     Centralized Controller for 2D Kuramoto-Sivashinsky on Periodic Boundary.
     
-    Structure:
-    - Branch: CNN processing of the full 2D error field (u - u_target).
-    - Trunk: Fourier encoding of normalized actuator positions.
-    - Output: Forcing intensity (u) only.
-    """
-    features: Sequence[int] = (16, 32)
-    domain_size: Tuple[float, float] = (32.0, 32.0) # (Lx, Ly)
-    u_max: float = 10.0  # KS often requires lower forcing magnitude than Heat
+#     Structure:
+#     - Branch: CNN processing of the full 2D error field (u - u_target).
+#     - Trunk: Fourier encoding of normalized actuator positions.
+#     - Output: Forcing intensity (u) only.
+#     """
+#     features: Sequence[int] = (16, 32)
+#     domain_size: Tuple[float, float] = (32.0, 32.0) # (Lx, Ly)
+#     u_max: float = 10.0  # KS often requires lower forcing magnitude than Heat
     
-    def setup(self):
-        self.frequencies = jnp.array([1.0, 2.0, 4.0, 8.0])
+#     def setup(self):
+#         self.frequencies = jnp.array([1.0, 2.0, 4.0, 8.0])
 
-    def branch_net(self, error, error_grad_x, error_grad_y):
-        """
-        CNN branch processes the global spatial error state.
-        """
-        # (N, N, 3) input
-        x = jnp.stack([error, error_grad_x, error_grad_y], axis=-1)
+#     def branch_net(self, error, error_grad_x, error_grad_y):
+#         """
+#         CNN branch processes the global spatial error state.
+#         """
+#         # (N, N, 3) input
+#         x = jnp.stack([error, error_grad_x, error_grad_y], axis=-1)
 
-        # 2D Convolutions with Periodic Padding is tricky in standard Conv,
-        # but since this is global context, standard 'SAME' padding is 
-        # acceptable. Ideally, one would manually pad with 'wrap' before Conv.
-        for feat in self.features:
-            x = nn.Conv(feat, kernel_size=(3, 3), padding='SAME')(x)
-            x = nn.relu(x)
+#         # 2D Convolutions with Periodic Padding is tricky in standard Conv,
+#         # but since this is global context, standard 'SAME' padding is 
+#         # acceptable. Ideally, one would manually pad with 'wrap' before Conv.
+#         for feat in self.features:
+#             x = nn.Conv(feat, kernel_size=(3, 3), padding='SAME')(x)
+#             x = nn.relu(x)
 
-        # Flatten and global normalization
-        x = x.reshape(-1)
-        # x = x / (jnp.linalg.norm(x) + 1.0) 
-        x = nn.Dense(64)(x)
-        x = nn.tanh(x)
-        return x
+#         # Flatten and global normalization
+#         x = x.reshape(-1)
+#         # x = x / (jnp.linalg.norm(x) + 1.0) 
+#         x = nn.Dense(64)(x)
+#         x = nn.tanh(x)
+#         return x
 
-    def trunk_net(self, xi_norm):
-        """
-        Fourier encoding for normalized 2D positions.
-        """
-        angle_x = xi_norm[:, 0, None] * self.frequencies * jnp.pi
-        angle_y = xi_norm[:, 1, None] * self.frequencies * jnp.pi
+#     def trunk_net(self, xi_norm):
+#         """
+#         Fourier encoding for normalized 2D positions.
+#         """
+#         angle_x = xi_norm[:, 0, None] * self.frequencies * jnp.pi
+#         angle_y = xi_norm[:, 1, None] * self.frequencies * jnp.pi
 
-        encoded = jnp.concatenate([
-            jnp.sin(angle_x), jnp.cos(angle_x),
-            jnp.sin(angle_y), jnp.cos(angle_y)
-        ], axis=-1)
+#         encoded = jnp.concatenate([
+#             jnp.sin(angle_x), jnp.cos(angle_x),
+#             jnp.sin(angle_y), jnp.cos(angle_y)
+#         ], axis=-1)
 
-        for feat in [64, 64]:
-            encoded = nn.Dense(feat)(encoded)
-            encoded = nn.tanh(encoded)
-        return encoded
+#         for feat in [64, 64]:
+#             encoded = nn.Dense(feat)(encoded)
+#             encoded = nn.tanh(encoded)
+#         return encoded
 
-    @nn.compact
-    def __call__(self, u_curr, u_target, xi_fixed):
-        """
-        Args:
-            u_curr: (N, N) field
-            u_target: (N, N) target
-            xi_fixed: (M, 2) actuator positions in domain units
-        """
-        # 1. Normalize Coordinates [0, L] -> [0, 1]
-        Lx, Ly = self.domain_size
-        xi_norm = jnp.stack([
-            xi_fixed[:, 0] / Lx,
-            xi_fixed[:, 1] / Ly
-        ], axis=-1)
+#     @nn.compact
+#     def __call__(self, u_curr, u_target, xi_fixed):
+#         """
+#         Args:
+#             u_curr: (N, N) field
+#             u_target: (N, N) target
+#             xi_fixed: (M, 2) actuator positions in domain units
+#         """
+#         # 1. Normalize Coordinates [0, L] -> [0, 1]
+#         Lx, Ly = self.domain_size
+#         xi_norm = jnp.stack([
+#             xi_fixed[:, 0] / Lx,
+#             xi_fixed[:, 1] / Ly
+#         ], axis=-1)
 
-        # 2. Compute Error & Gradient
-        error = u_curr - u_target
-        # Gradient returns [grad_y, grad_x]
-        grads = jnp.gradient(error)
-        error_grad_y, error_grad_x = grads[0], grads[1]
+#         # 2. Compute Error & Gradient
+#         error = u_curr - u_target
+#         # Gradient returns [grad_y, grad_x]
+#         grads = jnp.gradient(error)
+#         error_grad_y, error_grad_x = grads[0], grads[1]
 
-        # 3. Branch & Trunk
-        branch_out = self.branch_net(error, error_grad_x, error_grad_y)
-        trunk_out = self.trunk_net(xi_norm)
+#         # 3. Branch & Trunk
+#         branch_out = self.branch_net(error, error_grad_x, error_grad_y)
+#         trunk_out = self.trunk_net(xi_norm)
 
-        # 4. Fusion
-        branch_repeated = jnp.tile(branch_out, (xi_fixed.shape[0], 1))
-        combined = jnp.concatenate([branch_repeated, trunk_out], axis=-1)
+#         # 4. Fusion
+#         branch_repeated = jnp.tile(branch_out, (xi_fixed.shape[0], 1))
+#         combined = jnp.concatenate([branch_repeated, trunk_out], axis=-1)
 
-        # 5. Output Head (Intensity only)
-        h = nn.Dense(64)(combined)
-        h = nn.tanh(h)
-        u_raw = nn.Dense(1)(h).squeeze(-1)
+#         # 5. Output Head (Intensity only)
+#         h = nn.Dense(64)(combined)
+#         h = nn.tanh(h)
+#         u_raw = nn.Dense(1)(h).squeeze(-1)
 
-        return self.u_max * jnp.tanh(u_raw)
+#         return self.u_max * jnp.tanh(u_raw)
     
     
 class DecentralizedKS2DControlNet(nn.Module):

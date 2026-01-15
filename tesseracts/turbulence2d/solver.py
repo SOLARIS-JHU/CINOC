@@ -149,7 +149,7 @@ def rk4_step(w_hat, dt, kx, ky, k_sq, k_sq_inv, viscosity, forcing_hat, u_cmd):
     
     return w_hat + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
 
-# --- 2. Solver Interface (Matches previous Python API) ---
+# --- 2. Solver Interface ---
 
 def solve_with_policy(
     policy_fn,

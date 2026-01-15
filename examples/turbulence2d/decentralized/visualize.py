@@ -1,6 +1,6 @@
 """
-Conference-Quality Visualization for 2D Turbulence (Navier-Stokes) Stabilization.
-Adapted for Decentralized Control (64 Agents, Viscous Decay).
+Multi-Example Visualization for Trained Turbulence Policy.
+Randomly selects 3 examples from the dataset and visualizes stabilization.
 """
 
 import jax
@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
 import sys
+import pickle
 import flax.serialization
 from pathlib import Path
 
@@ -22,55 +23,65 @@ sys.path.append(str(script_dir))
 
 from dynamics_dual import PDEDynamics2D
 from models.policy_turb import DecentralizedTurbulenceNet 
-from data_utils import get_batch_initial_conditions
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# In viz.py
-
 CONFIG = {
-    'N_grid': 128,
+    # --- 1. Grid Resolution (MUST MATCH TRAINING) ---
+    'N_grid': 64,          
     'L_domain': 1.0,
-
-    # --- FIX 1: Use a realistic Control Interval ---
-    # dt should be the time between policy actions. 
-    # 0.02s is standard for this Reynolds number.
-    'dt': 0.02,           
     
-    # Physics fidelity
-    # 0.02 / 20 = 0.001s physics step (Good for RK4 stability)
-    'substeps': 20,         
+    # --- 2. Physics (MUST MATCH TRAINING) ---
+    'dt': 0.01,            
+    'substeps': 5,         
+    'viscosity': 5e-4,     
     
-    'viscosity': 5e-5,      
-    'n_agents': 64,         
-    'grid_shape': (8, 8),   
-
-    # --- FIX 2: Adjust steps to hit target times ---
-    # Chaos: 25 steps * 0.02s = 0.5s
-    'T_chaos_steps': 25,    
+    'n_agents': 64,
+    'grid_shape': (8, 8),
+    'sigma': 0.05,         
     
-    # Control: 100 steps * 0.02s = 2.0s
-    'T_control_steps': 100, 
-
-    # Snapshots (Physical Time)
-    'snapshot_times': [-0.25, 0.0, 0.25, 0.75, 1.5], 
+    # --- 3. Duration ---
+    'T_chaos_steps': 50,    # 0.5s chaos
+    'T_control_steps': 200, # 2.0s control
     
-    'params_file': 'turbulence_params.msgpack'
+    # Times relative to control start (t=0)
+    'snapshot_times': [-0.25, 0.0, 0.5, 1.0, 2.0],
+    
+    # --- 4. Files ---
+    'params_file': 'turbulence_params.msgpack',
+    # Ensure this matches the file used in training
+    'ic_filename': 'turbulence_chaotic_ics_64_more.pkl', 
 }
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# 2. HELPER FUNCTIONS
+# 2. DATA & MODEL LOADING
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def get_actuator_grid():
-    """Reconstructs the 8x8 grid automatically."""
     grid_dim = int(np.sqrt(CONFIG['n_agents']))
     x_lin = np.linspace(0, CONFIG['L_domain'], grid_dim, endpoint=False) + (CONFIG['L_domain']/grid_dim)/2
     xv, yv = np.meshgrid(x_lin, x_lin)
     return jnp.stack([xv.flatten(), yv.flatten()], axis=-1)
+
+def load_dataset():
+    """Loads the full dataset from pickle."""
+    script_dir = Path(__file__).resolve().parent
+    data_dir = script_dir.parent / "data" 
+    file_path = data_dir / CONFIG['ic_filename']
+    
+    if not file_path.exists():
+        file_path = Path(CONFIG['ic_filename'])
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"Could not find {CONFIG['ic_filename']}.")
+
+    print(f"[Data] Loading dataset from: {file_path}")
+    with open(file_path, 'rb') as f:
+        u_pool = pickle.load(f)
+    
+    return jnp.array(u_pool) # Shape: (pool_size, N, N)
 
 def load_params(model, filepath):
     if not Path(filepath).exists():
@@ -82,225 +93,189 @@ def load_params(model, filepath):
     key = jax.random.PRNGKey(42)
     xi_fixed = get_actuator_grid()
     dummy_obs = jnp.zeros((1, CONFIG['N_grid'], CONFIG['N_grid']))
-    
-    # Init model to get structure
     init_params = model.init(key, xi_fixed, dummy_obs)
-    
-    # Overwrite with saved weights
     return flax.serialization.from_bytes(init_params, serialized_bytes)
 
-# --- FIXED ZERO POLICY ---
 def get_zero_policy(n_agents):
-    """
-    Returns a policy function compatible with PDEDynamics2D.
-    Args:
-        n_agents: Number of agents to shape the output zero vector correctly.
-    """
     def zero_policy_fn(params, xi, obs):
-        # Arguments match PDEDynamics call: self.policy_apply_fn(params, xi_fixed, obs)
-        # Returns shape (n_agents,) to ensure u_cmd is not scalar
         return jnp.zeros((n_agents,))
-    
     return zero_policy_fn
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3. SIMULATION LOOP
+# 3. SIMULATION LOOP (Comparison)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def generate_transition_data(key, model, params):
-    """Simulates: Chaos -> Transition -> Stabilization."""
-    
-    # 1. Setup Dynamics
-    dyn_chaos = PDEDynamics2D(policy_apply_fn=get_zero_policy(CONFIG['n_agents']))
-    dyn_control = PDEDynamics2D(policy_apply_fn=model.apply)
-    
-    # 2. Get Initial Chaotic State (Spectral)
-    # The data loader returns Spectral states (Complex128)
-    w0_hat = get_batch_initial_conditions(key, 1, CONFIG['N_grid'], CONFIG['L_domain'])[0]
-    
-    xi_fixed = get_actuator_grid()
-    
-    # 3. Phase 1: Run Uncontrolled
-    print(f"  [Sim] Running Chaos Phase ({CONFIG['T_chaos_steps']*CONFIG['substeps']*CONFIG['dt']:.2f}s)...")
-    
-    # Input: Spectral w0_hat
-    # Output: Physical Trajectory (w_traj_chaos)
-    w_traj_chaos, _ = dyn_chaos.unroll_controlled(
-        w0_hat, xi_fixed, params,
-        t_steps=CONFIG['T_chaos_steps'],
-        substeps=CONFIG['substeps'],
-        N_grid=CONFIG['N_grid'], 
-        L=CONFIG['L_domain'], 
-        dt=CONFIG['dt'],
-        viscosity=CONFIG['viscosity'],
-        actuator_grid_shape=CONFIG['grid_shape']
-    )
-    
-    # 4. Phase 2: Run Controlled
-    w_handoff_phys = w_traj_chaos[-1]
-    
-    # --- FIX: Convert Physical -> Spectral for Solver ---
-    w_handoff_hat = jnp.fft.fft2(w_handoff_phys)
-    
-    print(f"  [Sim] Running Control Phase ({CONFIG['T_control_steps']*CONFIG['substeps']*CONFIG['dt']:.2f}s)...")
-    
-    w_traj_ctrl, u_force_ctrl = dyn_control.unroll_controlled(
-        w_handoff_hat, xi_fixed, params,
-        t_steps=CONFIG['T_control_steps'],
-        substeps=CONFIG['substeps'],
-        N_grid=CONFIG['N_grid'], 
-        L=CONFIG['L_domain'], 
-        dt=CONFIG['dt'],
-        viscosity=CONFIG['viscosity'],
-        actuator_grid_shape=CONFIG['grid_shape']
-    )
-    
-    # 5. Stitch (Both are now Physical)
-    w_full = jnp.concatenate([w_traj_chaos, w_traj_ctrl], axis=0)
-    
-    dt_effective = CONFIG['dt']
+def run_comparison(w0_hat, model, params):
+    """Run Chaos -> Branch(Control vs Baseline) for a single IC."""
     n_chaos = CONFIG['T_chaos_steps']
     n_ctrl = CONFIG['T_control_steps']
+    xi_fixed = get_actuator_grid()
     
-    t_chaos = (jnp.arange(n_chaos) - n_chaos) * dt_effective
-    t_ctrl  = jnp.arange(n_ctrl) * dt_effective
-    t_full = jnp.concatenate([t_chaos, t_ctrl])
+    dyn_control = PDEDynamics2D(policy_apply_fn=model.apply)
+    dyn_baseline = PDEDynamics2D(policy_apply_fn=get_zero_policy(CONFIG['n_agents']))
     
-    return t_full, w_full, u_force_ctrl
+    # 1. Chaos Phase
+    w_chaos, _ = dyn_baseline.unroll_controlled(
+        w0_hat, xi_fixed, params,
+        t_steps=n_chaos, substeps=CONFIG['substeps'],
+        N_grid=CONFIG['N_grid'], L=CONFIG['L_domain'], dt=CONFIG['dt'],
+        viscosity=CONFIG['viscosity'], actuator_grid_shape=CONFIG['grid_shape'],
+        sigma=CONFIG['sigma']
+    )
+    
+    # Handoff
+    w_handoff_phys = w_chaos[-1]
+    w_handoff_hat = jnp.fft.fft2(w_handoff_phys)
+    
+    # 2. Controlled Branch
+    w_ctrl_phase, _ = dyn_control.unroll_controlled(
+        w_handoff_hat, xi_fixed, params,
+        t_steps=n_ctrl, substeps=CONFIG['substeps'],
+        N_grid=CONFIG['N_grid'], L=CONFIG['L_domain'], dt=CONFIG['dt'],
+        viscosity=CONFIG['viscosity'], actuator_grid_shape=CONFIG['grid_shape'],
+        sigma=CONFIG['sigma']
+    )
+
+    # 3. Baseline Branch
+    w_base_phase, _ = dyn_baseline.unroll_controlled(
+        w_handoff_hat, xi_fixed, params,
+        t_steps=n_ctrl, substeps=CONFIG['substeps'],
+        N_grid=CONFIG['N_grid'], L=CONFIG['L_domain'], dt=CONFIG['dt'],
+        viscosity=CONFIG['viscosity'], actuator_grid_shape=CONFIG['grid_shape'],
+        sigma=CONFIG['sigma']
+    )
+    
+    # Stitch
+    w_blue = jnp.concatenate([w_chaos, w_ctrl_phase], axis=0)
+    w_grey = jnp.concatenate([w_chaos, w_base_phase], axis=0)
+    
+    # Time Axis
+    dt = CONFIG['dt']
+    t_chaos = (np.arange(n_chaos) - n_chaos) * dt 
+    t_ctrl = np.arange(n_ctrl) * dt
+    t_axis = np.concatenate([t_chaos, t_ctrl])
+    
+    return t_axis, w_blue, w_grey
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. PLOTTING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def setup_academic_style():
-    plt.rcParams.update({
-        "font.family": "serif",
-        "font.serif": ["Times New Roman", "DejaVu Serif"],
-        "axes.labelsize": 14,
-        "font.size": 12,
-        "legend.fontsize": 12,
-        "axes.titlesize": 16,
-    })
-
-def plot_2d_transition(t_full, w_full, u_force_ctrl, example_id=1, save_name="turb_transition.png"):
-    setup_academic_style()
+def plot_single_case(ax_row_snaps, ax_plot, t, w_ctrl, w_base, case_idx):
+    """Helper to plot one case into provided Axes objects."""
     
-    # Enstrophy
-    enstrophy = jnp.mean(w_full**2, axis=(1,2))
-    
-    fig = plt.figure(figsize=(16, 9))
-    gs = gridspec.GridSpec(2, 1, height_ratios=[1, 0.5], hspace=0.35)
-    
-    # --- Row 1: Snapshots ---
-    target_times = np.array(CONFIG['snapshot_times'])
+    # --- Snapshots ---
     snap_indices = []
-    
-    for t_req in target_times:
-        idx = (np.abs(t_full - t_req)).argmin()
+    for t_req in CONFIG['snapshot_times']:
+        idx = (np.abs(t - t_req)).argmin()
         snap_indices.append(idx)
         
-    gs_snaps = gridspec.GridSpecFromSubplotSpec(1, len(snap_indices), subplot_spec=gs[0], wspace=0.1)
-    
-    max_val = jnp.max(jnp.abs(w_full[0])) * 0.8
-    vmin, vmax = -max_val, max_val
+    max_w = jnp.max(jnp.abs(w_ctrl[0])) * 0.9 
     
     for i, idx in enumerate(snap_indices):
-        ax = fig.add_subplot(gs_snaps[i])
-        w_snap = w_full[idx]
-        t_snap = t_full[idx]
+        ax = ax_row_snaps[i]
+        w_snap = w_ctrl[idx]
+        t_snap = t[idx]
         
-        im = ax.imshow(w_snap, extent=[0, CONFIG['L_domain'], 0, CONFIG['L_domain']], 
-                       origin='lower', cmap='RdBu_r', vmin=vmin, vmax=vmax)
+        im = ax.imshow(w_snap, extent=[0,1,0,1], origin='lower', cmap='RdBu_r', vmin=-max_w, vmax=max_w)
+        ax.set_xticks([])
+        ax.set_yticks([])
         
-        if i == 0:
-            ax.set_ylabel(r"$y$")
-            ax.set_yticks([0, CONFIG['L_domain']])
-        else:
-            ax.set_yticks([])
+        if t_snap < -1e-4: color = 'firebrick'
+        elif t_snap > 1e-4: color = 'navy'
+        else: color = 'black'
             
-        ax.set_xticks([0, CONFIG['L_domain']])
-        ax.set_xlabel(r"$x$")
+        # Only add titles to the top row
+        if case_idx == 0:
+            ax.set_title(f"t = {t_snap:.2f}s", color=color, fontweight='bold', fontsize=10)
         
-        if t_snap < -1e-4:
-            status = "Chaos"
-            color = 'firebrick'
-        elif t_snap > 1e-4:
-            status = "Control ON"
-            color = 'navy'
-        else:
-            status = "Switching"
-            color = 'black'
-            
         for spine in ax.spines.values():
             spine.set_edgecolor(color)
-            spine.set_linewidth(2.0)
+            spine.set_linewidth(1.5)
             
-        ax.set_title(f"t = {t_snap:.2f}s\n{status}", color=color, fontweight='bold')
+        # Add 'Case X' label to the left of the first snapshot
+        if i == 0:
+            ax.set_ylabel(f"Case {case_idx}\nVorticity", fontsize=10)
+
+    # --- Enstrophy Plot ---
+    e_ctrl = jnp.mean(w_ctrl**2, axis=(1,2))
+    e_base = jnp.mean(w_base**2, axis=(1,2))
+    
+    mask_chaos = t <= 0
+    mask_ctrl = t >= 0
+    
+    ax_plot.plot(t[mask_chaos], e_base[mask_chaos], color='firebrick', lw=1.5)
+    ax_plot.plot(t[mask_ctrl], e_base[mask_ctrl], color='grey', linestyle='--', label='Uncontrolled', lw=1.5)
+    ax_plot.plot(t[mask_ctrl], e_ctrl[mask_ctrl], color='navy', label='Ours', lw=1.5)
+    
+    ax_plot.axvline(x=0, color='k', linestyle=':', alpha=0.5)
+    ax_plot.set_yscale('log')
+    
+    if case_idx == 2: # Bottom plot
+        ax_plot.set_xlabel("Time (s)")
+    else:
+        ax_plot.set_xticks([]) # Hide x-ticks for top ones
         
-        # Plot Actuators
-        xi = get_actuator_grid()
-        ax.scatter(xi[:,0], xi[:,1], c='k', s=10, alpha=0.3, marker='x') 
-
-    cax = fig.add_axes([0.92, 0.55, 0.015, 0.3])
-    cb = plt.colorbar(im, cax=cax)
-    cb.set_label(r"Vorticity $\omega(x,y)$")
-
-    # --- Row 2: Enstrophy Trace ---
-    ax_ts = fig.add_subplot(gs[1])
+    ax_plot.set_ylabel(r"Enstrophy")
+    ax_plot.set_xlim(t[0], t[-1])
+    ax_plot.grid(True, which="both", ls="--", alpha=0.3)
     
-    mask_chaos = t_full <= 0
-    mask_ctrl = t_full >= 0
-    
-    ax_ts.plot(t_full[mask_chaos], enstrophy[mask_chaos], color='firebrick', lw=2, label='Uncontrolled')
-    ax_ts.plot(t_full[mask_ctrl], enstrophy[mask_ctrl], color='navy', lw=2, label='Controlled')
-    
-    ax_ts.axvline(x=0, color='k', linestyle='--', alpha=0.5)
-    ax_ts.set_yscale('log')
-    ax_ts.set_xlim(t_full[0], t_full[-1])
-    ax_ts.set_ylabel(r"Enstrophy $\langle \omega^2 \rangle$")
-    ax_ts.set_xlabel("Time (s)")
-    ax_ts.legend(loc='upper right')
-    ax_ts.grid(True, which='both', linestyle='--', alpha=0.3)
-    
-    final_e = enstrophy[-1]
-    ax_ts.text(t_full[-1], final_e, f" Final: {final_e:.2e}", va='bottom', ha='right', fontweight='bold')
-
-    ax_ts.set_title(f"(b) Turbulence Suppression - Example {example_id}", loc='left', fontweight='bold')
-    plt.suptitle(f"2D Turbulence Stabilization (Example {example_id} | {CONFIG['n_agents']} Agents)", y=0.98, fontsize=18)
-    plt.savefig(save_name, dpi=150, bbox_inches='tight')
-    print(f"✓ Saved visualization to {save_name}")
-    plt.close()
+    # Legend only on first plot to save space
+    if case_idx == 0:
+        ax_plot.legend(loc='upper right', fontsize=8)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5. MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("--- 2D Turbulence Visualization Script (Generating 3 Examples) ---")
+    print(f"--- Visualizing 3 Random Examples (N={CONFIG['N_grid']}) ---")
     
+    # 1. Init Model
     model = DecentralizedTurbulenceNet(
         features=(32, 64), 
+        patch_size=16, # Match 64x64 Training
         domain_size=(CONFIG['L_domain'], CONFIG['L_domain']),
-        u_max=75.0
+        u_max=150.0    # Match Training
     )
     
+    # 2. Load
     try:
-        print(f"Loading params from {CONFIG['params_file']}...")
         params = load_params(model, CONFIG['params_file'])
+        full_dataset = load_dataset()
     except Exception as e:
         print(f"Error: {e}")
-        print("Run training first to generate parameters.")
         sys.exit(1)
-        
-    base_key = jax.random.PRNGKey(55) 
-    num_examples = 3
+
+    # 3. Pick 3 Random Indices
+    np.random.seed(123) # Fixed seed for reproducibility, or remove for true random
+    indices = np.random.choice(len(full_dataset), 3, replace=False)
+    print(f"Selected Test Indices: {indices}")
+
+    # 4. Setup Big Plot
+    # Layout: 3 Rows. Left side = 5 Snapshots. Right side = 1 Time Series.
+    fig = plt.figure(figsize=(16, 8))
+    outer_grid = gridspec.GridSpec(3, 2, width_ratios=[2.5, 1], hspace=0.3, wspace=0.15)
     
-    for i in range(num_examples):
-        print(f"\n═══ Generating Example {i+1} / {num_examples} ═══")
-        rng_run, base_key = jax.random.split(base_key)
-        t_full, w_full, u_force = generate_transition_data(rng_run, model, params)
+    for i, idx in enumerate(indices):
+        print(f"Processing Case {i} (Index {idx})...")
+        w0_hat = full_dataset[idx]
         
-        filename = f"turb_transition_ex{i+1}.png"
-        plot_2d_transition(t_full, w_full, u_force, example_id=i+1, save_name=filename)
+        # Run Sim
+        t_axis, w_ctrl, w_base = run_comparison(w0_hat, model, params)
         
-    print("\nAll examples generated successfully.")
+        # Create Sub-grids for this row
+        # Left: Snapshots
+        gs_snaps = gridspec.GridSpecFromSubplotSpec(1, 5, subplot_spec=outer_grid[i, 0], wspace=0.05)
+        ax_snaps = [fig.add_subplot(gs_snaps[j]) for j in range(5)]
+        
+        # Right: Plot
+        ax_plot = fig.add_subplot(outer_grid[i, 1])
+        
+        # Plot
+        plot_single_case(ax_snaps, ax_plot, t_axis, w_ctrl, w_base, case_idx=i)
+
+    plt.suptitle("Turbulence Stabilization: 3 Random Test Cases", fontsize=16, fontweight='bold')
+    save_name = "random_3_cases_64x64.png"
+    plt.savefig(save_name, dpi=150, bbox_inches='tight')
+    print(f"✓ Saved combined plot to {save_name}")

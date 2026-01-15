@@ -1,3 +1,9 @@
+"""
+Train centralized controllers for multiple Kuramoto-Sivashinsky (KS) 1D scenarios
+with varying domain sizes, grid resolutions, and number of actuators.
+Each scenario is trained separately, and the resulting models are saved for later evaluation
+and visualization.
+"""
 import jax
 import jax.numpy as jnp
 import optax

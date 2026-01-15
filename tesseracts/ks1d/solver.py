@@ -113,9 +113,7 @@ def solve_with_policy(
     return trajectory
 
 # --- 3. Example Usage ---
-
 if __name__ == "__main__":
-    
     # --- Configuration for this run ---
     N_GRID = 256
     L_DOMAIN = 64.0
