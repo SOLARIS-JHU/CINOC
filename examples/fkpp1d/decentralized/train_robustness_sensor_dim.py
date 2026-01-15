@@ -34,7 +34,7 @@ FIXED_NOISE_CONFIG = {
 }
 
 # Variable: Sensor Dimensions (Patch Sizes)
-SENSOR_DIMS = [0.04, 0.06, 0.08, 0.12, 0.2, 0.3]
+SENSOR_DIMS = [0.04, 0.06, 0.08, 0.12, 0.2, 0.3, 0.5, 1.0]
 
 def run_sensor_experiments():
     print(f"Starting Sensor Dimension Sensitivity Experiment...")
