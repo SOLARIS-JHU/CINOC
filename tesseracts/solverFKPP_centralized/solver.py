@@ -64,28 +64,37 @@ def fkpp_step_1d(z, xi, u, v):
     return z_next, xi_next
 
 @partial(jax.jit, static_argnums=(4, 5))
-def solve_with_policy(z_init, xi_init, z_target, params, policy_apply_fn, t_steps):
+def solve_with_policy(z_init, xi_init, z_target, params, policy_apply_fn, t_steps, key, noise_u=0.0, noise_z=0.0):
     """
-    FKPP Loop: Policy determines intensity (u) and velocity (v) 
-    at every step based on current state vs target.
+    FKPP Loop with Noise Injection:
+    noise_z: Stdev of noise added to 'z_curr' BEFORE policy sees it (Sensor Noise)
+    noise_u: Stdev of noise added to 'u' AFTER policy outputs it (Actuator Noise)
     """
     def step_fn(carry, _):
-        z_curr, xi_curr = carry
+        z_curr, xi_curr, current_key = carry
         
-        # 1. Policy Inference
-        # Returns u (intensities) and v (velocities)
-        u, v = policy_apply_fn(params, z_curr, z_target, xi_curr)
+        # Split keys for this step
+        k_sensor, k_actuator, next_key = jax.random.split(current_key, 3)
+
+        # 1. Add Sensor Noise (What the policy sees)
+        z_observed = z_curr + noise_z * jax.random.normal(k_sensor, z_curr.shape)
+
+        # 2. Policy Inference (using observed state)
+        u, v = policy_apply_fn(params, z_observed, z_target, xi_curr)
+
+        # 3. Add Actuator Noise (What the physics gets)
+        u_noisy = u + noise_u * jax.random.normal(k_actuator, u.shape)
         
-        # 2. FKPP Physics Step
-        z_next, xi_next = fkpp_step_1d(z_curr, xi_curr, u, v)
+        # 4. FKPP Physics Step (using real state and noisy action)
+        z_next, xi_next = fkpp_step_1d(z_curr, xi_curr, u_noisy, v)
         
-        return (z_next, xi_next), (z_next, xi_next, u, v)
+        return (z_next, xi_next, next_key), (z_next, xi_next, u_noisy, v)
 
     _, trajectory = jax.lax.scan(
         step_fn, 
-        (z_init, xi_init), 
+        (z_init, xi_init, key), # Pass key into carry
         None, 
         length=t_steps
     )
     
-    return trajectory # (z_traj, xi_traj, u_traj, v_traj)
+    return trajectory

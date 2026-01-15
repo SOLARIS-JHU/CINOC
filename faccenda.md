@@ -30,4 +30,25 @@
 
 
 todo:
-- for ks1d centralized is not being compared with other decentralized (different lenghts)
+- aggiungere noise ad actuators output e actuators input
+    - vedere che cosa non funzia mo' se abbiamo fatto un casino
+    
+- aggiungere possibilità di avere sia fixed actuators sia kinetic
+- aggiungere sensor dimension come parametro (potenzialmente)
+
+- domande per domani con jan
+    - noise sia per actuators sia per observation?
+    - shall we do all the ablations for all the pdes or maybe just for one pde for each task
+    - high density treated as a "noisy" variation: smoother policy results in higher less osciallatory behaviours when the density increase
+    - we have oscillations as seen in picture
+
+
+- meeting notes:
+    - dibakar's presentation
+    - my tests
+    - what we have, where we are
+    - ablations
+        - fkpp
+            - sensor dimension
+            - noise and zero-shot interplay
+        - 

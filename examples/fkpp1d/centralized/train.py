@@ -24,6 +24,11 @@ from dynamics_dual import PDEDynamics
 from models.policy import ControlNet
 from data_utils import generate_grf
 
+CONFIG = {
+    "noise_u": 0.0,  # Control noise
+    "noise_z": 0.0, # State noise
+}
+
 # --- 1. Initialization ---
 solver_ts = Tesseract.from_image("solver_fkpp1d_centralized:latest")
 
@@ -42,9 +47,10 @@ optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(lr_schedule))
 opt_state = optimizer.init(params)
 
 # --- 2. Centralized Loss Function ---
-def loss_fn(params, z_init, xi_init, z_target, dynamics):
+def loss_fn(params, z_init, xi_init, z_target, key, dynamics):
     z_traj, xi_traj, u_traj, v_traj = dynamics.unroll_controlled(
-        z_init, xi_init, z_target, params, T_steps
+        z_init, xi_init, z_target, params, T_steps, 
+        key=key, noise_u=CONFIG["noise_u"], noise_z=CONFIG["noise_z"]
     )
     
     # 1. Tracking Loss
@@ -70,11 +76,15 @@ def loss_fn(params, z_init, xi_init, z_target, dynamics):
     return total_loss, (l_track, l_effort, l_coll, l_bound)
 
 @partial(jax.jit, static_argnames='dynamics')
-def train_step(params, opt_state, z_init_batch, xi_init_batch, z_target_batch, dynamics):
-    batched_loss_fn = jax.vmap(loss_fn, in_axes=(None, 0, 0, 0, None))
+def train_step(params, opt_state, z_init_batch, xi_init_batch, z_target_batch, key, dynamics):
+    # Split key for the batch
+    keys = jax.random.split(key, z_init_batch.shape[0])
+    
+    # Add key to vmap axes (4th arg)
+    batched_loss_fn = jax.vmap(loss_fn, in_axes=(None, 0, 0, 0, 0, None))
     
     def mean_loss_fn(p):
-        losses, auxs = batched_loss_fn(p, z_init_batch, xi_init_batch, z_target_batch, dynamics)
+        losses, auxs = batched_loss_fn(p, z_init_batch, xi_init_batch, z_target_batch, keys, dynamics)
         return jnp.mean(losses), jax.tree_util.tree_map(jnp.mean, auxs)
 
     (loss, aux), grads = jax.value_and_grad(mean_loss_fn, has_aux=True)(params)
@@ -104,8 +114,11 @@ with solver_ts:
         idx = jax.random.randint(subkey, (batch_size,), 0, 5000)
         z_init_b, z_target_b = z_init_all[idx], z_target_all[idx]
 
+        # Split a fresh key for noise generation
+        key, step_key = jax.random.split(key)
+        
         params, opt_state, loss, aux = train_step(
-            params, opt_state, z_init_b, xi_init_batch, z_target_b, dynamics
+            params, opt_state, z_init_b, xi_init_batch, z_target_b, step_key, dynamics
         )
         
         if epoch % 10 == 0:

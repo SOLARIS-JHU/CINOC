@@ -6,5 +6,7 @@ matplotlib==3.10.8
 flax==0.12.2
 numpy==2.3.5
 tqdm
+pandas
 # phiflow
 # h5py
+seaborn

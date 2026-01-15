@@ -50,7 +50,7 @@ def run_simulation_suite(solver_ts, n_agents_list, params_file, z_init, z_target
             continue
 
         xi_init = jnp.linspace(0.2, 0.8, n_agents)
-        # Unroll the controlled trajectory [cite: 35, 48]
+        # Unroll the controlled trajectory
         z_traj, _, u_traj, _ = dynamics.unroll_controlled(
             z_init, xi_init, z_target, params, T_steps
         )
@@ -92,7 +92,7 @@ def plot_scalability_analysis(df, output_path, training_n=20):
              color=color_effort, alpha=0.8, linewidth=2, label='Control Effort ($\mathcal{L}_{force}$)')
     ax2.tick_params(axis='y', labelcolor=color_effort)
 
-    # Highlight the Training Point (Zero-Shot Boundary) [cite: 142, 145]
+    # Highlight the Training Point (Zero-Shot Boundary)
     ax1.axvline(x=training_n, color='#c0392b', linestyle='-', linewidth=2.5, alpha=0.6)
     # ax1.text(training_n + 0.5, ax1.get_ylim()[1] * 0.4, 'Training Boundary ($N=20$)', 
     #          color='#c0392b', rotation=90, fontweight='bold', verticalalignment='top')
@@ -125,7 +125,7 @@ def main():
     _, z_target = data_utils.generate_grf(sub2, n_points=n_pde, length_scale=0.4)
 
     # --- Run Simulations ---
-    # Define dense points near training and sparse points for extrapolation [cite: 147]
+    # Define dense points near training and sparse points for extrapolation
     n_agents_list = list(np.arange(10, 21, 1)) + list(np.arange(25, 65, 5))
     params_file = 'decentralized_params.msgpack'
     

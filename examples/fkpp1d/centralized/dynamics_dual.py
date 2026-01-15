@@ -23,7 +23,7 @@ class PDEDynamics:
         self.policy_apply_fn = policy_apply_fn
         self.use_tesseract = use_tesseract
 
-    def unroll_controlled(self, z_init, xi_init, z_target, params, t_steps):
+    def unroll_controlled(self, z_init, xi_init, z_target, params, t_steps, key=jax.random.PRNGKey(0), noise_u=0.0, noise_z=0.0):
         """
         Performs a FULL controlled FKPP simulation in ONE call.
         The policy dictates agent movement and forcing intensities at each step.
@@ -52,13 +52,14 @@ class PDEDynamics:
                 results["v_trajectory"]
             )
         else:
-            # 4. Native JAX fallback using the solver's internal scan loop
-            # Note: Native JAX handles the 'params' dict (PyTree) directly
             return solver.solve_with_policy(
                 z_init, 
                 xi_init, 
                 z_target, 
                 params, 
                 self.policy_apply_fn, 
-                t_steps
+                t_steps,
+                key=key,         # Pass the key
+                noise_u=noise_u, # Pass actuator noise
+                noise_z=noise_z  # Pass sensor noise
             )

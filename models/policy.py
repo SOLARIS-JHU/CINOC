@@ -77,7 +77,8 @@ class ControlNet(nn.Module):
         
         u_raw = nn.Dense(1)(x).squeeze(-1) # Output 1 per agent
         v_raw = nn.Dense(1)(x).squeeze(-1) # Output 1 per agent
-        
+
+        # Rescale intensity and velocity
         u = self.u_max * jnp.tanh(u_raw)
         v = self.v_max * jnp.tanh(v_raw)
         
@@ -97,7 +98,6 @@ class DecentralizedControlNet(nn.Module):
         x = local_patch
         for feat in self.features:
             x = nn.Dense(feat)(x)
-            # x = nn.GroupNorm(num_groups=1, epsilon=1e-5)(x) # Local-only normalization
             x = x / (jnp.linalg.norm(x) + 1.0) 
             x = nn.tanh(x)
         return x
@@ -119,7 +119,7 @@ class DecentralizedControlNet(nn.Module):
         # This uses the full field to get the true slope at the boundaries
         error_grad = jnp.gradient(error)
 
-        window_size = 8 
+        window_size = int(self.sensor_range * n_pde)
         half_window = window_size // 2
 
         # 2. PAD BOTH (Use 'edge' to mimic Neumann boundary conditions)
