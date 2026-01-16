@@ -23,7 +23,7 @@ class PDEDynamics:
         self.policy_apply_fn = policy_apply_fn
         self.use_tesseract = use_tesseract
 
-    def unroll_controlled(self, z_init, xi_init, z_target, params, t_steps, key=jax.random.PRNGKey(0), noise_u=0.0, noise_z=0.0):
+    def unroll_controlled(self, z_init, xi_init, z_target, params, t_steps, key=jax.random.PRNGKey(0), noise_u=0.0, noise_z=0.0, nu=0.005, rho=3.0):
         """
         Performs a FULL controlled FKPP simulation in ONE call.
         The policy dictates agent movement and forcing intensities at each step.
@@ -61,5 +61,7 @@ class PDEDynamics:
                 t_steps,
                 key=key,         # Pass the key
                 noise_u=noise_u, # Pass actuator noise
-                noise_z=noise_z  # Pass sensor noise
+                noise_z=noise_z,  # Pass sensor noise
+                nu=nu, #diffusion coefficient
+                rho=rho #population growth rate
             )

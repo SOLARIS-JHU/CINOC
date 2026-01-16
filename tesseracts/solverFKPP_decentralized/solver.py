@@ -7,10 +7,9 @@ from functools import partial
 N_grid = 100 
 L = 1.0
 dx = L / N_grid
-nu = 0.005   # Diffusion
-rho = 3.0    # Growth rate
 dt = 0.001   # Time step
 sigma = 0.05 # Actuator width
+
 
 def forcing_fn_1d(xi, u, N):
     """
@@ -45,15 +44,20 @@ def solve_tridiagonal_diffusion(z_explicit, r, N):
     return out.ravel()
 
 @jit
-def fkpp_step_1d(z, xi, u, v):
-    """Refactored to match heat equation step signature."""
+def fkpp_step_1d(z, xi, u, v, nu, rho):
+    """
+    Refactored to accept nu and rho as parameters.
+    """
     N = z.shape[0]
+    
     # 1. Reaction + Forcing (Explicit)
     f_t = forcing_fn_1d(xi, u, N) 
+    # Use the passed 'rho'
     reaction = rho * z * (1.0 - z)
     z_explicit = z + dt * (reaction + f_t)
 
     # 2. Diffusion (Implicit)
+    # Use the passed 'nu'
     r = nu * dt / (dx**2)
     z_next = solve_tridiagonal_diffusion(z_explicit, r, N)
     
@@ -64,11 +68,11 @@ def fkpp_step_1d(z, xi, u, v):
     return z_next, xi_next
 
 @partial(jax.jit, static_argnums=(4, 5))
-def solve_with_policy(z_init, xi_init, z_target, params, policy_apply_fn, t_steps, key, noise_u=0.0, noise_z=0.0):
+def solve_with_policy(z_init, xi_init, z_target, params, policy_apply_fn, t_steps, key, 
+                      nu=0.005, rho=3.0,       
+                      noise_u=0.0, noise_z=0.0):
     """
-    FKPP Loop with Noise Injection:
-    noise_z: Stdev of noise added to 'z_curr' BEFORE policy sees it (Sensor Noise)
-    noise_u: Stdev of noise added to 'u' AFTER policy outputs it (Actuator Noise)
+    FKPP Loop with Noise Injection and dynamic Physics Parameters.
     """
     def step_fn(carry, _):
         z_curr, xi_curr, current_key = carry
@@ -85,14 +89,14 @@ def solve_with_policy(z_init, xi_init, z_target, params, policy_apply_fn, t_step
         # 3. Add Actuator Noise (What the physics gets)
         u_noisy = u + noise_u * jax.random.normal(k_actuator, u.shape)
         
-        # 4. FKPP Physics Step (using real state and noisy action)
-        z_next, xi_next = fkpp_step_1d(z_curr, xi_curr, u_noisy, v)
+        # 4. FKPP Physics Step (Passing nu and rho down)
+        z_next, xi_next = fkpp_step_1d(z_curr, xi_curr, u_noisy, v, nu, rho)
         
         return (z_next, xi_next, next_key), (z_next, xi_next, u_noisy, v)
 
     _, trajectory = jax.lax.scan(
         step_fn, 
-        (z_init, xi_init, key), # Pass key into carry
+        (z_init, xi_init, key),
         None, 
         length=t_steps
     )
