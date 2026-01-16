@@ -128,7 +128,7 @@ def load_dataset(dataset_path):
         z_target_all: (n_samples, n_grid, n_grid) target conditions
         n_grid: Grid size
     """
-    data = np.load(dataset_path)
+    data = np.load(dataset_path, allow_pickle=True)
     z_init_all = jnp.array(data['z_init'])
     z_target_all = jnp.array(data['z_target'])
     n_grid = int(data['grid_size'])

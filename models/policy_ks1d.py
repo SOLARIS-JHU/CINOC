@@ -79,7 +79,9 @@ class DecentralizedControlNet(nn.Module):
     features: Sequence[int]
     L_domain: float
     u_max: float = 1.0
-    
+    window_size: int = 4
+
+
     def setup(self):
         self.frequencies = jnp.array([1.0, 2.0, 4.0, 8.0])
 
@@ -110,7 +112,7 @@ class DecentralizedControlNet(nn.Module):
         # 1. Gradient
         error_grad = jnp.gradient(error)
 
-        window_size = 4 
+        window_size = self.window_size 
         half_window = window_size // 2
 
         # 2. PAD with 'wrap' for PERIODIC BCs

@@ -63,7 +63,7 @@ def loss_fn(params, u_init, xi_fixed, u_target, dynamics):
     
     # 3. Constraints (Movement - Irrelevant for KS but kept for structure)
     # Since xi is fixed and v is 0, these terms naturally become constant/zero.
-    # We keep the calculation to match the "exact same loss" structure.
+    # We keep the calculation to match the "exact same loss" structure and for ablations potentially.
     
     # Boundary (Fixed actuators are initialized inside bounds)
     margin = 0.02

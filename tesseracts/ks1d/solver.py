@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 def forcing_fn_1d(xi_fixed, u_intensities, N, L, sigma):
     """
     Calculates the 1D Gaussian influence of STATIC actuators.
-    Now accepts L and sigma as parameters.
     """
     x_coords = jnp.linspace(0, L, N, endpoint=False)
     
@@ -36,9 +35,6 @@ def ks_spectral_step(
 ):
     """
     Semi-Implicit Crank-Nicolson Spectral Step.
-    
-    Default parameters:
-    N=256, L=64.0, dt=0.05, sigma=1.0
     """
     # 1. Non-linear term (computed in real space)
     # u * u_x = 0.5 * d/dx (u^2)
@@ -53,7 +49,6 @@ def ks_spectral_step(
     f_hat = jnp.fft.rfft(f_field)
 
     # 3. Time Stepping (Crank-Nicolson for Linear, Explicit for Non-linear/Forcing)
-    # Formula: u_next = [u_curr * (1 + dt*L/2) + dt*(NL + F)] / (1 - dt*L/2)
     denom = 1.0 - (dt / 2.0) * L_linear
     numer = (1.0 + (dt / 2.0) * L_linear) * u_hat + dt * (nonlinear_term_hat + f_hat)
     
@@ -64,6 +59,8 @@ def ks_spectral_step(
     
     return u_hat_next, u_next
 
+# --- 2. Main Solver Loop with Noise ---
+
 @partial(jax.jit, static_argnames=['policy_apply_fn', 't_steps', 'N_grid'])
 def solve_with_policy(
     u_init, 
@@ -71,14 +68,17 @@ def solve_with_policy(
     u_target, 
     params, 
     policy_apply_fn, 
-    t_steps, 
+    t_steps,
+    key,                # <--- Added Key
     N_grid=256, 
     L=64.0, 
     dt=0.05, 
-    sigma=1.0
+    sigma=1.0,
+    noise_u=0.0,        # <--- Added Actuator Noise Magnitude
+    noise_z=0.0         # <--- Added Sensor/State Noise Magnitude
 ):
     """
-    KS Loop using dynamic N_grid and L.
+    KS Loop using dynamic N_grid and L, with Sensor and Actuator noise.
     """
     # Recalculate dx and k based on current N_grid and L
     dx = L / N_grid
@@ -88,24 +88,37 @@ def solve_with_policy(
     u_hat_init = jnp.fft.rfft(u_init)
 
     def step_fn(carry, _):
-        u_hat_curr, u_curr = carry
+        u_hat_curr, u_curr, current_key = carry
         
-        # Policy determines control intensities
-        u_control = policy_apply_fn(params, u_curr, u_target, xi_fixed)
+        # Split keys for this step
+        k_sensor, k_actuator, next_key = jax.random.split(current_key, 3)
         
-        # Physics step with current parameters
+        # 1. Add Sensor Noise (What the policy sees)
+        # We add noise to the real-space representation
+        u_observed = u_curr + noise_z * jax.random.normal(k_sensor, u_curr.shape)
+        
+        # 2. Policy determines control intensities (using observed state)
+        u_control = policy_apply_fn(params, u_observed, u_target, xi_fixed)
+        
+        # 3. Add Actuator Noise (What the physics gets)
+        u_control_noisy = u_control + noise_u * jax.random.normal(k_actuator, u_control.shape)
+        
+        # 4. Physics step (Uses actual previous state, but noisy control)
         u_hat_next, u_next = ks_spectral_step(
-            u_hat_curr, u_curr, xi_fixed, u_control, 
+            u_hat_curr, u_curr, xi_fixed, u_control_noisy, 
             k, L_linear, 
             N=N_grid, L=L, dt=dt, sigma=sigma
         )
         
         v_dummy = jnp.zeros_like(u_control) 
-        return (u_hat_next, u_next), (u_next, xi_fixed, u_control, v_dummy)
+        
+        # Pass next_key to the next iteration
+        return (u_hat_next, u_next, next_key), (u_next, xi_fixed, u_control_noisy, v_dummy)
 
+    # Initialize scan with key
     _, trajectory = jax.lax.scan(
         step_fn, 
-        (u_hat_init, u_init), 
+        (u_hat_init, u_init, key), 
         None, 
         length=t_steps
     )
@@ -123,15 +136,16 @@ if __name__ == "__main__":
     # --- Dummy Policy ---
     def dummy_policy_fn(params, u_curr, u_target, xi_fixed):
         n_actuators = xi_fixed.shape[0]
+        # Just return zeros, but now physics will add noise to this 0.0
         return jnp.zeros((n_actuators,))
 
     # --- Initialization ---
+    key = jax.random.PRNGKey(0) # Main random key
     n_actuators = 4
     actuator_positions = jnp.linspace(0, L_DOMAIN, n_actuators, endpoint=False)
 
-    # Initial Condition: adapted for the specific N_grid and L
+    # Initial Condition
     x = jnp.linspace(0, L_DOMAIN, N_GRID, endpoint=False)
-    # A mix of low frequencies to spark chaos
     u0 = (jnp.sin(2 * jnp.pi * x / L_DOMAIN) + 
           0.5 * jnp.sin(4 * jnp.pi * x / L_DOMAIN) + 
           0.1 * jax.random.normal(jax.random.PRNGKey(42), (N_GRID,)))
@@ -139,6 +153,7 @@ if __name__ == "__main__":
     u_target = jnp.zeros_like(u0)
 
     print(f"Running simulation with N={N_GRID}, L={L_DOMAIN}...")
+    print("Injecting Actuator Noise (0.5) and Sensor Noise (0.1)...")
     
     # --- Run ---
     trajectory = solve_with_policy(
@@ -148,9 +163,12 @@ if __name__ == "__main__":
         None, 
         dummy_policy_fn, 
         N_STEPS,
+        key,              # Pass the key
         N_grid=N_GRID,
         L=L_DOMAIN,
-        dt=DT
+        dt=DT,
+        noise_u=0.,      
+        noise_z=0.       
     )
     
     u_history, xi_history, control_history, _ = trajectory
@@ -161,11 +179,11 @@ if __name__ == "__main__":
     plt.colorbar(im, label='u(x, t)')
     plt.xlabel('Spatial Domain (x)')
     plt.ylabel('Time (t)')
-    plt.title(f'KS Trajectory (L={L_DOMAIN}, N={N_GRID})')
+    plt.title(f'KS Trajectory with Noise (L={L_DOMAIN})')
     
     for pos in actuator_positions:
         plt.axvline(x=pos, color='black', linestyle='--', alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig('ks_trajectory_refactored.png')
-    print("Plot saved as 'ks_trajectory_refactored.png'")
+    plt.savefig('ks_trajectory_noisy.png')
+    print("Plot saved as 'ks_trajectory_noisy.png'")
