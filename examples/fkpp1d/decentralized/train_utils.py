@@ -20,7 +20,7 @@ from models.policy import DecentralizedControlNet
 from data_utils import generate_grf
 
 
-def train(n_pde=100, n_agents=20, batch_size=32, T_steps=300, R_safe=0.05, epochs=500, noise_u=0.0, noise_z=0.0, sensor_range=0.08, save_repo="./", plot_filename='decentralized_training', net_params_filename='decentralized_training', plot_metrics=True):
+def train(n_pde=100, n_agents=20, batch_size=32, T_steps=300, R_safe=0.05, epochs=500, noise_u=0.0, noise_z=0.0, sensor_range=0.08, lambda_u=0.001, save_repo="./", plot_filename='decentralized_training', net_params_filename='decentralized_training', plot_metrics=True):
     CONFIG = {
         "noise_u": noise_u,  # Control noise
         "noise_z": noise_z, # State noise
@@ -64,7 +64,7 @@ def train(n_pde=100, n_agents=20, batch_size=32, T_steps=300, R_safe=0.05, epoch
         # 5. Damping (Smoothness of velocity)
         l_accel = jnp.mean(jnp.diff(v_traj, axis=0)**2)
 
-        total_loss = 5.0 * l_track + 0.001 * l_effort + 100.0 * l_bound + 1.0 * l_coll + 0.1 * l_accel
+        total_loss = 5.0 * l_track + lambda_u * l_effort + 100.0 * l_bound + 1.0 * l_coll + 0.1 * l_accel
         return total_loss, (l_track, l_effort, l_coll, l_bound)
 
     @partial(jax.jit, static_argnames='dynamics')
