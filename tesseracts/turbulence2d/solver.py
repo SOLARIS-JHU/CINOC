@@ -246,21 +246,24 @@ def solve_with_policy(
 
 # --- 3. Visualization & Test ---
 
+# --- 3. Visualization & Test ---
+
 if __name__ == "__main__":
     
     # A simple policy (e.g., zero control)
     def zero_policy(w_state, centers, t):
         return jnp.zeros(len(centers))
 
-    # Run Solver
+    # Run Solver with params matching the training script
+    # T_max = 150 control steps * 5 physics substeps * 0.01 dt = 7.5s
     w_history, times = solve_with_policy(
         policy_fn=zero_policy,
-        grid_res=128,      # 'nx'
-        viscosity=5e-5,    # 'nu'
-        dt=0.02,          # 'dt'
-        t_max=2.0,        
-        domain_size=1.0,   
-        actuator_grid_shape=(8, 8)
+        grid_res=64,          # Matches 'N_grid'
+        viscosity=5e-4,       # Matches 'viscosity'
+        dt=0.01,              # Matches 'dt'
+        t_max=7.5,            # Matches training horizon (150 * 5 * 0.01)
+        domain_size=1.0,      # Matches 'L_domain'
+        actuator_grid_shape=(8, 8) # Matches 'n_agents': 64
     )
     
     # Plotting
@@ -284,7 +287,7 @@ if __name__ == "__main__":
         ax.set_title(rf"$\omega$ at t={t_val:.2f}")
         ax.axis('off')
 
-    plt.suptitle(r"2D Turbulence (Spectral RK4)", fontsize=16)
+    plt.suptitle(r"2D Turbulence (Spectral RK4) - Training Config", fontsize=16)
     plt.tight_layout()
-    plt.savefig("turbulence_spectral_jax.png", dpi=150)
-    print("Plot saved to 'turbulence_spectral_jax.png'")
+    plt.savefig("turbulence_spectral_jax_new.png", dpi=150)
+    print("Plot saved to 'turbulence_spectral_jax_new.png'")

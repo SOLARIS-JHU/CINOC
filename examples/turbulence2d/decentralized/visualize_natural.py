@@ -1,6 +1,5 @@
 """
-Multi-Example Visualization for Trained Turbulence Policy.
-Randomly selects 3 examples from the dataset and visualizes stabilization.
+Single Sample Comparison: Natural vs. Controlled Turbulence.
 """
 
 import jax
@@ -12,6 +11,7 @@ import sys
 import pickle
 import flax.serialization
 from pathlib import Path
+import matplotlib.ticker as ticker
 
 # Force CPU for visualization
 jax.config.update("jax_platform_name", "cpu")
@@ -29,11 +29,10 @@ from models.policy_turb import DecentralizedTurbulenceNet
 # ═══════════════════════════════════════════════════════════════════════════════
 
 CONFIG = {
-    # --- 1. Grid Resolution (MUST MATCH TRAINING) ---
     'N_grid': 64,          
     'L_domain': 1.0,
     
-    # --- 2. Physics (MUST MATCH TRAINING) ---
+    # --- Physics ---
     'dt': 0.01,            
     'substeps': 5,         
     'viscosity': 5e-4,     
@@ -42,21 +41,20 @@ CONFIG = {
     'grid_shape': (8, 8),
     'sigma': 0.05,         
     
-    # --- 3. Duration ---
+    # --- Duration ---
     'T_chaos_steps': 50,    # 0.5s chaos
     'T_control_steps': 200, # 2.0s control
     
-    # Times relative to control start (t=0)
+    # Snapshot times relative to control start (t=0)
     'snapshot_times': [-0.25, 0.0, 0.5, 1.0, 2.0],
     
-    # --- 4. Files ---
+    # --- Files ---
     'params_file': 'turbulence_params.msgpack',
-    # Ensure this matches the file used in training
     'ic_filename': 'turbulence_chaotic_ics_64_more.pkl', 
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 2. DATA & MODEL LOADING
+# 2. DATA & MODEL LOADING (Unchanged)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def get_actuator_grid():
@@ -66,7 +64,6 @@ def get_actuator_grid():
     return jnp.stack([xv.flatten(), yv.flatten()], axis=-1)
 
 def load_dataset():
-    """Loads the full dataset from pickle."""
     script_dir = Path(__file__).resolve().parent
     data_dir = script_dir.parent / "data" 
     file_path = data_dir / CONFIG['ic_filename']
@@ -81,7 +78,7 @@ def load_dataset():
     with open(file_path, 'rb') as f:
         u_pool = pickle.load(f)
     
-    return jnp.array(u_pool) # Shape: (pool_size, N, N)
+    return jnp.array(u_pool) 
 
 def load_params(model, filepath):
     if not Path(filepath).exists():
@@ -102,7 +99,7 @@ def get_zero_policy(n_agents):
     return zero_policy_fn
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3. SIMULATION LOOP (Comparison)
+# 3. SIMULATION LOOP
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run_comparison(w0_hat, model, params):
@@ -158,159 +155,82 @@ def run_comparison(w0_hat, model, params):
     return t_axis, w_blue, w_grey
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 4. PLOTTING
+# 4. PLOTTING FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# def plot_single_case(ax_row_snaps, ax_plot, t, w_ctrl, w_base, case_idx):
-#     """Helper to plot one case into provided Axes objects."""
+def plot_snapshots_row(ax_list, t, w_data, row_title, v_limit):
+    """Plots a single row of snapshots (either Control or Natural)."""
     
-#     # --- Snapshots ---
-#     snap_indices = []
-#     for t_req in CONFIG['snapshot_times']:
-#         idx = (np.abs(t - t_req)).argmin()
-#         snap_indices.append(idx)
-        
-#     max_w = jnp.max(jnp.abs(w_ctrl[0])) * 0.9 
-    
-#     for i, idx in enumerate(snap_indices):
-#         ax = ax_row_snaps[i]
-#         w_snap = w_ctrl[idx]
-#         t_snap = t[idx]
-        
-#         im = ax.imshow(w_snap, extent=[0,1,0,1], origin='lower', cmap='RdBu_r', vmin=-max_w, vmax=max_w)
-#         ax.set_xticks([])
-#         ax.set_yticks([])
-        
-#         if t_snap < -1e-4: color = 'firebrick'
-#         elif t_snap > 1e-4: color = 'navy'
-#         else: color = 'black'
-            
-#         # Only add titles to the top row
-#         if case_idx == 0:
-#             ax.set_title(f"t = {t_snap:.2f}s", color=color, fontweight='bold', fontsize=10)
-        
-#         for spine in ax.spines.values():
-#             spine.set_edgecolor(color)
-#             spine.set_linewidth(1.5)
-            
-#         # Add 'Case X' label to the left of the first snapshot
-#         if i == 0:
-#             ax.set_ylabel(f"Case {case_idx}\nVorticity", fontsize=10)
-
-#     # --- Enstrophy Plot ---
-#     e_ctrl = jnp.mean(w_ctrl**2, axis=(1,2))
-#     e_base = jnp.mean(w_base**2, axis=(1,2))
-    
-#     mask_chaos = t <= 0
-#     mask_ctrl = t >= 0
-    
-#     ax_plot.plot(t[mask_chaos], e_base[mask_chaos], color='firebrick', lw=1.5)
-#     ax_plot.plot(t[mask_ctrl], e_base[mask_ctrl], color='grey', linestyle='--', label='Uncontrolled', lw=1.5)
-#     ax_plot.plot(t[mask_ctrl], e_ctrl[mask_ctrl], color='navy', label='Ours', lw=1.5)
-    
-#     ax_plot.axvline(x=0, color='k', linestyle=':', alpha=0.5)
-#     ax_plot.set_yscale('log')
-    
-#     if case_idx == 2: # Bottom plot
-#         ax_plot.set_xlabel("Time (s)")
-#     else:
-#         ax_plot.set_xticks([]) # Hide x-ticks for top ones
-        
-#     ax_plot.set_ylabel(r"Enstrophy")
-#     ax_plot.set_xlim(t[0], t[-1])
-#     ax_plot.grid(True, which="both", ls="--", alpha=0.3)
-    
-#     # Legend only on first plot to save space
-#     if case_idx == 0:
-#         ax_plot.legend(loc='upper right', fontsize=8)
-
-def plot_single_case(ax_row_snaps, ax_plot, t, w_ctrl, w_base, case_idx):
-    """Helper to plot one case into provided Axes objects."""
-    
-    # --- Snapshots ---
     snap_indices = []
     for t_req in CONFIG['snapshot_times']:
         idx = (np.abs(t - t_req)).argmin()
         snap_indices.append(idx)
         
-    max_w = jnp.max(jnp.abs(w_ctrl[0])) * 0.9 
-    
-    im = None # Initialize variable to hold the image object
-    
+    im = None
     for i, idx in enumerate(snap_indices):
-        ax = ax_row_snaps[i]
-        w_snap = w_ctrl[idx]
+        ax = ax_list[i]
+        w_snap = w_data[idx]
         t_snap = t[idx]
         
-        # Save the 'im' object for the colorbar later
-        im = ax.imshow(w_snap, extent=[0,1,0,1], origin='lower', cmap='RdBu_r', vmin=-max_w, vmax=max_w)
+        im = ax.imshow(w_snap, extent=[0,1,0,1], origin='lower', cmap='RdBu_r', vmin=-v_limit, vmax=v_limit)
         ax.set_xticks([])
         ax.set_yticks([])
         
-        if t_snap < -1e-4: color = 'firebrick'
-        elif t_snap > 1e-4: color = 'navy'
+        # Border color based on phase
+        if t_snap < -1e-4: color = 'firebrick' # Chaos phase
+        elif t_snap > 1e-4: color = 'navy'     # Control phase
         else: color = 'black'
             
-        # Only add titles to the top row
-        if case_idx == 0:
-            ax.set_title(f"t = {t_snap:.2f}s", color=color, fontweight='bold', fontsize=10)
-        
         for spine in ax.spines.values():
             spine.set_edgecolor(color)
             spine.set_linewidth(1.5)
             
-        # Add 'Case X' label to the left of the first snapshot
-        if i == 0:
-            ax.set_ylabel(f"Case {case_idx}\nVorticity", fontsize=10)
+        # Top title only for the first row called
+        if i == 2: # Center title over row
+             ax.set_title(row_title, fontsize=12, pad=10, fontweight='bold')
 
-    # --- ADDED: Colorbar for the row ---
-    # We use the figure object attached to the axes
-    # ax=ax_row_snaps tells matplotlib to steal space from the whole row of snapshots
-    fig = ax_row_snaps[0].figure
-    cbar = fig.colorbar(im, ax=ax_row_snaps, fraction=0.02, pad=0.02)
-    cbar.set_label(r'Vorticity $\omega$', fontsize=9)
-    cbar.ax.tick_params(labelsize=8)
+        # Time labels at the bottom of the snapshots
+        ax.set_xlabel(f"t={t_snap:.2f}s", fontsize=9)
 
-    # --- Enstrophy Plot ---
+    return im
+
+def plot_enstrophy_comparison(ax, t, w_ctrl, w_base):
+    """Plots the comparison line graph."""
     e_ctrl = jnp.mean(w_ctrl**2, axis=(1,2))
     e_base = jnp.mean(w_base**2, axis=(1,2))
     
     mask_chaos = t <= 0
     mask_ctrl = t >= 0
     
-    ax_plot.plot(t[mask_chaos], e_base[mask_chaos], color='firebrick', lw=1.5)
-    ax_plot.plot(t[mask_ctrl], e_base[mask_ctrl], color='grey', linestyle='--', label='Uncontrolled', lw=1.5)
-    ax_plot.plot(t[mask_ctrl], e_ctrl[mask_ctrl], color='navy', label='Ours', lw=1.5)
+    # Chaos Phase
+    ax.plot(t[mask_chaos], e_base[mask_chaos], color='firebrick', lw=2, label='Chaos Phase')
     
-    ax_plot.axvline(x=0, color='k', linestyle=':', alpha=0.5)
-    ax_plot.set_yscale('log')
+    # Divergence
+    ax.plot(t[mask_ctrl], e_base[mask_ctrl], color='grey', linestyle='--', lw=2, label='Natural Evolution')
+    ax.plot(t[mask_ctrl], e_ctrl[mask_ctrl], color='navy', lw=2, label='Controlled')
     
-    if case_idx == 2: # Bottom plot
-        ax_plot.set_xlabel("Time (s)")
-    else:
-        ax_plot.set_xticks([]) # Hide x-ticks for top ones
-        
-    ax_plot.set_ylabel(r"Enstrophy")
-    ax_plot.set_xlim(t[0], t[-1])
-    ax_plot.grid(True, which="both", ls="--", alpha=0.3)
-    
-    # Legend only on first plot to save space
-    if case_idx == 0:
-        ax_plot.legend(loc='upper right', fontsize=8)
+    ax.axvline(x=0, color='k', linestyle=':', alpha=0.5)
+    ax.set_yscale('log')
+    ax.set_xlabel("Time (s)", fontsize=11)
+    ax.set_ylabel(r"Enstrophy $\langle \omega^2 \rangle$", fontsize=11)
+    ax.set_xlim(t[0], t[-1])
+    ax.grid(True, which="both", ls="--", alpha=0.3)
+    ax.legend(fontsize=9)
+    ax.set_title("Stabilization Performance", fontweight='bold')
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5. MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print(f"--- Visualizing 3 Random Examples (N={CONFIG['N_grid']}) ---")
+    print(f"--- Single Sample Comparison (N={CONFIG['N_grid']}) ---")
     
     # 1. Init Model
     model = DecentralizedTurbulenceNet(
         features=(32, 64), 
-        patch_size=16, # Match 64x64 Training
+        patch_size=16, 
         domain_size=(CONFIG['L_domain'], CONFIG['L_domain']),
-        u_max=150.0    # Match Training
+        u_max=150.0 
     )
     
     # 2. Load
@@ -321,35 +241,52 @@ if __name__ == "__main__":
         print(f"Error: {e}")
         sys.exit(1)
 
-    # 3. Pick 3 Random Indices
-    np.random.seed(123) # Fixed seed for reproducibility, or remove for true random
-    indices = np.random.choice(len(full_dataset), 3, replace=False)
-    print(f"Selected Test Indices: {indices}")
+    # 3. Select ONE Random Index
+    np.random.seed(999) # Change seed to see different examples
+    idx = np.random.choice(len(full_dataset))
+    print(f"Selected Sample Index: {idx}")
 
-    # 4. Setup Big Plot
-    # Layout: 3 Rows. Left side = 5 Snapshots. Right side = 1 Time Series.
-    fig = plt.figure(figsize=(16, 8))
-    outer_grid = gridspec.GridSpec(3, 2, width_ratios=[2.5, 1], hspace=0.3, wspace=0.15)
+    w0_hat = full_dataset[idx]
     
-    for i, idx in enumerate(indices):
-        print(f"Processing Case {i} (Index {idx})...")
-        w0_hat = full_dataset[idx]
-        
-        # Run Sim
-        t_axis, w_ctrl, w_base = run_comparison(w0_hat, model, params)
-        
-        # Create Sub-grids for this row
-        # Left: Snapshots
-        gs_snaps = gridspec.GridSpecFromSubplotSpec(1, 5, subplot_spec=outer_grid[i, 0], wspace=0.05)
-        ax_snaps = [fig.add_subplot(gs_snaps[j]) for j in range(5)]
-        
-        # Right: Plot
-        ax_plot = fig.add_subplot(outer_grid[i, 1])
-        
-        # Plot
-        plot_single_case(ax_snaps, ax_plot, t_axis, w_ctrl, w_base, case_idx=i)
+    # 4. Run Comparison
+    print("Running simulation...")
+    t_axis, w_ctrl, w_base = run_comparison(w0_hat, model, params)
+    
+    # 5. Setup Plot Layout
+    # Layout: 2 Rows (Visuals), 1 Column (Graph) spanning both rows
+    fig = plt.figure(figsize=(16, 6))
+    gs = gridspec.GridSpec(2, 2, width_ratios=[2.5, 1], wspace=0.1, hspace=0.3)
+    
+    # -- Row 1: Controlled Visuals --
+    gs_row1 = gridspec.GridSpecFromSubplotSpec(1, 5, subplot_spec=gs[0, 0], wspace=0.05)
+    ax_row1 = [fig.add_subplot(gs_row1[j]) for j in range(5)]
+    
+    # -- Row 2: Natural Visuals --
+    gs_row2 = gridspec.GridSpecFromSubplotSpec(1, 5, subplot_spec=gs[1, 0], wspace=0.05)
+    ax_row2 = [fig.add_subplot(gs_row2[j]) for j in range(5)]
+    
+    # -- Right: Comparison Plot --
+    ax_plot = fig.add_subplot(gs[:, 1])
+    
+    # 6. Plotting
+    # Calculate limits based on initial state for fair comparison
+    v_lim = jnp.max(jnp.abs(w_ctrl[0])) * 0.9
+    
+    # Plot Controlled
+    im = plot_snapshots_row(ax_row1, t_axis, w_ctrl, "Controlled (Ours)", v_lim)
+    
+    # Plot Natural
+    plot_snapshots_row(ax_row2, t_axis, w_base, "Natural Evolution (Uncontrolled)", v_lim)
+    
+    # Colorbar (Shared for visual rows)
+    # Use '+' to combine the two lists into one flat list of 10 axes
+    cbar = fig.colorbar(im, ax=ax_row1 + ax_row2, fraction=0.02, pad=0.02)
+    cbar.set_label(r'Vorticity $\omega$', fontsize=10)
+    
+    # Plot Graph
+    plot_enstrophy_comparison(ax_plot, t_axis, w_ctrl, w_base)
 
-    plt.suptitle("Turbulence Stabilization: 3 Random Test Cases", fontsize=16, fontweight='bold')
-    save_name = "random_3_cases_64x64.png"
+    plt.suptitle(f"Single Sample Analysis: Index {idx}", fontsize=16, fontweight='bold')
+    save_name = "single_sample_comparison.png"
     plt.savefig(save_name, dpi=150, bbox_inches='tight')
-    print(f"✓ Saved combined plot to {save_name}")
+    print(f"✓ Saved plot to {save_name}")

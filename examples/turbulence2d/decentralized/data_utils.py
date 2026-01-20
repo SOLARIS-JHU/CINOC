@@ -92,7 +92,7 @@ def evolve_to_chaos(key, N_grid, L, warmup_time=2.0, dt=0.02, viscosity=5e-5):
     
     return w_hat_final
 
-def get_batch_initial_conditions(key, batch_size, N_grid, L, warmup_time=2.0):
+def get_batch_initial_conditions(key, batch_size, N_grid, L, warmup_time=2.0, viscosity=5e-5):
     """
     Generates a batch of chaotic spectral states.
     Uses vmap to generate 'batch_size' simulations in parallel.
@@ -105,7 +105,7 @@ def get_batch_initial_conditions(key, batch_size, N_grid, L, warmup_time=2.0):
         L=L, 
         warmup_time=warmup_time,
         dt=0.02,
-        viscosity=5e-5
+        viscosity=viscosity
     )
     
     # VMAP over the keys to run simulations in parallel
