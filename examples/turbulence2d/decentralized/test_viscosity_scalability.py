@@ -24,14 +24,14 @@ from data_utils import get_batch_initial_conditions
 # ═══════════════════════════════════════════════════════════════════════════════
 TRAINED_VISCOSITY = 5e-4
 TEST_VISCOSITIES = [2e-4, 3e-4, 4e-4, 5e-4]
-TEST_AGENT_COUNTS = [64, 81, 100, 121, 144]  # 8x8 to 12x12
+TEST_AGENT_COUNTS = [64, 81, 100, 121, 144, 169, 196, 225]  # 8x8 to 14x14
 
 CONFIG = {
     'N_grid': 64,
     'L_domain': 1.0,
     'dt': 0.01,
     'substeps': 5,
-    'T_control_steps': 150, # Sufficient for stabilization trend
+    'T_control_steps': 150, 
     'params_file': 'turbulence_params.msgpack',
 }
 
