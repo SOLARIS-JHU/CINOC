@@ -48,32 +48,16 @@ SIGMA_PUSH = 0.2      # Wide push influence
 
 # Control limits (fan-only: no injection, just push velocity)
 PUSH_MAX = 0.8        # Max push velocity
-FEATURES = (16, 32)   # CNN feature channels - keep same
+FEATURES = (32, 32, 64)  #(32, 32, 64)# CNN feature channels - keep same
 PATCH_SIZE = 12      
 
-# Loss weights - NEW OBJECTIVE DESIGN
-# W_TRANSPORT = 10.0   #20# PRIMARY: push smoke centroid → target centroid
-# W_HOLD = 50.0         #10# TERMINAL: smoke must stay at target (time-weighted)
-# W_FIND = 10.0         # EXPLORATION: agents approach smoke
-# W_SURROUND = 10.0     #15# Agents form ring around target
-# W_BRAKE = 40.0        # Slow down when at target
-# W_COLL = 1500.0        # Avoid other agents
-# W_BOUND = 20.0        # Stay in domain
-# W_SMOOTH = 0.1        # Velocity smoothness
-# W_EFFORT = 0.001      # Control energy
-# W_MASS = 80.0         #50# NEW: Preserve smoke mass
-# R_SAFE = 0.15         # Safe radius for collision
-
-W_TRANSPORT = 0.0   #20# PRIMARY: push smoke centroid → target centroid
-W_HOLD = 10.0 #0.3        #10# TERMINAL: smoke must stay at target (time-weighted)
-W_FIND = 0.0         # EXPLORATION: agents approach smoke
-W_SURROUND = 0.0     #15# Agents form ring around target
-W_BRAKE = 0.0        # Slow down when at target
-W_COLL = 70.0        # Avoid other agents
+# Loss weights
+W_HOLD = 3.0      #3   # TERMINAL: smoke must stay at target (time-weighted Wasserstein)
+W_COLL = 10.0         # Avoid other agents
 W_BOUND = 10.0        # Stay in domain
 W_SMOOTH = 0.1        # Velocity smoothness
 W_EFFORT = 0.001      # Control energy
-W_MASS = 30.0         #50# NEW: Preserve smoke mass
+W_MASS = 5.0        #5 # Preserve smoke mass #30
 R_SAFE = 0.15         # Safe radius for collision
 
 
@@ -146,17 +130,16 @@ def main():
     
     # Loss function - with mass conservation
     def loss_fn(params, smoke_init, xi_init, rho_target):
-        smoke_final, xi_final, l_transport, l_hold, l_find, l_surround, l_brake, l_coll, l_bound, l_smooth, l_effort, l_mass = unroll_with_full_loss(
+        smoke_final, xi_final, l_hold, l_coll, l_bound, l_smooth, l_effort, l_mass = unroll_with_full_loss(
             smoke_init, xi_init, rho_target, params, model.apply, T_steps,
             Nx=Nx, Ny=Ny, n_agents=n_agents, dt=dt, buoyancy=buoyancy,
             sigma_push=sigma_push, push_max=push_max, R_safe=R_SAFE
         )
         
-        total_loss = W_TRANSPORT * l_transport + W_HOLD * l_hold + W_FIND * l_find + \
-                     W_SURROUND * l_surround + W_BRAKE * l_brake + W_MASS * l_mass + \
+        total_loss = W_HOLD * l_hold + W_MASS * l_mass + \
                      W_COLL * l_coll + W_BOUND * l_bound + W_SMOOTH * l_smooth + W_EFFORT * l_effort
         
-        return total_loss, (l_transport, l_hold, l_find, l_surround, l_brake, l_coll, l_bound, l_smooth, l_effort, l_mass)
+        return total_loss, (l_hold, l_coll, l_bound, l_smooth, l_effort, l_mass)
     
     batched_loss_fn = jax.vmap(loss_fn, in_axes=(None, 0, 0, 0))
     
@@ -197,15 +180,13 @@ def main():
         )
         
         if epoch % 10 == 0:
-            l_transport, l_hold, l_find, l_surround, l_brake, l_coll, l_bound, l_smooth, l_effort, l_mass = aux
-            metrics.append((epoch, float(loss), float(l_transport), float(l_hold), float(l_find), 
-                          float(l_surround), float(l_brake), float(l_coll), float(l_bound), 
+            l_hold, l_coll, l_bound, l_smooth, l_effort, l_mass = aux
+            metrics.append((epoch, float(loss), float(l_hold), float(l_coll), float(l_bound), 
                           float(l_smooth), float(l_effort), float(l_mass)))
             
             if epoch % 50 == 0:
-                tqdm.write(f"Ep {epoch:4d} | Loss: {loss:.3f} | Trans: {l_transport:.4f} | Hold: {l_hold:.4f} | Find: {l_find:.4f}")
-                tqdm.write(f"         | Surr: {l_surround:.4f} | Brake: {l_brake:.4f} | Coll: {l_coll:.6f} | Bound: {l_bound:.6f}")
-                tqdm.write(f"         | Smooth: {l_smooth:.6f} | Effort: {l_effort:.6f} | Mass: {l_mass:.4f}")
+                tqdm.write(f"Ep {epoch:4d} | Loss: {loss:.3f} | Hold: {l_hold:.4f} | Mass: {l_mass:.4f}")
+                tqdm.write(f"         | Coll: {l_coll:.6f} | Bound: {l_bound:.6f} | Smooth: {l_smooth:.6f} | Effort: {l_effort:.6f}")
     
     elapsed = time.time() - start_time
     print(f"\nTraining completed in {elapsed:.1f}s")

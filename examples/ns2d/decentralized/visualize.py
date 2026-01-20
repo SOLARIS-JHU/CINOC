@@ -195,13 +195,35 @@ def create_animation(
     if output_gif:
         print(f"  Saving GIF: {output_gif}")
         anim.save(output_gif, writer='pillow', fps=fps)
+        print(f"  ✓ GIF saved")
     
+    # Save MP4 (try multiple writers)
     if output_mp4:
         print(f"  Saving MP4: {output_mp4}")
-        try:
-            anim.save(output_mp4, writer='ffmpeg', fps=fps)
-        except Exception:
-            pass
+        saved = False
+        for writer_name in ['ffmpeg', 'imagemagick']:
+            try:
+                anim.save(output_mp4, writer=writer_name, fps=fps)
+                print(f"  ✓ MP4 saved (using {writer_name})")
+                saved = True
+                break
+            except Exception:
+                continue
+        if not saved:
+            # Fallback: save frames manually using imageio
+            try:
+                import imageio
+                frames = []
+                for i in range(len(frame_indices)):
+                    animate(i)
+                    fig.canvas.draw()
+                    img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+                    img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+                    frames.append(img)
+                imageio.mimsave(output_mp4, frames, fps=fps)
+                print(f"  ✓ MP4 saved (using imageio)")
+            except Exception as e:
+                print(f"  ✗ MP4 failed: {e}")
     
     plt.close()
 
@@ -363,6 +385,8 @@ def main():
     
     # Process 2 samples
     n_samples = min(2, len(test_data['rho_init']))
+    # n_samples = min(1, len(test_data['rho_init']))
+
     
     for sample_idx in range(n_samples):
         print(f"\n{'='*60}")
@@ -420,6 +444,11 @@ def main():
     print("\n" + "="*60)
     print("Visualization Complete!")
     print("="*60)
+    print("\nGenerated files:")
+    for i in range(n_samples):
+        print(f"  - ns2d_decentralized_sample_{i+1}.png")
+        print(f"  - ns2d_decentralized_{i+1}.gif")
+        print(f"  - ns2d_decentralized_{i+1}.mp4")
 
 
 if __name__ == "__main__":
