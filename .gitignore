@@ -70,6 +70,7 @@ CLAUDE.md
 examples_new
 examples_old_reference
 */*/*/analysis.py
+*.msgpack
 
 .pre-commit-config.yaml
 document.tex
