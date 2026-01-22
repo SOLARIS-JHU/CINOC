@@ -1,7 +1,12 @@
 """
-Sensor Dimension Experiment - Visualization Script (KS-1D)
-Evaluates how Sensor Range (float) impacts zero-shot scalability.
-Focus: Clean, readable statistical plots only.
+Sensor Dimension Experiment - Multi-Domain Visualization (KS-1D)
+Evaluates Decentralized ControlNet across multiple physical configurations.
+
+ADAPTATION NOTE:
+This script is configured to match the 'Fixed Density' training run.
+- L=22  -> 30 Agents
+- L=64  -> 88 Agents (scaled density)
+- L=200 -> 272 Agents (scaled density)
 """
 import jax
 import jax.numpy as jnp
@@ -22,27 +27,58 @@ jax.config.update("jax_platform_name", "cpu")
 script_dir = Path(__file__).resolve().parent
 sys.path.append(str(script_dir.parent.parent.parent))
 
-# Output Directory
-EXPERIMENT_DIR = Path("figures/sensor_dim")
-EXPERIMENT_DIR.mkdir(parents=True, exist_ok=True)
+# Base Output Directory
+BASE_EXPERIMENT_DIR = Path("figures/sensor_dim_ablation")
+BASE_EXPERIMENT_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- KS Specific Imports ---
 from examples.ks1d.decentralized.dynamics_dual import PDEDynamics 
 from examples.ks1d.decentralized.data_utils import get_batch_initial_conditions
 from models.policy_ks1d import DecentralizedControlNet
 
-# --- Config ---
-# Matches the training setup
-SENSOR_RANGES = [2, 5, 10, 20, 50, 100]
-TEST_AGENT_COUNTS = range(20, 55, 5)
+# --- Configs ---
 
-# Physics Constants
-L_DOMAIN = 22.0     
-N_GRID = 128        
+# 1. Physics Configurations
+# These MUST match the 'n_agents' used in the corrected training script
+DOMAIN_CONFIGS = [
+    {
+        # Target Wavelength: ~52 pixels
+        "name": "L22_N128_Original",
+        "L_domain": 22.0,
+        "N_grid": 128,
+        "train_n_agents": 30,
+        # Bracket: [Baseline, 0.5x, 0.8x, 1.0x, 1.2x, 1.5x]
+        "sensor_dims": [25, 30, 40, 52, 65, 80],
+        "test_agent_counts": [15, 20, 25, 30, 35, 40, 42, 45, 47, 50]
+    },
+    # {
+    #     # Target Wavelength: ~36 pixels
+    #     "name": "L64_N256_HighRes",
+    #     "L_domain": 64.0,
+    #     "N_grid": 256,
+    #     "train_n_agents": 88,
+    #     # Bracket: [Baseline, 0.5x, 0.8x, 1.0x, 1.2x, 2.0x]
+    #     "sensor_dims": [18, 30, 36, 45, 72],
+    #     "test_agent_counts": [60, 80, 85, 88, 95, 100, 110]
+    # },
+    # {
+    #     # Target Wavelength: ~19 pixels
+    #     "name": "L124_N256_Coarse",
+    #     "L_domain": 124.0, # Corrected L
+    #     "N_grid": 256,     # Corrected N
+    #     "train_n_agents": 170,
+    #     # Bracket: [Baseline, 0.5x, 1.0x, 1.2x, 1.5x, 2.0x]
+    #     "sensor_dims": [10, 19, 24, 30, 40],
+    #     "test_agent_counts": [40, 60, 80, 100, 120]
+    # }
+]
+
+# 2. Evaluation Constants
 T_STEPS = 300
 N_TEST_SAMPLES = 50 
 
-def load_params(model, filepath):
+
+def load_params(model, filepath, n_grid, n_agents_dummy):
     """Safely loads model parameters."""
     if not filepath.exists(): 
         return None
@@ -51,65 +87,82 @@ def load_params(model, filepath):
         bytes_data = f.read()
     
     # Init dummy params of the correct shape
-    # We pass full grid size; the model handles slicing internally
     dummy_init = model.init(
         jax.random.PRNGKey(0), 
-        jnp.zeros((N_GRID,)), 
-        jnp.zeros((N_GRID,)), 
-        jnp.zeros((30,))
+        jnp.zeros((n_grid,)), 
+        jnp.zeros((n_grid,)), 
+        jnp.zeros((n_agents_dummy,))
     )
     return flax.serialization.from_bytes(dummy_init, bytes_data)
 
-def evaluate_sensor_dims():
+def evaluate_single_config(config):
+    """
+    Runs the full evaluation pipeline for a single domain configuration.
+    """
     results = []
+    
+    # Unpack Config
+    config_name = config["name"]
+    L = config["L_domain"]
+    N = config["N_grid"]
+    train_n = config["train_n_agents"]
+    sensor_list = config["sensor_dims"]
+    test_counts = config["test_agent_counts"]
+    
+    save_dir = BASE_EXPERIMENT_DIR / config_name
 
-    # 1. Generate Test Data (Chaotic Spin-up)
-    print("Generating KS Chaotic Initial Conditions...")
+    print(f"\n=== Evaluating Configuration: {config_name} (L={L}, N={N}) ===")
+    print(f" > Training Density: {train_n}")
+    print(f" > Test Sweep: {test_counts}")
+    
+    if not save_dir.exists():
+        print(f" [!] Directory not found: {save_dir}. Skipping...")
+        return pd.DataFrame()
+
+    # 1. Generate Domain-Specific Test Data
+    print(f" > Generating Initial Conditions...")
     key = jax.random.PRNGKey(42)
     key, subkey = jax.random.split(key)
-    
-    # Get a batch of valid chaotic states
-    u_init_test = get_batch_initial_conditions(subkey, N_TEST_SAMPLES, N_GRID, L_DOMAIN)
-    u_target_test = jnp.zeros_like(u_init_test) # Target is zero (stability)
+    u_init_test = get_batch_initial_conditions(subkey, N_TEST_SAMPLES, N, L)
+    u_target_test = jnp.zeros_like(u_init_test)
 
-    # 2. Loop through Sensor Ranges
-    for s_range in SENSOR_RANGES:
-        print(f"--- Evaluating Sensor Range: {s_range} ---")
+    # 2. Loop through Domain-Specific Sensors
+    for s_range in sensor_list:
+        # Load weights from the specific subfolder
+        param_path = save_dir / f"sensor_{s_range}_params.msgpack"
         
-        # Instantiate Model with the specific range
-        model = DecentralizedControlNet(features=(64, 64), L_domain=L_DOMAIN, window_size=s_range)
-        
-        # Load weights
-        param_path = EXPERIMENT_DIR / f"sensor_dim_{s_range}_params.msgpack"
-        params = load_params(model, param_path)
+        # Instantiate Model
+        model = DecentralizedControlNet(features=(64, 64), L_domain=L, window_size=s_range)
+        params = load_params(model, param_path, N, train_n)
         
         if params is None:
-            print(f"   [Skipping] Weights not found: {param_path}")
+            # Silent skip is better here to avoid clutter if some runs are pending
             continue
+
+        print(f"   > Testing Sensor Range: {s_range}")
 
         # Setup Dynamics
         dynamics = PDEDynamics(policy_apply_fn=model.apply)
 
         # 3. Calculate MSE for varying Agent Counts
-        print(f"   > Calculating statistics...")
-        for n_agents in TEST_AGENT_COUNTS:
-            # Create equidistant positions for this agent count
-            xi_test = jnp.linspace(0.0, L_DOMAIN, n_agents, endpoint=False) + (L_DOMAIN/n_agents)/2
+        # JIT-compiled single run wrapper
+        @jax.jit
+        def run_single(u_i, u_t, xi_i):
+            u_traj, _, _, _ = dynamics.unroll_controlled(
+                u_i, xi_i, u_t, params, T_STEPS, 
+                N_grid=N, L=L, key=jax.random.PRNGKey(0)
+            )
+            return jnp.mean((u_traj[-1] - u_t)**2) 
+
+        # Batch Vectorization
+        batch_run = jax.vmap(run_single, in_axes=(0, 0, 0))
+
+        for n_agents in test_counts:
+            # Create equidistant positions for this specific L
+            xi_test = jnp.linspace(0.0, L, n_agents, endpoint=False) + (L/n_agents)/2
             xi_batch = jnp.tile(xi_test, (N_TEST_SAMPLES, 1))
 
-            # JIT-compiled single run
-            @jax.jit
-            def run_single(u_i, u_t, xi_i):
-                # Unroll full trajectory
-                u_traj, _, _, _ = dynamics.unroll_controlled(
-                    u_i, xi_i, u_t, params, T_STEPS, 
-                    N_grid=N_GRID, L=L_DOMAIN, key=jax.random.PRNGKey(0)
-                )
-                # Return final MSE
-                return jnp.mean((u_traj[-1] - u_t)**2) 
-
-            # Vectorize over the test batch
-            final_mses = jax.vmap(run_single)(u_init_test, u_target_test, xi_batch)
+            final_mses = batch_run(u_init_test, u_target_test, xi_batch)
             
             results.append({
                 "Sensor Range": s_range,
@@ -120,79 +173,73 @@ def evaluate_sensor_dims():
 
     return pd.DataFrame(results)
 
-def plot_sensor_sensitivity(df):
-    """
-    Generates a clean, readable line plot with external legend.
-    """
-    # Use a clean style
+def plot_results(df, config):
+    """Generates the plot for a single configuration."""
+    if df.empty:
+        return
+
+    config_name = config["name"]
+    L = config["L_domain"]
+    N = config["N_grid"]
+    train_n = config["train_n_agents"]
+    save_dir = BASE_EXPERIMENT_DIR / config_name
+
     plt.style.use('seaborn-v0_8-whitegrid')
-    
-    # Increase figure width to accommodate external legend
     plt.figure(figsize=(10, 6))
     
-    # Ensure 'Sensor Range' is treated as categorical/ordinal for proper coloring
-    df_plot = df.copy()
-    
-    # Main Plot
+    # Plot Logic
     sns.lineplot(
-        data=df_plot, 
+        data=df, 
         x="Agents", 
         y="MSE", 
         hue="Sensor Range", 
-        palette="viridis",      # High contrast sequential colormap
-        style="Sensor Range",   # Different dashes help distinguish lines
+        palette="viridis", 
+        style="Sensor Range", 
         markers=True, 
         markersize=8, 
         linewidth=2.5,
-        dashes=False            # Optional: Turn off dashes if too messy, or keep default
+        dashes=False
     )
     
-    # Add vertical line for Training Distribution
-    plt.axvline(x=30, color='red', linestyle='--', alpha=0.6, label="Training Density (N=30)")
+    # Vertical line for training density
+    plt.axvline(x=train_n, color='red', linestyle='--', alpha=0.6, label=f"Training (N={train_n})")
     
-    # Labels and Titles
-    plt.title("Sensor Range Sensitivity (KS-1D)", fontsize=16, pad=15)
+    # Dynamic Title based on Config
+    plt.title(f"Sensor Sensitivity: L={L}, N={N}", fontsize=16, pad=15)
     plt.ylabel("Final Tracking Error (MSE)", fontsize=12)
     plt.xlabel("Deployment Agent Count", fontsize=12)
-    
-    # Log Scale for MSE
     plt.yscale('log')
     
-    # Improve Grid Readability for Log Scale
+    # Grid & Legend
     ax = plt.gca()
     ax.grid(True, which="major", ls="-", alpha=0.5)
     ax.grid(True, which="minor", ls=":", alpha=0.3)
     
-    # CLEAN LEGEND PLACEMENT
-    # Move legend outside the plot to the right
-    plt.legend(
-        bbox_to_anchor=(1.05, 1), 
-        loc='upper left', 
-        borderaxespad=0.,
-        title="Sensor Range",
-        fontsize=11,
-        title_fontsize=12
-    )
-    
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0., title="Sensor Range (px)")
     plt.tight_layout()
     
-    save_path = EXPERIMENT_DIR / "sensor_dimension_sensitivity.png"
+    save_path = save_dir / f"sensitivity_plot_{config_name}.png"
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Saved plot to {save_path}")
+    print(f"   [Plot Saved] {save_path}")
 
 if __name__ == "__main__":
-    print(f"--- Starting KS Sensor Dimension Analysis ---")
+    print(f"--- Starting Multi-Domain Sensor Analysis ---")
     
-    df_results = evaluate_sensor_dims()
-    
-    if not df_results.empty:
-        # Save raw data
-        csv_path = EXPERIMENT_DIR / "sensor_metrics.csv"
-        df_results.to_csv(csv_path, index=False)
-        print(f"Metrics saved to {csv_path}")
+    for config in DOMAIN_CONFIGS:
+        # 1. Evaluate
+        df_results = evaluate_single_config(config)
         
-        # Plot
-        plot_sensor_sensitivity(df_results)
-    else:
-        print("No results generated. Check if model parameter files exist in 'figures/sensor_dim'.")
+        if not df_results.empty:
+            # 2. Save CSV
+            save_dir = BASE_EXPERIMENT_DIR / config["name"]
+            csv_path = save_dir / "metrics.csv"
+            df_results.to_csv(csv_path, index=False)
+            print(f"   [Data Saved] {csv_path}")
+            
+            # 3. Plot
+            plot_results(df_results, config)
+        else:
+            print(f"   [!] No results found for {config['name']}")
+
+    print("\nAll evaluations complete.")
