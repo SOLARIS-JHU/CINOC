@@ -26,29 +26,40 @@ class PDEDynamics2D:
         self.policy_apply_fn = policy_apply_fn
 
     def unroll_controlled(
-        self, 
-        u_init, 
-        xi_fixed, 
-        u_target, 
-        params, 
+        self,
+        u_init,
+        xi_fixed,
+        u_target,
+        params,
         t_steps,
         # Exposing length, resolution, and physics params
         N_grid=128,
         L=64.0,
         dt=0.05,
         sigma=1.0,
-        substeps=1
+        substeps=1,
+        # Noise parameters
+        key=None,
+        noise_u=0.0,
+        noise_z=0.0
     ):
         """
         Performs a FULL controlled KS simulation in ONE call (2D).
-        
+
         Args:
             t_steps: Number of CONTROL steps.
             substeps: Number of PHYSICS steps per control step.
             dt: Time step size for a SINGLE physics substep.
-            
+            key: JAX PRNG Key for noise generation
+            noise_u: Magnitude of actuator noise (added to control output)
+            noise_z: Magnitude of sensor noise (added to state observation)
+
             Total physical time = t_steps * substeps * dt
         """
+        # Handle default key
+        if key is None:
+            key = jax.random.PRNGKey(0)
+
         # Ensure inputs are JAX arrays
         u_init = jax.numpy.array(u_init)
         xi_fixed = jax.numpy.array(xi_fixed)
@@ -56,15 +67,18 @@ class PDEDynamics2D:
 
         # Call the 2D solver function
         return solver.solve_with_policy(
-            u_init, 
-            xi_fixed, 
-            u_target, 
-            params, 
-            self.policy_apply_fn, 
+            u_init,
+            xi_fixed,
+            u_target,
+            params,
+            self.policy_apply_fn,
             t_steps,
-            substeps=substeps,  # Pass it down
+            substeps=substeps,
             N_grid=N_grid,
             L=L,
             dt=dt,
-            sigma=sigma
+            sigma=sigma,
+            key=key,
+            noise_u=noise_u,
+            noise_z=noise_z
         )

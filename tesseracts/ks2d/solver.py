@@ -111,25 +111,36 @@ def generate_random_noise_2d(key, N_grid, L, scale=1.0):
 
 @partial(jax.jit, static_argnames=['policy_apply_fn', 't_steps', 'substeps', 'N_grid'])
 def solve_with_policy(
-    u_init, 
-    xi_fixed, 
-    u_target, 
-    params, 
-    policy_apply_fn, 
-    t_steps, 
+    u_init,
+    xi_fixed,
+    u_target,
+    params,
+    policy_apply_fn,
+    t_steps,
     substeps=1,
-    N_grid=128, 
-    L=64.0, 
-    dt=0.01, 
-    sigma=1.2
+    N_grid=128,
+    L=64.0,
+    dt=0.01,
+    sigma=1.2,
+    key=None,           # <--- Added Key for noise generation
+    noise_u=0.0,        # <--- Actuator Noise Magnitude
+    noise_z=0.0         # <--- Sensor/State Noise Magnitude
 ):
     """
     Full simulation loop controllable by a policy with Action Repetition.
-    
+
     Structure:
     - Outer Loop (t_steps): Policy Inference (Control Update)
       - Inner Loop (substeps): Physics Evolution (ETDRK4) holding control constant
+
+    Noise Injection:
+    - noise_z: Added to state observation before policy sees it (sensor noise)
+    - noise_u: Added to control output before physics applies it (actuator noise)
     """
+    # Handle default key
+    if key is None:
+        key = jax.random.PRNGKey(0)
+
     # Setup spectral frequencies
     dx = L / N_grid
     kx_vec = 2 * jnp.pi * jnp.fft.fftfreq(N_grid, d=dx)
@@ -153,44 +164,53 @@ def solve_with_policy(
 
     # --- The Outer Loop Function (Policy Step) ---
     def step_fn_outer(carry, _):
-        u_hat_curr, u_curr = carry
-        
-        # 1. Policy acts based on current state
+        u_hat_curr, u_curr, current_key = carry
+
+        # Split keys for this step
+        k_sensor, k_actuator, next_key = jax.random.split(current_key, 3)
+
+        # 1. Add Sensor Noise (What the policy sees)
+        u_observed = u_curr + noise_z * jax.random.normal(k_sensor, u_curr.shape)
+
+        # 2. Policy acts based on observed state
         #    This happens once every 'substeps' physics steps
-        u_control = policy_apply_fn(params, u_curr, u_target, xi_fixed)
+        u_control = policy_apply_fn(params, u_observed, u_target, xi_fixed)
+
+        # 3. Add Actuator Noise (What the physics gets)
+        u_control_noisy = u_control + noise_u * jax.random.normal(k_actuator, u_control.shape)
         
         # --- The Inner Loop Function (Physics Substep) ---
         def step_fn_inner(carry_inner, _):
             u_h, u_c = carry_inner
-            
-            # Physics evolves, but u_control is constant (Zero-Order Hold)
+
+            # Physics evolves, but u_control_noisy is constant (Zero-Order Hold)
             u_h_next, u_c_next = ks_spectral_step_etdrk4(
-                u_h, u_c, xi_fixed, u_control, 
+                u_h, u_c, xi_fixed, u_control_noisy,
                 KX, KY, etdrk4_coeffs, dealias_mask,
                 N=N_grid, L=L, dt=dt, sigma=sigma
             )
             return (u_h_next, u_c_next), None
 
-        # 2. Run physics for 'substeps' iterations
+        # 4. Run physics for 'substeps' iterations
         (u_hat_next, u_next), _ = jax.lax.scan(
-            step_fn_inner, 
-            (u_hat_curr, u_curr), 
-            None, 
+            step_fn_inner,
+            (u_hat_curr, u_curr),
+            None,
             length=substeps
         )
-        
-        # Return state and trajectory info
-        v_dummy = jnp.zeros_like(u_control) 
-        return (u_hat_next, u_next), (u_next, xi_fixed, u_control, v_dummy)
 
-    # Run the outer control loop
+        # Return state and trajectory info (pass next_key to next iteration)
+        v_dummy = jnp.zeros_like(u_control_noisy)
+        return (u_hat_next, u_next, next_key), (u_next, xi_fixed, u_control_noisy, v_dummy)
+
+    # Run the outer control loop (initialize with key in carry)
     _, trajectory = jax.lax.scan(
-        step_fn_outer, 
-        (u_hat_init, u_init), 
-        None, 
+        step_fn_outer,
+        (u_hat_init, u_init, key),
+        None,
         length=t_steps
     )
-    
+
     return trajectory
 
 # --- 3. Example Usage ---
