@@ -48,7 +48,7 @@ MODEL_NAMES = [
 ]
 
 # Test Parameters
-TEST_AGENT_COUNTS = [60, 80, 100, 120, 140]  # Include training count (100)
+TEST_AGENT_COUNTS = [64, 81, 100, 121, 144]  # Include training count (100)
 N_TEST_SAMPLES = 20
 TRAIN_N_AGENTS = 100
 
