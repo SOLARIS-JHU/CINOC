@@ -199,7 +199,7 @@ def main():
             params = flax.serialization.from_bytes(init_params, f.read())
 
     # --- 4. Zero-Shot Ablation ---
-    n_eval_list = [36, 64, 81, 100, 121, 144, 196, 256]
+    n_eval_list = [36, 64, 81, 100, 121, 144, 196, 256, 324, 400] 
     n_test = 5 
     w_init_test = w_init_pool[-n_test:]
     
@@ -249,14 +249,14 @@ def main():
     baseline_enstr = df[df['n_agents'] == CONFIG['n_agents_train']]['enstrophy'].values[0]
     baseline_enstr = max(baseline_enstr, 1e-9)
     
-    df['relative_enstrophy'] = (df['enstrophy'] / baseline_enstr) * 100
+    df['relative_mse'] = (df['enstrophy'] / baseline_enstr) * 100
     df.to_csv(CSV_PATH, index=False)
 
     plt.style.use('seaborn-v0_8-paper')
     fig, ax1 = plt.subplots(figsize=(7, 5))
     
     color = '#16a085'
-    ax1.plot(df['n_agents'], df['relative_enstrophy'], marker='o', linestyle='-', 
+    ax1.plot(df['n_agents'], df['relative_mse'], marker='o', linestyle='-', 
              color=color, linewidth=2, markersize=8, label='Relative Enstrophy')
     ax1.axvline(x=CONFIG['n_agents_train'], color='#d35400', linestyle='--', alpha=0.8, 
                 label=f'Training Size (N={CONFIG["n_agents_train"]})')

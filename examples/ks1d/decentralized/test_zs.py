@@ -68,7 +68,6 @@ def train_step(params, opt_state, u_init_batch, xi_batch, u_target_batch, key, d
     keys = jax.random.split(key, u_init_batch.shape[0])
     
     def mean_loss(p):
-        # Noise levels: u=0.05, z=0.025 (Low Noise)
         losses = jax.vmap(loss_fn, in_axes=(None, 0, 0, 0, 0, None, None, None, None, None, None))(
             p, u_init_batch, xi_batch, u_target_batch, keys, dynamics, T_steps, N_grid, L_domain, 0.05, 0.025)
         return jnp.mean(losses)
@@ -90,7 +89,7 @@ def main():
     T_steps = 300
     
     # Zero-Shot Sweep: From Half Density (15) to 3x Density
-    n_eval_list = [15, 20, 25, 30, 40, 50, 60, 80, 85, 90, 100]
+    n_eval_list = [15, 20, 25, 30, 40, 50, 60, 90, 100, 120, 150, 180]
     
     # Model Setup
     model = DecentralizedControlNet(features=(64, 64), L_domain=L_domain, window_size=4)

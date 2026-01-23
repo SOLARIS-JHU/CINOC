@@ -69,7 +69,7 @@ def loss_fn(params, u_init, xi_fixed, u_target, dynamics, T_steps, substeps, N_g
     l_effort = jnp.mean(u_ctrl_traj ** 2)
     
     # Weighted Sum 
-    return 100.0 * l_track + 1e-4 * l_effort
+    return 50.0 * l_track + 5e-3 * l_effort
 
 @partial(jax.jit, static_argnames=('dynamics', 'T_steps', 'substeps', 'N_grid', 'L_domain', 'dt', 'optimizer'))
 def train_step(params, opt_state, u_init_batch, xi_batch, u_target_batch, dynamics, T_steps, substeps, N_grid, L_domain, dt, optimizer):

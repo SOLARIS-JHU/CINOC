@@ -46,7 +46,7 @@ def loss_fn(params, z_init, xi_init, z_target, dynamics, n_agents, T_steps):
     mask = jnp.eye(n_agents)[None, :, :]
     l_coll = jnp.mean(jnp.maximum(0, 0.05 - (dists + mask)) ** 2)
     
-    return 10.0 * l_track + 0.01 * l_effort + 100.0 * l_bound + 1.0 * l_coll
+    return 5.0 * l_track + 0.1 * l_effort + 100.0 * l_bound + 1.0 * l_coll
 
 @partial(jax.jit, static_argnames=('dynamics', 'n_agents', 'T_steps', 'optimizer'))
 def train_step(params, opt_state, z_init_batch, xi_init_batch, z_target_batch, dynamics, n_agents, T_steps, optimizer):

@@ -57,7 +57,7 @@ def train_step(params, opt_state, z_init_batch, xi_init_batch, z_target_batch, d
 def main():
     n_pde = 100
     n_train = 30  
-    n_eval_list = [15, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 140, 160, 180, 200]
+    n_eval_list = [15, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 150, 180]
     epochs = 500
     
     solver_ts = "NA"
