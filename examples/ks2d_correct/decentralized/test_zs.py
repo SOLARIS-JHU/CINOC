@@ -137,14 +137,14 @@ def main():
     }
     
     # Training Config
-    n_train = 100     # Baseline: 10x10 grid
-    epochs = 500
+    n_train = 196     # Baseline: 10x10 grid
+    epochs = 50
     batch_size = 4    # Small batch size for 2D due to memory
     pool_size = 100   # Pool of initial conditions
     
     # Zero-Shot Sweep (Perfect Squares for regular grids)
     # 36 (6x6), 64 (8x8), 100 (10x10), 144 (12x12), 196 (14x14), 256 (16x16)
-    n_eval_list = [36, 64, 100, 144, 196, 256]
+    n_eval_list = [144, 196, 256, 324, 400, 484, 576, 676, 784, 900, 1024]
     
     # Model Setup
     model = DecentralizedKS2DControlNet(
@@ -156,7 +156,7 @@ def main():
     
     # Learning Rate with Warmup
     lr_schedule = optax.warmup_cosine_decay_schedule(
-        init_value=5e-4, peak_value=1e-3, warmup_steps=50,
+        init_value=5e-4, peak_value=1e-3, warmup_steps=10,
         decay_steps=epochs, end_value=1e-5
     )
     optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(lr_schedule))
