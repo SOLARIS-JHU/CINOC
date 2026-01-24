@@ -9,6 +9,7 @@ import matplotlib.animation as animation
 import matplotlib.patheffects as patheffects
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 import sys
 from pathlib import Path
 import flax.serialization
@@ -82,8 +83,8 @@ def rollout_uncontrolled(z_init, xi_init, T_steps):
 def create_control_animation(z_traj_unctrl, z_traj_ctrl, xi_traj_ctrl, u_traj_ctrl,
                              z_target, fps=30, duration=10):
     """
-    Create 1×2 animation:
-    [DPC Controlled Evolution]  [MSE Plot]
+    Create 1×2 animation with equal-sized subplots:
+    [DPC Controlled Evolution]  [MSE Tracking Error]
     """
     setup_style()
 
@@ -99,6 +100,7 @@ def create_control_animation(z_traj_unctrl, z_traj_ctrl, xi_traj_ctrl, u_traj_ct
     # Compute metrics
     mse_ctrl = np.mean((z_ctrl - z_target_np[None, :, :])**2, axis=(1, 2))
     mse_unctrl = np.mean((z_unctrl - z_target_np[None, :, :])**2, axis=(1, 2))
+
     # Color scales
     vmin = min(z_ctrl.min(), z_target_np.min())
     vmax = max(z_ctrl.max(), z_target_np.max())
@@ -109,28 +111,45 @@ def create_control_animation(z_traj_unctrl, z_traj_ctrl, xi_traj_ctrl, u_traj_ct
     total_frames = fps * duration
     frame_indices = np.linspace(0, T-1, total_frames).astype(int)
 
-    # Create figure
+    # Create figure with manual positioning for exact control
     fig = plt.figure(figsize=(14, 6))
-    gs = fig.add_gridspec(
-        1,
-        4,
-        width_ratios=[0.06, 1, 1, 0.06],
-        wspace=0.4,
-        left=0.08,
-        right=0.95,
-        top=0.93,
-        bottom=0.08,
-    )
+    fig_w, fig_h = fig.get_size_inches()
 
-    ax1 = fig.add_subplot(gs[0, 1])  # Controlled
-    ax2 = fig.add_subplot(gs[0, 2])  # MSE
+    # Layout controls (inches) for precise placement + square panels.
+    square_size_in = 5.1
+    left_in = 1.5
+    bottom_in = 0.5
+    gap_in = 2.0
+    cbar_w_in = 0.195
+    cbar_pad_left_in = 0.9
+    cbar_pad_right_in = 0.25
 
-    # Panel 1: DPC Controlled Evolution
+    def to_fig_x(x_in):
+        return x_in / fig_w
+
+    def to_fig_y(y_in):
+        return y_in / fig_h
+
+    plot_w = to_fig_x(square_size_in)
+    plot_h = to_fig_y(square_size_in)
+    left = to_fig_x(left_in)
+    bottom = to_fig_y(bottom_in)
+    gap = to_fig_x(gap_in)
+
+    # Left plot (DPC Controlled) with colorbars
+    ax1 = fig.add_axes([left, bottom, plot_w, plot_h])
+
+    # Right plot (MSE) - same physical size (square)
+    ax2_left = left + plot_w + gap
+    ax2 = fig.add_axes([ax2_left, bottom, plot_w, plot_h])
+
+    # ===== Panel 1: DPC Controlled Evolution =====
     ax1.set_xlim([0, 1])
     ax1.set_ylim([0, 1])
     ax1.set_xlabel(r'Position $x$', fontsize=12)
     ax1.set_ylabel(r'Position $y$', fontsize=12)
     ax1.set_title('DPC Controlled Evolution', fontsize=13, fontweight='bold')
+    ax1.set_aspect('equal')
     im_ctrl = ax1.imshow(z_ctrl[0], origin='lower', extent=[0, 1, 0, 1],
                          cmap='RdBu_r', vmin=vmin, vmax=vmax, interpolation='nearest')
     contours = ax1.contour(
@@ -151,9 +170,35 @@ def create_control_animation(z_traj_unctrl, z_traj_ctrl, xi_traj_ctrl, u_traj_ct
     # Actuators with control intensity
     norm_u = Normalize(vmin=u_min, vmax=u_max)
     scatter_ctrl = ax1.scatter([], [], c=[], cmap='viridis', norm=norm_u,
-                          s=30, edgecolors='black', linewidths=0.6, zorder=10)
+                              s=30, edgecolors='black', linewidths=0.6, zorder=10)
 
-    # Panel 2: MSE Evolution
+    # Colorbars with exact height matching ax1
+    cbar_width = to_fig_x(cbar_w_in)
+    cbar_pad_left = to_fig_x(cbar_pad_left_in)
+    cbar_pad_right = to_fig_x(cbar_pad_right_in)
+
+    # Control colorbar (left of ax1)
+    cax_u = fig.add_axes([left - cbar_width - cbar_pad_left, bottom, cbar_width, plot_h])
+    cb_u = fig.colorbar(
+        ScalarMappable(norm=norm_u, cmap='viridis'),
+        cax=cax_u,
+        label='Control u',
+    )
+    cb_u.ax.yaxis.set_ticks_position('left')
+    cb_u.ax.yaxis.set_label_position('right')
+    cb_u.ax.yaxis.labelpad = 6
+    cb_u.ax.tick_params(labelsize=10)
+
+    # Temperature colorbar (right of ax1)
+    cax_temp = fig.add_axes([left + plot_w + cbar_pad_right, bottom, cbar_width, plot_h])
+    cb_temp = fig.colorbar(
+        ScalarMappable(norm=Normalize(vmin=vmin, vmax=vmax), cmap='RdBu_r'),
+        cax=cax_temp,
+        label='Temperature',
+    )
+    cb_temp.ax.tick_params(labelsize=10)
+
+    # ===== Panel 2: MSE Evolution =====
     ax2.set_xlim([0, T])
     ax2.set_ylim([min(mse_ctrl.min(), mse_unctrl.min())*0.5,
                   max(mse_ctrl.max(), mse_unctrl.max())*1.2])
@@ -166,31 +211,10 @@ def create_control_animation(z_traj_unctrl, z_traj_ctrl, xi_traj_ctrl, u_traj_ct
     line_unctrl, = ax2.plot([], [], 'b-', lw=2.5, label='Uncontrolled', alpha=0.8)
     line_ctrl, = ax2.plot([], [], 'r-', lw=2.5, label='DPC Controlled', alpha=0.8)
     time_marker = ax2.axvline(x=0, color='green', lw=2, alpha=0.7, linestyle='--')
-    ax2.legend(fontsize=11, loc='center right')
+    ax2.legend(fontsize=11, loc='upper right')
 
-    # Add colorbars (aligned to DPC panel)
-    cax2 = fig.add_subplot(gs[0, 0])
-    cax1 = fig.add_subplot(gs[0, 3])
-
-    cb1 = fig.colorbar(
-        ScalarMappable(norm=Normalize(vmin=vmin, vmax=vmax), cmap='RdBu_r'),
-        cax=cax1,
-        label='Temperature',
-    )
-    cb1.ax.tick_params(labelsize=10)
-
-    # Control intensity colorbar (panel 2)
-    cb2 = fig.colorbar(
-        ScalarMappable(norm=norm_u, cmap='viridis'),
-        cax=cax2,
-        label='Control u',
-    )
-    cb2.ax.yaxis.set_ticks_position('left')
-    cb2.ax.yaxis.set_label_position('right')
-    cb2.ax.tick_params(labelsize=10, labelleft=True, labelright=False)
-
-    # Title and time text
-    time_text = fig.text(0.5, 0.02, '', ha='center', fontsize=13, fontweight='bold')
+    # Time text
+    time_text = fig.text(0.5, 0.05, '', ha='center', fontsize=13, fontweight='bold')
 
     def init():
         im_ctrl.set_data(z_ctrl[0])
@@ -294,11 +318,11 @@ def main():
         z_target, fps=fps, duration=duration
     )
 
-    # Save as GIF
-    print("▶ Saving GIF (this may take a few minutes)...")
-    gif_path = output_dir / 'heat2d_animation.gif'
-    anim.save(gif_path, writer='pillow', fps=fps, dpi=150)
-    print(f"✓ Saved: {gif_path}")
+    # Save as GIF (disabled)
+    # print("▶ Saving GIF (this may take a few minutes)...")
+    # gif_path = output_dir / 'heat2d_animation.gif'
+    # anim.save(gif_path, writer='pillow', fps=fps, dpi=150)
+    # print(f"✓ Saved: {gif_path}")
 
     # Save as MP4 (higher quality)
     try:
