@@ -185,13 +185,13 @@ def main():
     dpc_row_hspace = 0.17             # Horizontal spacing within DPC row
     dpc_row_vpos_ratio = 0.55         # Vertical position ratio (0.55 = 55% from bottom)
     
-    # Metrics Row (Bottom) - Controls positioning of 3 metric subplotssd
-    metrics_row_height_ratio = 0.45   # Relative height of metrics row
+    # Metrics Row (Bottom) - Controls positioning of 3 metric subplots
+    metrics_row_height_ratio = 0.26   # Relative height of metrics row
     metrics_row_hspace = 0.24         # Horizontal spacing between the 3 metric plots
     metrics_row_vpos_ratio = 0.05     # Vertical position ratio from bottom
     
     # Vertical gap between rows
-    vspace_between_rows = -0.15
+    vspace_between_rows = -0.23
     
     # ─────────────────────────────────────────────────────────────────────────
     

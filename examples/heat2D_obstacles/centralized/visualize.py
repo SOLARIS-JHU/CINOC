@@ -17,6 +17,7 @@ import numpy as np
 jax.config.update("jax_platform_name", "cpu")
 
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
+script_path = Path(__file__).resolve().parent
 sys.path.append(str(script_dir))
 
 from dynamics_dual import PDEDynamics
@@ -123,11 +124,14 @@ def main():
     model = Heat2DControlNet(features=(16, 32))
     dynamics = PDEDynamics(None, policy_apply_fn=model.apply, use_tesseract=False)
 
+    params_path = script_path / 'centralized_params_heat2d_obstacles.msgpack'
+    output_dir = script_path / 'figures'
+    output_dir.mkdir(parents=True, exist_ok=True)
     try:
-        params = load_params(model, 'centralized_params_heat2d_obstacles.msgpack', n_grid, n_agents)
+        params = load_params(model, params_path, n_grid, n_agents)
         print(f"✓ Loaded trained parameters ({n_agents} agents)")
     except FileNotFoundError:
-        print("✗ Error: centralized_params_heat2d_obstacles.msgpack not found")
+        print(f"✗ Error: {params_path} not found")
         return
 
     # Generate single test scenario (using scenario 1 from original)
@@ -322,12 +326,12 @@ def main():
                 fontsize=14, fontweight='bold', y=0.98)
 
     # Save as PDF (vector graphics)
-    pdf_path = 'heat2d_obstacles_centralized_visualization.pdf'
+    pdf_path = output_dir / 'heat2d_obstacles_centralized_visualization.pdf'
     plt.savefig(pdf_path, format='pdf', dpi=300, bbox_inches='tight')
     print(f"\n✓ Saved: {pdf_path}")
 
     # Also save as high-res PNG
-    png_path = 'heat2d_obstacles_centralized_visualization.png'
+    png_path = output_dir / 'heat2d_obstacles_centralized_visualization.png'
     plt.savefig(png_path, format='png', dpi=300, bbox_inches='tight')
     print(f"✓ Saved: {png_path}")
 

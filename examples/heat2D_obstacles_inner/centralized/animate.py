@@ -20,6 +20,7 @@ import numpy as np
 jax.config.update("jax_platform_name", "cpu")
 
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
+script_path = Path(__file__).resolve().parent
 sys.path.append(str(script_dir))
 
 from dynamics_dual import PDEDynamics
@@ -315,11 +316,12 @@ def main():
     model = Heat2DControlNet(features=(16, 32))
     dynamics = PDEDynamics(None, policy_apply_fn=model.apply, use_tesseract=False)
 
+    params_path = script_path / 'centralized_params_heat2d_obstacles_inner.msgpack'
     try:
-        params = load_params(model, 'centralized_params_heat2d_obstacles_inner.msgpack', n_grid, n_agents)
+        params = load_params(model, params_path, n_grid, n_agents)
         print(f"✓ Loaded trained parameters ({n_agents} agents)")
     except FileNotFoundError:
-        print("✗ Error: centralized_params_heat2d_obstacles_inner.msgpack not found")
+        print(f"✗ Error: {params_path} not found")
         return
 
     # Generate test scenario (same as visualize.py - scenario 1)
@@ -362,14 +364,14 @@ def main():
 
     # Save as GIF
     print("▶ Saving GIF (this may take a few minutes)...")
-    gif_path = 'heat2d_obstacles_animation.gif'
+    gif_path = script_path / 'heat2d_obstacles_animation.gif'
     anim.save(gif_path, writer='pillow', fps=fps, dpi=150)
     print(f"✓ Saved: {gif_path}")
 
     # Save as MP4 (higher quality)
     try:
         print("▶ Saving MP4 (high resolution)...")
-        mp4_path = 'heat2d_obstacles_animation.mp4'
+        mp4_path = script_path / 'heat2d_obstacles_animation.mp4'
         anim.save(mp4_path, writer='ffmpeg', fps=fps, dpi=200,
                  extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
         print(f"✓ Saved: {mp4_path}")

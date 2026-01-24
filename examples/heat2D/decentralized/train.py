@@ -12,6 +12,7 @@ import flax.serialization
 import argparse
 
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
+script_path = Path(__file__).resolve().parent
 sys.path.append(str(script_dir))
 
 from dynamics_dual import PDEDynamics
@@ -162,9 +163,10 @@ for epoch in trange(epochs):
 print(f"\nTraining finished in {time.time() - start_time:.2f}s.")
 
 # Save parameters
-with open('decentralized_params_heat2d.msgpack', 'wb') as f:
+params_path = script_path / 'decentralized_params_heat2d.msgpack'
+with open(params_path, 'wb') as f:
     f.write(flax.serialization.to_bytes(params))
-print("Parameters saved to decentralized_params_heat2d.msgpack")
+print(f"Parameters saved to {params_path}")
 
 # Plot metrics
 if metrics:
@@ -192,5 +194,6 @@ if metrics:
     axes[1, 1].set_yscale('log')
 
     plt.tight_layout()
-    plt.savefig('training_metrics_heat2d_decentralized.png')
-    print("Training metrics saved to training_metrics_heat2d_decentralized.png")
+    metrics_path = script_path / 'training_metrics_heat2d_decentralized.png'
+    plt.savefig(metrics_path)
+    print(f"Training metrics saved to {metrics_path}")

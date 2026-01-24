@@ -249,8 +249,7 @@ def main():
 
     script_path = Path(__file__).resolve().parent
     params_path = script_path / 'decentralized_params_heat2d.msgpack'
-    output_dir = script_path / 'figures'
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = script_path
     try:
         params = load_params(model, params_path, n_grid, n_agents)
         print(f"✓ Loaded trained parameters ({n_agents} agents)")

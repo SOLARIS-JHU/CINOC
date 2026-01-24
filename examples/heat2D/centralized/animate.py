@@ -10,6 +10,7 @@ import matplotlib.animation as animation
 import matplotlib.patheffects as patheffects
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 import sys
 from pathlib import Path
 import flax.serialization
@@ -97,9 +98,10 @@ def create_control_animation(z_traj_unctrl, z_traj_ctrl, xi_traj_ctrl, u_traj_ct
 
     T = z_ctrl.shape[0]
 
-    # Compute metrics
-    mse_ctrl = np.mean((z_ctrl - z_target_np[None, :, :])**2, axis=(1, 2))
-    mse_unctrl = np.mean((z_unctrl - z_target_np[None, :, :])**2, axis=(1, 2))
+    # Compute metrics (normalized by target energy to keep scale comparable to field values)
+    target_energy = float(np.mean(z_target_np ** 2)) + 1e-9
+    mse_ctrl = np.mean((z_ctrl - z_target_np[None, :, :])**2, axis=(1, 2)) / target_energy
+    mse_unctrl = np.mean((z_unctrl - z_target_np[None, :, :])**2, axis=(1, 2)) / target_energy
     # Color scales
     vmin = min(z_ctrl.min(), z_target_np.min())
     vmax = max(z_ctrl.max(), z_target_np.max())
@@ -110,21 +112,15 @@ def create_control_animation(z_traj_unctrl, z_traj_ctrl, xi_traj_ctrl, u_traj_ct
     total_frames = fps * duration
     frame_indices = np.linspace(0, T-1, total_frames).astype(int)
 
-    # Create figure
-    fig = plt.figure(figsize=(14, 6))
-    gs = fig.add_gridspec(
+    # Create figure with two equal-height subplots
+    fig, (ax1, ax2) = plt.subplots(
         1,
-        4,
-        width_ratios=[0.06, 1, 1, 0.06],
-        wspace=0.4,
-        left=0.08,
-        right=0.95,
-        top=0.93,
-        bottom=0.08,
+        2,
+        figsize=(14, 6),
+        gridspec_kw={"width_ratios": [1, 1], "wspace": 0.35},
+        constrained_layout=False,
     )
-
-    ax1 = fig.add_subplot(gs[0, 1])  # Controlled
-    ax2 = fig.add_subplot(gs[0, 2])  # MSE
+    fig.subplots_adjust(left=0.12, right=0.88, top=0.93, bottom=0.1)
 
     # Panel 1: DPC Controlled Evolution
     ax1.set_xlim([0, 1])
@@ -159,8 +155,8 @@ def create_control_animation(z_traj_unctrl, z_traj_ctrl, xi_traj_ctrl, u_traj_ct
     ax2.set_ylim([min(mse_ctrl.min(), mse_unctrl.min())*0.5,
                   max(mse_ctrl.max(), mse_unctrl.max())*1.2])
     ax2.set_xlabel(r'Time Step', fontsize=12)
-    ax2.set_ylabel(r'MSE', fontsize=12)
-    ax2.set_title('MSE Tracking Error', fontsize=13, fontweight='bold')
+    ax2.set_ylabel(r'Normalized MSE', fontsize=12)
+    ax2.set_title('Normalized MSE Tracking Error', fontsize=13, fontweight='bold')
     ax2.set_yscale('log')
     ax2.grid(True, alpha=0.3)
 
@@ -169,25 +165,26 @@ def create_control_animation(z_traj_unctrl, z_traj_ctrl, xi_traj_ctrl, u_traj_ct
     time_marker = ax2.axvline(x=0, color='green', lw=2, alpha=0.7, linestyle='--')
     ax2.legend(fontsize=11, loc='center right')
 
-    # Add colorbars (aligned to DPC panel)
-    cax2 = fig.add_subplot(gs[0, 0])
-    cax1 = fig.add_subplot(gs[0, 3])
+    # Add colorbars anchored to the controlled subplot so their lengths match subplot height
+    divider1 = make_axes_locatable(ax1)
+    cax_temp = divider1.append_axes("right", size="3.2%", pad=0.08)
+    cax_u = divider1.append_axes("left", size="3.2%", pad=0.12)
 
     cb1 = fig.colorbar(
         ScalarMappable(norm=Normalize(vmin=vmin, vmax=vmax), cmap='RdBu_r'),
-        cax=cax1,
+        cax=cax_temp,
         label='Temperature',
     )
     cb1.ax.tick_params(labelsize=10)
 
-    # Control intensity colorbar (panel 2)
+    # Control intensity colorbar (left of panel 1)
     cb2 = fig.colorbar(
         ScalarMappable(norm=norm_u, cmap='viridis'),
-        cax=cax2,
+        cax=cax_u,
         label='Control u',
     )
     cb2.ax.yaxis.set_ticks_position('left')
-    cb2.ax.yaxis.set_label_position('right')
+    cb2.ax.yaxis.set_label_position('left')
     cb2.ax.tick_params(labelsize=10, labelleft=True, labelright=False)
 
     # Title and time text
@@ -250,8 +247,7 @@ def main():
 
     script_path = Path(__file__).resolve().parent
     params_path = script_path / 'centralized_params_heat2d.msgpack'
-    output_dir = script_path / 'figures'
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = script_path
     try:
         params = load_params(model, params_path, n_grid, n_agents)
         print(f"✓ Loaded trained parameters ({n_agents} agents)")
