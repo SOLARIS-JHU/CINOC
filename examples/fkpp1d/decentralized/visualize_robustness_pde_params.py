@@ -39,7 +39,7 @@ N_TEST_SAMPLES = 50
 
 # Parameter Sets
 NU_VALUES = [0., 0.001, 0.002, 0.003, 0.004, 0.005]
-RHO_VALUES = [-5, -2.5, 0., 2.5,  5.]
+RHO_VALUES = [3, 4, 5, 6, 7, 8]
 
 # Defaults
 DEFAULT_NU = 0.005
@@ -137,7 +137,7 @@ if __name__ == "__main__":
         ax=axes[0], data=df_nu, x="Agents", y="MSE", 
         hue="Value", style="Value", markers=True, markersize=8, linewidth=2.5, palette="viridis"
     )
-    axes[0].set_title(f"Sensitivity to Diffusion ($\\nu$)\nFixed $\\rho={DEFAULT_RHO}$", fontsize=14)
+    axes[0].set_title(f"Sensitivity to Diffusion ($\\nu$). $\\nu for trainining is 0.005$\nFixed $\\rho={DEFAULT_RHO}$", fontsize=14)
     axes[0].set_ylabel("Final Tracking Error (MSE)", fontsize=12)
     axes[0].set_yscale("log")
     axes[0].legend(title="$\\nu$ Value", loc='upper right')
@@ -147,7 +147,7 @@ if __name__ == "__main__":
         ax=axes[1], data=df_rho, x="Agents", y="MSE", 
         hue="Value", style="Value", markers=True, markersize=8, linewidth=2.5, palette="magma"
     )
-    axes[1].set_title(f"Sensitivity to Growth Rate ($\\rho$)\nFixed $\\nu={DEFAULT_NU}$", fontsize=14)
+    axes[1].set_title(f"Sensitivity to Growth Rate ($\\rho$). $\\rho for trainining is 3.0$\nFixed $\\nu={DEFAULT_NU}$", fontsize=14)
     axes[1].set_ylabel("") # Shared Y
     axes[1].set_yscale("log")
     axes[1].legend(title="$\\rho$ Value", loc='upper right')

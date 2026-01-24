@@ -103,38 +103,73 @@ def evaluate_effort_scaling(solver_ts):
 
     return pd.DataFrame(results)
 
+# def plot_effort_metrics(df):
+#     plt.style.use('seaborn-v0_8-whitegrid')
+    
+#     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    
+#     # Consistent styling
+#     palette = {"Baseline": "#2c3e50", "Low Noise": "#e74c3c"}
+#     markers = {"Baseline": "o", "Low Noise": "s"}
+    
+#     # --- Subplot 1: Quadratic Effort ---
+#     sns.lineplot(
+#         data=df, x="Agents", y="Sum_Sq", hue="Model", style="Model",
+#         markers=markers, palette=palette, linewidth=2.5, ax=axes[0], markersize=9
+#     )
+#     axes[0].set_title(r"Total Quadratic Effort ($\sum u_i^2$)", fontsize=14, fontweight='bold')
+#     axes[0].set_ylabel(r"Mean $\sum u_i^2$ (Steady State)", fontsize=12)
+#     axes[0].set_xlabel("Number of Agents ($N$)", fontsize=12)
+#     axes[0].axvline(x=30, color='gray', linestyle='--', alpha=0.5, label="Training N=30")
+#     axes[0].set_xscale('log')
+#     axes[0].set_yscale('log')
+    
+#     # --- Subplot 2: Absolute Effort ---
+#     sns.lineplot(
+#         data=df, x="Agents", y="Sum_Abs", hue="Model", style="Model",
+#         markers=markers, palette=palette, linewidth=2.5, ax=axes[1], markersize=9
+#     )
+#     axes[1].set_title(r"Total Absolute Effort ($\sum |u_i|$)", fontsize=14, fontweight='bold')
+#     axes[1].set_ylabel(r"Mean $\sum |u_i|$ (Steady State)", fontsize=12)
+#     axes[1].set_xlabel("Number of Agents ($N$)", fontsize=12)
+#     axes[1].axvline(x=30, color='gray', linestyle='--', alpha=0.5, label="Training N=30")
+#     axes[1].set_xscale('log')
+#     axes[1].set_yscale('log')
+
+#     plt.tight_layout()
+#     save_path = OUTPUT_DIR / "effort_scaling_log_steady.pdf"
+#     plt.savefig(save_path, bbox_inches='tight')
+#     print(f"Plot saved to {save_path}")
+
 def plot_effort_metrics(df):
     plt.style.use('seaborn-v0_8-whitegrid')
     
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    # Changed from (1, 2) to a single plot with a standard aspect ratio
+    fig, ax = plt.subplots(figsize=(8, 6))
     
     # Consistent styling
     palette = {"Baseline": "#2c3e50", "Low Noise": "#e74c3c"}
     markers = {"Baseline": "o", "Low Noise": "s"}
     
-    # --- Subplot 1: Quadratic Effort ---
+    # --- Quadratic Effort Only ---
     sns.lineplot(
         data=df, x="Agents", y="Sum_Sq", hue="Model", style="Model",
-        markers=markers, palette=palette, linewidth=2.5, ax=axes[0], markersize=9
+        markers=markers, palette=palette, linewidth=2.5, ax=ax, markersize=9
     )
-    axes[0].set_title(r"Total Quadratic Effort ($\sum u_i^2$)", fontsize=14, fontweight='bold')
-    axes[0].set_ylabel(r"Mean $\sum u_i^2$ (Steady State)", fontsize=12)
-    axes[0].set_xlabel("Number of Agents ($N$)", fontsize=12)
-    axes[0].axvline(x=30, color='gray', linestyle='--', alpha=0.5, label="Training N=30")
-    axes[0].set_xscale('log')
-    axes[0].set_yscale('log')
     
-    # --- Subplot 2: Absolute Effort ---
-    sns.lineplot(
-        data=df, x="Agents", y="Sum_Abs", hue="Model", style="Model",
-        markers=markers, palette=palette, linewidth=2.5, ax=axes[1], markersize=9
-    )
-    axes[1].set_title(r"Total Absolute Effort ($\sum |u_i|$)", fontsize=14, fontweight='bold')
-    axes[1].set_ylabel(r"Mean $\sum |u_i|$ (Steady State)", fontsize=12)
-    axes[1].set_xlabel("Number of Agents ($N$)", fontsize=12)
-    axes[1].axvline(x=30, color='gray', linestyle='--', alpha=0.5, label="Training N=30")
-    axes[1].set_xscale('log')
-    axes[1].set_yscale('log')
+    ax.set_title(r"Total Quadratic Effort ($\sum u_i^2$)", fontsize=14, fontweight='bold')
+    ax.set_ylabel(r"Mean $\sum u_i^2$ (Steady State)", fontsize=12)
+    ax.set_xlabel("Number of Agents ($N$)", fontsize=12)
+    
+    # Vertical line for training reference
+    ax.axvline(x=30, color='gray', linestyle='--', alpha=0.5, label="Training $N=30$")
+    
+    # Set both axes to log scale
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    
+    # Ensure legend is visible
+    ax.legend(title="Model", frameon=True)
 
     plt.tight_layout()
     save_path = OUTPUT_DIR / "effort_scaling_log_steady.pdf"
