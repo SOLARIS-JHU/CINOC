@@ -1,13 +1,9 @@
 """
-NS2D Shape Formation - Publication-Quality Visualization
+NS2D Shape Formation - Publication-Quality Visualization (Adapted Layout)
 
-Creates a 2x2 figure matching heat2D style:
-- Top-left: Uncontrolled Evolution
-- Top-right: DPC Controlled Evolution with actuator positions
-- Bottom-left: Tracking Error
-- Bottom-right: MSE Tracking Error over time
-
-Also generates GIF and MP4 animations.
+Creates a figure matching the "2D Heat Equation - Decentralized" style:
+- Top Row: Snapshots (Linear time spacing)
+- Bottom Row: MSE, Agent Speed, and Control Intensity metrics
 """
 
 import sys
@@ -21,13 +17,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
+import matplotlib.patheffects as patheffects
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 import flax.serialization
 
-from examples.ns2d.centralized.dynamics import unroll_controlled
-from examples.ns2d.centralized.train import (
+from examples.density.centralized.dynamics import unroll_controlled
+from examples.density.centralized.train import (
     N_AGENTS, T_STEPS, PUSH_MAX, SIGMA_PUSH, BUOYANCY, FEATURES
 )
 from models.policy_ns2d import NS2DControlNet
@@ -42,11 +38,11 @@ def setup_style():
     tex_fonts = {
         "font.family": "serif",
         "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
-        "axes.labelsize": 12,
-        "font.size": 12,
-        "legend.fontsize": 12,
-        "xtick.labelsize": 12,
-        "ytick.labelsize": 12,
+        "axes.labelsize": 11,
+        "font.size": 10,
+        "legend.fontsize": 9,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
         "axes.titlesize": 12,
         "axes.linewidth": 1.0,
         "lines.linewidth": 1.5,
@@ -61,7 +57,7 @@ def setup_style():
 
 def rollout_uncontrolled(smoke_init, xi_init, rho_target, T_steps, Nx, Ny, dt, buoyancy):
     """Rollout with zero control inputs (natural dynamics only)."""
-    from examples.ns2d.centralized.dynamics import ns2d_step_jax
+    from examples.density.centralized.dynamics import ns2d_step_jax
     
     def step_fn(carry, _):
         smoke, xi = carry
@@ -83,281 +79,219 @@ def rollout_uncontrolled(smoke_init, xi_init, rho_target, T_steps, Nx, Ny, dt, b
     return smoke_traj, xi_traj, v_traj
 
 
-def create_animation(
-    smoke_unctrl, smoke_ctrl, xi_traj_ctrl, vel_traj_ctrl,
-    rho_target, mse_ctrl, mse_unctrl,
-    sample_idx=0,
-    output_gif=None,
-    output_mp4=None,
-    fps=10,
-    skip_frames=5
-):
+def get_linear_timesteps(T_steps, n_points=6):
     """
-    Create GIF and MP4 animation with same 2x2 layout as paper figure.
-    
-    Layout:
-    - (0,0) Uncontrolled Evolution
-    - (0,1) DPC Controlled Evolution with actuators
-    - (1,0) Tracking Error
-    - (1,1) MSE Tracking Error over time (with moving marker)
+    Generate linearly-spaced timesteps (Requested update).
     """
-    setup_style()
-    
-    T, Nx, Ny = smoke_ctrl.shape
-    n_agents = xi_traj_ctrl.shape[1]
-    
-    # Frame indices
-    frame_indices = list(range(0, T, skip_frames))
-    if frame_indices[-1] != T - 1:
-        frame_indices.append(T - 1)
-    
-    # Pre-compute color scales
-    vmax = max(float(smoke_ctrl.max()), float(smoke_unctrl.max()), 0.8)
-    error_all = np.abs(smoke_ctrl - np.array(rho_target))
-    error_max = max(float(error_all.max()), 0.1)
-    vel_mag_all = np.sqrt(vel_traj_ctrl[:, :, 0]**2 + vel_traj_ctrl[:, :, 1]**2)
-    vel_max = max(float(vel_mag_all.max()), 0.01)
-    
-    # Grid for contours
-    x = np.linspace(0, 1, Nx)
-    y = np.linspace(0, 1.25, Ny)
-    X, Y = np.meshgrid(x, y, indexing='ij')
-    
-    # Create figure with 2x2 layout
-    fig = plt.figure(figsize=(12, 10))
-    
-    def animate(frame_num):
-        t = frame_indices[frame_num]
-        fig.clear()
-        
-        gs = fig.add_gridspec(2, 2, hspace=0.25, wspace=0.25)
-        
-        smoke_unctrl_t = smoke_unctrl[t]
-        smoke_ctrl_t = smoke_ctrl[t]
-        xi_t = xi_traj_ctrl[t]
-        vel_t = vel_traj_ctrl[t]
-        error_t = np.abs(smoke_ctrl_t - np.array(rho_target))
-        vel_mag = np.sqrt(vel_t[:, 0]**2 + vel_t[:, 1]**2)
-        
-        # (0,0) Uncontrolled Evolution - RdBu_r colormap like heat2D
-        ax1 = fig.add_subplot(gs[0, 0])
-        im1 = ax1.imshow(smoke_unctrl_t.T, origin='lower', extent=[0, 1, 0, 1.25],
-                        cmap='RdBu_r', vmin=0, vmax=vmax, aspect='auto')
-        ax1.set_title('Uncontrolled Evolution', fontweight='bold')
-        ax1.set_xlabel('Position x')
-        ax1.set_ylabel('Position y')
-        fig.colorbar(im1, ax=ax1, shrink=0.8, label='Smoke Density')
-        
-        # (0,1) DPC Controlled with actuators - RdBu_r + viridis for control
-        ax2 = fig.add_subplot(gs[0, 1])
-        im2 = ax2.imshow(smoke_ctrl_t.T, origin='lower', extent=[0, 1, 0, 1.25],
-                        cmap='RdBu_r', vmin=0, vmax=vmax, aspect='auto')
-        # Actuators colored by velocity magnitude (viridis for better visibility)
-        scatter = ax2.scatter(xi_t[:, 0], xi_t[:, 1], c=vel_mag, cmap='viridis',
-                             s=80, edgecolors='white', linewidths=1.5, zorder=10,
-                             vmin=0, vmax=vel_max)
-        ax2.contour(X, Y, np.array(rho_target), levels=[0.3], colors='lime',
-                   linestyles='--', linewidths=2)
-        ax2.set_title('DPC Controlled Evolution', fontweight='bold')
-        ax2.set_xlabel('Position x')
-        ax2.set_ylabel('Position y')
-        fig.colorbar(scatter, ax=ax2, shrink=0.8, label='Control |v|')
-        
-        # (1,0) Tracking Error - hot colormap
-        ax3 = fig.add_subplot(gs[1, 0])
-        im3 = ax3.imshow(error_t.T, origin='lower', extent=[0, 1, 0, 1.25],
-                        cmap='hot', vmin=0, vmax=error_max, aspect='auto')
-        # Agent positions in cyan for visibility on hot colormap
-        ax3.scatter(xi_t[:, 0], xi_t[:, 1], c='cyan', s=50,
-                   edgecolors='black', linewidths=0.8, zorder=10, alpha=0.9)
-        ax3.set_title('Tracking Error', fontweight='bold')
-        ax3.set_xlabel('Position x')
-        ax3.set_ylabel('Position y')
-        fig.colorbar(im3, ax=ax3, shrink=0.8, label='|Error|')
-        
-        # (1,1) MSE over time - PROGRESSIVE (builds up with evolution)
-        ax4 = fig.add_subplot(gs[1, 1])
-        # Only plot up to current time t (progressive reveal)
-        time_arr_current = np.arange(t + 1)
-        ax4.plot(time_arr_current, mse_unctrl[:t+1], 'b-', lw=2, label='Uncontrolled', alpha=0.8)
-        ax4.plot(time_arr_current, mse_ctrl[:t+1], 'r-', lw=2, label='DPC Controlled', alpha=0.8)
-        ax4.fill_between(time_arr_current, mse_ctrl[:t+1], mse_unctrl[:t+1], alpha=0.2, color='green')
-        # Current point marker
-        ax4.scatter([t], [mse_ctrl[t]], s=120, c='red', zorder=10, edgecolors='white', linewidths=2)
-        ax4.scatter([t], [mse_unctrl[t]], s=80, c='blue', zorder=10, edgecolors='white', linewidths=1.5)
-        # Set fixed axis limits (full time range)
-        ax4.set_xlim([0, len(mse_ctrl)])
-        ax4.set_ylim([min(mse_ctrl.min(), mse_unctrl.min()) * 0.5, 
-                      max(mse_ctrl.max(), mse_unctrl.max()) * 1.5])
-        ax4.set_xlabel('Time Step')
-        ax4.set_ylabel('MSE')
-        ax4.set_title('MSE Tracking Error', fontweight='bold')
-        ax4.set_yscale('log')
-        ax4.grid(True, alpha=0.3)
-        ax4.legend(fontsize=9, loc='upper right')
-        
-        fig.suptitle(f'NS2D Shape Formation | Sample {sample_idx+1} | t = {t}',
-                    fontsize=16, fontweight='bold', y=0.98)
-        
-        return fig
-    
-    # Create animation
-    anim = animation.FuncAnimation(fig, animate, frames=len(frame_indices),
-                                   interval=1000//fps, blit=False)
-    
-    # Save GIF
-    if output_gif:
-        print(f"  Saving GIF: {output_gif}")
-        anim.save(output_gif, writer='pillow', fps=fps)
-        print(f"  ✓ GIF saved")
-    
-    # Save MP4 (try multiple writers)
-    if output_mp4:
-        print(f"  Saving MP4: {output_mp4}")
-        saved = False
-        for writer_name in ['ffmpeg', 'imagemagick']:
-            try:
-                anim.save(output_mp4, writer=writer_name, fps=fps)
-                print(f"  ✓ MP4 saved (using {writer_name})")
-                saved = True
-                break
-            except Exception:
-                continue
-        if not saved:
-            # Fallback: save frames manually
-            try:
-                import imageio
-                frames = []
-                for i in range(len(frame_indices)):
-                    animate(i)
-                    fig.canvas.draw()
-                    img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-                    img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-                    frames.append(img)
-                imageio.mimsave(output_mp4, frames, fps=fps)
-                print(f"  ✓ MP4 saved (using imageio)")
-            except Exception as e:
-                print(f"  ✗ MP4 failed: {e}")
-    
-    plt.close()
+    return np.linspace(0, T_steps-1, n_points, dtype=int)
 
 
 # =============================================================================
-# Main Paper Visualization (2x2 Grid)
+# Main Paper Visualization
 # =============================================================================
 
 def create_paper_figure(
     smoke_unctrl, smoke_ctrl, xi_traj_ctrl, vel_traj_ctrl,
-    rho_target, mse_ctrl, mse_unctrl, timestep=-1,
-    filename='ns2d_paper_visualization.png'
+    rho_target, mse_ctrl, mse_unctrl,
+    filename='ns2d_paper_visualization.pdf'
 ):
     """
-    Create 2x2 publication figure matching heat2D style.
-    
-    Layout:
-    - (0,0) Uncontrolled Evolution
-    - (0,1) DPC Controlled Evolution with actuators
-    - (1,0) Tracking Error
-    - (1,1) MSE Tracking Error over time
+    Create publication figure.
+    - Top Row: Snapshots (Linear spacing, Aspect Preserved)
+    - Bottom Row: Metrics
     """
     setup_style()
     
-    fig = plt.figure(figsize=(12, 10))
-    gs = fig.add_gridspec(2, 2, hspace=0.25, wspace=0.25)
+    # Get dimensions
+    T_steps, Nx, Ny = smoke_ctrl.shape
     
-    Nx, Ny = smoke_ctrl[0].shape
+    # Calculate physical aspect ratio
+    # Assuming dx = dy, the physical aspect is Ny/Nx.
+    domain_aspect = Ny / Nx
+    y_extent = 1.0 * domain_aspect 
+    extent = [0, 1, 0, y_extent]
+    
+    # Linear timesteps
+    timesteps = get_linear_timesteps(T_steps, n_points=6)
+    n_cols = len(timesteps)
+    
+    # Metrics calculations
+    vel_mags = np.sqrt(np.sum(vel_traj_ctrl**2, axis=-1))
+    avg_speed_ctrl = np.mean(vel_mags, axis=1)
+    max_intensity_ctrl = np.max(vel_mags, axis=1)
     
     # Color scales
-    vmin = min(float(smoke_ctrl.min()), float(smoke_unctrl.min()))
-    vmax = max(float(smoke_ctrl.max()), float(smoke_unctrl.max()))
+    vmin = min(float(smoke_ctrl.min()), float(smoke_unctrl.min()), 0)
+    vmax = max(float(smoke_ctrl.max()), float(smoke_unctrl.max()), 0.8)
+    u_min, u_max = float(vel_mags.min()), float(vel_mags.max())
     
-    # Get the specified timestep data
-    t = timestep if timestep >= 0 else len(smoke_ctrl) - 1
-    smoke_unctrl_t = smoke_unctrl[t]
-    smoke_ctrl_t = smoke_ctrl[t]
-    xi_t = xi_traj_ctrl[t]
-    vel_t = vel_traj_ctrl[t]
+    # ─────────────────────────────────────────────────────────────────────────
+    # LAYOUT CONFIGURATION
+    # ─────────────────────────────────────────────────────────────────────────
+
+    fig_width = 15
+    fig_height = 8.0 
+
+    # Vertical margins
+    margin_top = 0.95
+    margin_bottom = 0.08
+
+    # Row margins
+    dpc_margin_left = 0.12   
+    dpc_margin_right = 0.87  
+    metrics_margin_left = 0.12
+    metrics_margin_right = 0.87
+
+    # Row Heights
+    dpc_row_height_ratio = 1.4     
+    metrics_row_height_ratio = 0.35 
     
-    # Error and control intensity
-    error = np.abs(smoke_ctrl_t - np.array(rho_target))
-    vel_mag = np.sqrt(vel_t[:, 0]**2 + vel_t[:, 1]**2)
-    vel_max = max(float(vel_mag.max()), 0.01)
+    # Gap
+    vspace_between_rows = -0.25 
+
+    fig = plt.figure(figsize=(fig_width, fig_height))
+
+    # Calculate grid positions
+    avail_height = margin_top - margin_bottom
+    total_units = dpc_row_height_ratio + metrics_row_height_ratio + vspace_between_rows
+    unit_height = avail_height / total_units
+
+    metrics_bottom = margin_bottom
+    metrics_top = metrics_bottom + metrics_row_height_ratio * unit_height
+    dpc_bottom = metrics_top + vspace_between_rows * unit_height
+    dpc_top = dpc_bottom + dpc_row_height_ratio * unit_height
+
+    # Top Grid (Snapshots)
+    gs_dpc = fig.add_gridspec(
+        1, n_cols,
+        left=dpc_margin_left, right=dpc_margin_right,
+        bottom=dpc_bottom, top=dpc_top,
+        wspace=0.15,
+    )
+
+    # Bottom Grid (Metrics)
+    gs_metrics = fig.add_gridspec(
+        1, 3,
+        left=metrics_margin_left, right=metrics_margin_right,
+        bottom=metrics_bottom, top=metrics_top,
+        wspace=0.25,
+    )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Top Row: Snapshots
+    # ─────────────────────────────────────────────────────────────────────────
     
-    # =========================================================================
-    # (0,0) Uncontrolled Evolution - RdBu_r colormap like heat2D
-    # =========================================================================
-    ax1 = fig.add_subplot(gs[0, 0])
-    im1 = ax1.imshow(smoke_unctrl_t.T, origin='lower', extent=[0, 1, 0, 1.25],
-                     cmap='RdBu_r', vmin=0, vmax=vmax, aspect='auto')
-    ax1.set_title('Uncontrolled Evolution', fontweight='bold')
-    ax1.set_xlabel('Position x')
-    ax1.set_ylabel('Position y')
-    cbar1 = fig.colorbar(im1, ax=ax1, shrink=0.8)
-    cbar1.set_label('Smoke Density')
+    row_left, row_right, row_top, row_pos = None, None, None, None
+    title_fontprops = None
+
+    for col_idx, t in enumerate(timesteps):
+        ax = fig.add_subplot(gs_dpc[0, col_idx])
+        
+        smoke_t = smoke_ctrl[t]
+        
+        # aspect='equal' prevents stretching
+        im = ax.imshow(smoke_t.T, origin='lower', extent=extent,
+                       cmap='RdBu_r', vmin=vmin, vmax=vmax, 
+                       aspect='equal') 
+        
+        # Contours
+        contours = ax.contour(
+            np.linspace(0, 1, Nx), 
+            np.linspace(0, y_extent, Ny),
+            rho_target.T,
+            levels=[0.3], colors='lime', linestyles='--', linewidths=1.0, alpha=0.9
+        )
+        contours.set_path_effects([
+            patheffects.SimpleLineShadow(offset=(0.6, -0.6), shadow_color='black', alpha=0.3),
+            patheffects.Normal(),
+        ])
+
+        # Agents
+        xi_t = xi_traj_ctrl[t]
+        vel_mags_t = vel_mags[t]
+        
+        ax.scatter(xi_t[:, 0], xi_t[:, 1], c=vel_mags_t, cmap='viridis', 
+                   norm=Normalize(vmin=u_min, vmax=u_max),
+                   s=25, edgecolors='black', linewidths=0.5, zorder=10)
+
+        ax.set_title(f't={t}', fontsize=10)
+        ax.set_xlabel('x', fontsize=10)
+        ax.set_xticks([0, 0.5, 1])
+        
+        # Handle Y-ticks
+        if col_idx > 0:
+            ax.set_yticks([])
+        else:
+            yticks = [0, y_extent/2, y_extent]
+            ax.set_yticks(yticks)
+            ax.set_yticklabels([f"{y:.1f}" if y != 0 else "0" for y in yticks])
+            ax.set_ylabel('y', fontsize=10)
+            
+        if col_idx == 0:
+            row_pos = ax.get_position()
+            row_left, row_top = row_pos.x0, row_pos.y1
+            title_fontprops = ax.title.get_fontproperties()
+        if col_idx == n_cols - 1:
+            row_right = ax.get_position().x1
+
+    # Row Title
+    if row_left and row_right:
+        fig.text((row_left + row_right) / 2, row_top + 0.02, 'Controlled Evolution',
+                 ha='center', va='bottom', fontproperties=title_fontprops, fontweight='bold')
+
+    # Colorbars
+    if row_pos:
+        cbar_height = row_pos.height
+        cbar_y0 = row_pos.y0
+        cbar_width = 0.012
+        cbar_gap = 0.008
+        
+        # Left Colorbar (Control)
+        cax2 = fig.add_axes([row_left - 3*cbar_gap - cbar_width, cbar_y0, cbar_width, cbar_height])
+        cb2 = fig.colorbar(ScalarMappable(norm=Normalize(vmin=u_min, vmax=u_max), cmap='viridis'), cax=cax2)
+        cb2.ax.yaxis.set_ticks_position('left')
+        cb2.ax.yaxis.set_label_position('right')
+        cb2.set_label('Control |v|', fontsize=9)
+        
+        # Right Colorbar (Density)
+        cax1 = fig.add_axes([row_right + cbar_gap, cbar_y0, cbar_width, cbar_height])
+        cb1 = fig.colorbar(ScalarMappable(norm=Normalize(vmin=vmin, vmax=vmax), cmap='RdBu_r'), cax=cax1)
+        cb1.set_label('Smoke Density', fontsize=9)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Bottom Row: Metrics
+    # ─────────────────────────────────────────────────────────────────────────
     
-    # =========================================================================
-    # (0,1) DPC Controlled Evolution with actuators - RdBu_r + viridis controls
-    # =========================================================================
-    ax2 = fig.add_subplot(gs[0, 1])
-    im2 = ax2.imshow(smoke_ctrl_t.T, origin='lower', extent=[0, 1, 0, 1.25],
-                     cmap='RdBu_r', vmin=0, vmax=vmax, aspect='auto')
-    
-    # Actuator positions colored by velocity magnitude (viridis for visibility)
-    scatter = ax2.scatter(xi_t[:, 0], xi_t[:, 1], c=vel_mag, cmap='viridis',
-                         s=80, edgecolors='white', linewidths=1.5, zorder=10,
-                         vmin=0, vmax=vel_max)
-    
-    # Target contour (lime green for visibility on RdBu)
-    x = np.linspace(0, 1, Nx)
-    y = np.linspace(0, 1.25, Ny)
-    X, Y = np.meshgrid(x, y, indexing='ij')
-    ax2.contour(X, Y, np.array(rho_target), levels=[0.3], colors='lime',
-               linestyles='--', linewidths=2, alpha=0.9)
-    
-    ax2.set_title('DPC Controlled Evolution', fontweight='bold')
-    ax2.set_xlabel('Position x')
-    ax2.set_ylabel('Position y')
-    cbar2 = fig.colorbar(scatter, ax=ax2, shrink=0.8)
-    cbar2.set_label('Control |v|')
-    
-    # =========================================================================
-    # (1,0) Tracking Error - hot colormap with cyan actuators
-    # =========================================================================
-    ax3 = fig.add_subplot(gs[1, 0])
-    error_max = max(float(error.max()), 0.01)
-    im3 = ax3.imshow(error.T, origin='lower', extent=[0, 1, 0, 1.25],
-                     cmap='hot', vmin=0, vmax=error_max, aspect='auto')
-    
-    # Actuator positions (cyan dots visible on hot colormap)
-    ax3.scatter(xi_t[:, 0], xi_t[:, 1], c='cyan', s=50,
-               edgecolors='black', linewidths=0.8, zorder=10, alpha=0.9)
-    
-    ax3.set_title('Tracking Error', fontweight='bold')
-    ax3.set_xlabel('Position x')
-    ax3.set_ylabel('Position y')
-    cbar3 = fig.colorbar(im3, ax=ax3, shrink=0.8)
-    cbar3.set_label('|Error|')
-    
-    # =========================================================================
-    # (1,1) MSE Tracking Error over time
-    # =========================================================================
-    ax4 = fig.add_subplot(gs[1, 1])
-    time = np.arange(len(mse_ctrl))
-    ax4.plot(time, mse_unctrl, 'b-', lw=1.5, label='Uncontrolled', alpha=0.8)
-    ax4.plot(time, mse_ctrl, 'r-', lw=1.5, label='DPC Controlled', alpha=0.8)
-    ax4.fill_between(time, mse_ctrl, mse_unctrl, alpha=0.15, color='green')
-    
-    ax4.set_xlabel('Time Step')
-    ax4.set_ylabel('MSE')
-    ax4.set_title('MSE Tracking Error', fontweight='bold')
-    ax4.set_yscale('log')
-    ax4.grid(True, alpha=0.3)
-    ax4.legend(fontsize=9)
-    
-    # Overall title
-    fig.suptitle('NS2D Shape Formation: Centralized DPC Control',
-                fontsize=14, fontweight='bold', y=0.98)
-    
+    # MSE
+    ax_mse = fig.add_subplot(gs_metrics[0, 0])
+    ax_mse.plot(mse_unctrl, 'b-', lw=1.5, label='Uncontrolled', alpha=0.8)
+    ax_mse.plot(mse_ctrl, 'r-', lw=1.5, label='Controlled', alpha=0.8)
+    ax_mse.fill_between(np.arange(len(mse_ctrl)), mse_ctrl, mse_unctrl, alpha=0.15, color='green')
+    ax_mse.set_xlabel('Time Step')
+    ax_mse.set_ylabel('MSE')
+    ax_mse.set_yscale('log')
+    ax_mse.grid(True, alpha=0.3)
+    ax_mse.legend(fontsize=8)
+    ax_mse.set_title('Tracking Error', fontsize=11, fontweight='bold')
+
+    # Speed
+    ax_speed = fig.add_subplot(gs_metrics[0, 1])
+    ax_speed.plot(avg_speed_ctrl, 'g-', lw=1.5, alpha=0.8)
+    ax_speed.set_xlabel('Time Step')
+    ax_speed.set_ylabel('Speed')
+    ax_speed.grid(True, alpha=0.3)
+    ax_speed.set_ylim(bottom=0)
+    ax_speed.set_title('Agent Speed', fontsize=11, fontweight='bold')
+
+    # Intensity
+    ax_ctrl = fig.add_subplot(gs_metrics[0, 2])
+    ax_ctrl.plot(max_intensity_ctrl, 'm-', lw=1.5, alpha=0.8)
+    ax_ctrl.set_xlabel('Time Step')
+    ax_ctrl.set_ylabel('Max |v|')
+    ax_ctrl.grid(True, alpha=0.3)
+    ax_ctrl.set_ylim(bottom=0)
+    ax_ctrl.set_title('Max Control Input', fontsize=11, fontweight='bold')
+
     # Save
     plt.savefig(filename, dpi=300, bbox_inches='tight', facecolor='white')
     print(f"✓ Saved: {filename}")
@@ -370,7 +304,7 @@ def create_paper_figure(
 
 def main():
     print("="*60)
-    print("NS2D Shape Formation - Paper Visualization")
+    print("NS2D Shape Formation - Paper Visualization (Final)")
     print("="*60)
     
     setup_style()
@@ -450,24 +384,12 @@ def main():
         mse_ctrl = np.mean((smoke_ctrl - rho_target_np)**2, axis=(1, 2))
         mse_unctrl = np.mean((smoke_unctrl - rho_target_np)**2, axis=(1, 2))
         
-        # Create paper figure (2x2 grid)
+        # Create paper figure (Fixed Call)
         print("▶ Creating paper figure...")
         create_paper_figure(
             smoke_unctrl, smoke_ctrl, xi_ctrl, vel_ctrl,
             rho_target_np, mse_ctrl, mse_unctrl,
-            timestep=-1,  # Final timestep
-            filename=str(save_dir / f'ns2d_paper_sample_{sample_idx+1}.png')
-        )
-        
-        # Create animation (same 2x2 layout as PNG)
-        print("▶ Creating animation...")
-        create_animation(
-            smoke_unctrl, smoke_ctrl, xi_ctrl, vel_ctrl,
-            rho_target_np, mse_ctrl, mse_unctrl,
-            sample_idx=sample_idx,
-            output_gif=str(save_dir / f'ns2d_sample_{sample_idx+1}.gif'),
-            output_mp4=str(save_dir / f'ns2d_sample_{sample_idx+1}.mp4'),
-            fps=9, skip_frames=2
+            filename=str(save_dir / f'ns2d_paper_sample_{sample_idx+1}.pdf')
         )
     
     # Print summary
@@ -476,9 +398,7 @@ def main():
     print("="*60)
     print("\nGenerated files:")
     for i in range(n_samples):
-        print(f"  - ns2d_paper_sample_{i+1}.png")
-        print(f"  - ns2d_sample_{i+1}.gif")
-        print(f"  - ns2d_sample_{i+1}.mp4")
+        print(f"  - ns2d_paper_sample_{i+1}.pdf")
 
 
 if __name__ == "__main__":

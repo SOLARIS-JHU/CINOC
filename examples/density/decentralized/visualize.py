@@ -21,8 +21,8 @@ from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 import flax.serialization
 
-from examples.ns2d.decentralized.dynamics import unroll_controlled, ns2d_step_jax
-from examples.ns2d.decentralized.train import (
+from examples.density.decentralized.dynamics import unroll_controlled, ns2d_step_jax
+from examples.density.decentralized.train import (
     N_AGENTS, T_STEPS, PUSH_MAX, SIGMA_PUSH, BUOYANCY, FEATURES, PATCH_SIZE
 )
 from models.policy_ns2d import DecentralizedNS2DControlNet

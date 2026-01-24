@@ -203,7 +203,7 @@ def plot_enstrophy_comparison(ax, t, w_ctrl, w_base):
     mask_ctrl = t >= 0
     
     # Chaos Phase
-    ax.plot(t[mask_chaos], e_base[mask_chaos], color='firebrick', lw=2, label='Chaos Phase')
+    ax.plot(t[mask_chaos], e_base[mask_chaos], color='firebrick', lw=2, label='Turbulent Phase')
     
     # Divergence
     ax.plot(t[mask_ctrl], e_base[mask_ctrl], color='grey', linestyle='--', lw=2, label='Natural Evolution')
@@ -253,9 +253,11 @@ if __name__ == "__main__":
     t_axis, w_ctrl, w_base = run_comparison(w0_hat, model, params)
     
     # 5. Setup Plot Layout
-    # Layout: 2 Rows (Visuals), 1 Column (Graph) spanning both rows
     fig = plt.figure(figsize=(16, 6))
-    gs = gridspec.GridSpec(2, 2, width_ratios=[2.5, 1], wspace=0.1, hspace=0.3)
+    
+    # width_ratios=[3, 1]: Allocates space for the plot
+    # wspace=0.3: Keeps the plot pushed slightly to the right
+    gs = gridspec.GridSpec(2, 2, width_ratios=[3, 1], wspace=0.3, hspace=0.05)
     
     # -- Row 1: Controlled Visuals --
     gs_row1 = gridspec.GridSpecFromSubplotSpec(1, 5, subplot_spec=gs[0, 0], wspace=0.05)
@@ -266,27 +268,48 @@ if __name__ == "__main__":
     ax_row2 = [fig.add_subplot(gs_row2[j]) for j in range(5)]
     
     # -- Right: Comparison Plot --
+    # We allow it to span the full column initially.
+    # The alignment logic in Section 6 will resize it perfectly.
     ax_plot = fig.add_subplot(gs[:, 1])
     
     # 6. Plotting
-    # Calculate limits based on initial state for fair comparison
     v_lim = jnp.max(jnp.abs(w_ctrl[0])) * 0.9
     
-    # Plot Controlled
-    im = plot_snapshots_row(ax_row1, t_axis, w_ctrl, "Controlled (Ours)", v_lim)
+    # Plot Visuals
+    im = plot_snapshots_row(ax_row1, t_axis, w_ctrl, "Controlled Evolution", v_lim)
+    plot_snapshots_row(ax_row2, t_axis, w_base, "Uncontrolled Evolution", v_lim)
     
-    # Plot Natural
-    plot_snapshots_row(ax_row2, t_axis, w_base, "Natural Evolution (Uncontrolled)", v_lim)
-    
-    # Colorbar (Shared for visual rows)
-    # Use '+' to combine the two lists into one flat list of 10 axes
+    # Colorbar
     cbar = fig.colorbar(im, ax=ax_row1 + ax_row2, fraction=0.02, pad=0.02)
     cbar.set_label(r'Vorticity $\omega$', fontsize=10)
     
     # Plot Graph
     plot_enstrophy_comparison(ax_plot, t_axis, w_ctrl, w_base)
 
-    plt.suptitle(f"Single Sample Analysis: Index {idx}", fontsize=16, fontweight='bold')
-    save_name = "single_sample_comparison.png"
+    # ---------------------------------------------------------
+    # --- ALIGNMENT LOGIC: Snap Plot to Image Bounding Box ---
+    # ---------------------------------------------------------
+    # 1. Trigger a canvas draw so the renderer calculates the exact
+    #    shrunk positions of the image axes (due to aspect='equal').
+    fig.canvas.draw() 
+
+    # 2. Get the bounding boxes of the top-right image and bottom-right image
+    #    (We use the last image in each row as they are closest to the plot)
+    pos_top = ax_row1[-1].get_position()
+    pos_bot = ax_row2[-1].get_position()
+    pos_plot = ax_plot.get_position()
+
+    # 3. Manually set the position of the plot to match vertical extents
+    #    [left, bottom, width, height]
+    new_bottom = pos_bot.y0
+    new_top = pos_top.y1
+    new_height = new_top - new_bottom
+    
+    ax_plot.set_position([pos_plot.x0, new_bottom, pos_plot.width, new_height])
+    # ---------------------------------------------------------
+
+    # plt.suptitle(f"Controlled Evolution vs Uncontrolled Evolution", fontsize=16, fontweight='bold')
+    save_name = "single_sample_comparison.pdf"
+    # Note: bbox_inches='tight' might slightly shift things again, but the relative alignment will hold.
     plt.savefig(save_name, dpi=150, bbox_inches='tight')
     print(f"✓ Saved plot to {save_name}")

@@ -297,7 +297,7 @@ def main():
         fig.text(
             (row_left + row_right) / 2,
             title_y,
-            'DPC Controlled Evolution',
+            'Controlled Evolution',
             ha='center',
             va='bottom',
             fontproperties=title_fontprops,
