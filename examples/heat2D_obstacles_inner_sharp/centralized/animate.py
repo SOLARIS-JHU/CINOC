@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+import matplotlib.patheffects as patheffects
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 from matplotlib.patches import Circle
@@ -115,6 +116,7 @@ def create_2x2_animation(z_traj_unctrl, z_traj_ctrl, xi_traj_ctrl, u_traj_ctrl,
     vmax = max(z_unctrl.max(), z_ctrl.max(), z_target_np.max())
     error_max = error_ctrl.max()
     u_min, u_max = u_ctrl.min(), u_ctrl.max()
+    contour_levels = np.linspace(float(z_target_np.min()), float(z_target_np.max()), 7)
 
     # Calculate frames
     total_frames = fps * duration
@@ -161,6 +163,20 @@ def create_2x2_animation(z_traj_unctrl, z_traj_ctrl, xi_traj_ctrl, u_traj_ctrl,
     ax2.set_title('DPC Controlled Evolution', fontsize=13, fontweight='bold')
     im2 = ax2.imshow(z_ctrl[0], origin='lower', extent=[0, 1, 0, 1],
                      cmap='RdBu_r', vmin=vmin, vmax=vmax, interpolation='nearest')
+    contours = ax2.contour(
+        z_target_np,
+        levels=contour_levels,
+        origin='lower',
+        extent=[0, 1, 0, 1],
+        cmap='RdBu_r',
+        linestyles='--',
+        linewidths=1.2,
+        alpha=0.95,
+    )
+    contours.set_path_effects([
+        patheffects.SimpleLineShadow(offset=(0.6, -0.6), shadow_color='black', alpha=0.3),
+        patheffects.Normal(),
+    ])
 
     # Add obstacles to panel 2
     for obs in OBSTACLES:

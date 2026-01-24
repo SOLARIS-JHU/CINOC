@@ -5,6 +5,7 @@ Creates publication-quality figures comparing controlled vs uncontrolled evoluti
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as patheffects
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 from matplotlib.patches import Circle
@@ -91,16 +92,12 @@ def rollout_uncontrolled(z_init, xi_init, T_steps):
 
 def get_log_timesteps(T_steps, n_points=6):
     """
-    Generate logarithmically-spaced timesteps emphasizing early dynamics.
-    First 80 steps are more densely sampled.
+    Generate logarithmically-spaced timesteps over the full time horizon.
     """
-    # Create log-like spacing in first 80 steps
-    early_steps = np.logspace(0, np.log10(80), n_points-2, dtype=int)
-    # Add some later timesteps
-    late_steps = np.linspace(100, T_steps-1, 2, dtype=int)
-    timesteps = np.concatenate([early_steps, late_steps])
+    timesteps = np.logspace(0, np.log10(T_steps-1), n_points, dtype=int)
     timesteps = np.unique(timesteps)  # Remove duplicates
     timesteps[0] = 0  # Ensure we start at 0
+    timesteps[-1] = T_steps-1  # Ensure last is final step
     return timesteps
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -123,11 +120,15 @@ def main():
     model = DecentralizedHeat2DControlNet(features=(16, 32))
     dynamics = PDEDynamics(None, policy_apply_fn=model.apply, use_tesseract=False)
 
+    script_path = Path(__file__).resolve().parent
+    params_path = script_path / 'decentralized_params_heat2d_obstacles_inner.msgpack'
+    output_dir = script_path / 'figures'
+    output_dir.mkdir(parents=True, exist_ok=True)
     try:
-        params = load_params(model, 'decentralized_params_heat2d_obstacles_inner.msgpack', n_grid, n_agents)
+        params = load_params(model, params_path, n_grid, n_agents)
         print(f"✓ Loaded trained parameters ({n_agents} agents)")
     except FileNotFoundError:
-        print("✗ Error: decentralized_params_heat2d_obstacles_inner.msgpack not found")
+        print(f"✗ Error: {params_path} not found")
         return
 
     # Generate single test scenario (using scenario 1 from original)
@@ -178,19 +179,72 @@ def main():
 
     print(f"\n▶ Creating visualization at timesteps: {timesteps}")
 
-    # Create figure: 3 rows (uncontrolled, controlled, error) × n_cols + 1 row for metrics
-    fig = plt.figure(figsize=(15, 12))
-    gs = fig.add_gridspec(
-        4,
-        n_cols + 1,
-        height_ratios=[1, 1, 1, 1.2],
-        width_ratios=[1] * n_cols + [0.05],
-        hspace=0.12,
-        wspace=0.25,
-        left=0.08,
-        right=0.96,
-        top=0.95,
-        bottom=0.06,
+    # ─────────────────────────────────────────────────────────────────────────
+    # LAYOUT CONFIGURATION - Independent control of row positioning
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Figure dimensions
+    fig_width = 15
+    fig_height = 6.1
+
+    # Overall vertical margins (shared)
+    margin_top = 0.94
+    margin_bottom = 0.06
+
+    # Per-row horizontal margins (independent control)
+    dpc_margin_left = 0.15
+    dpc_margin_right = 0.84
+    metrics_margin_left = 0.13
+    metrics_margin_right = 0.88
+
+    # DPC Row (Top) - Controls positioning of field evolution plots
+    dpc_row_height_ratio = 1.0        # Relative height of DPC row
+    dpc_row_hspace = 0.17             # Horizontal spacing within DPC row
+    dpc_row_vpos_ratio = 0.55         # Vertical position ratio (0.55 = 55% from bottom)
+
+    # Metrics Row (Bottom) - Controls positioning of 3 metric subplotssd
+    metrics_row_height_ratio = 0.45   # Relative height of metrics row
+    metrics_row_hspace = 0.24         # Horizontal spacing between the 3 metric plots
+    metrics_row_vpos_ratio = 0.05     # Vertical position ratio from bottom
+
+    # Vertical gap between rows
+    vspace_between_rows = -0.15
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Create figure: DPC evolution row + metrics row (separate gridspecs per row)
+    fig = plt.figure(figsize=(fig_width, fig_height))
+
+    # Compute vertical allocation (normalized figure coords)
+    avail_height = margin_top - margin_bottom
+    total_units = dpc_row_height_ratio + metrics_row_height_ratio + vspace_between_rows
+    unit_height = avail_height / total_units
+
+    metrics_bottom = margin_bottom
+    metrics_top = metrics_bottom + metrics_row_height_ratio * unit_height
+    dpc_bottom = metrics_top + vspace_between_rows * unit_height
+    dpc_top = dpc_bottom + dpc_row_height_ratio * unit_height
+
+    # Gridspec for DPC row (top)
+    gs_dpc = fig.add_gridspec(
+        1,
+        n_cols,
+        left=dpc_margin_left,
+        right=dpc_margin_right,
+        bottom=dpc_bottom,
+        top=dpc_top,
+        wspace=dpc_row_hspace,
+    )
+
+    # Gridspec for metrics row (bottom)
+    gs_metrics = fig.add_gridspec(
+        1,
+        3,
+        left=metrics_margin_left,
+        right=metrics_margin_right,
+        bottom=metrics_bottom,
+        top=metrics_top,
+        wspace=metrics_row_hspace,
     )
 
     # Determine global color scale
@@ -199,95 +253,108 @@ def main():
     vmax = max(jnp.max(z_init), jnp.max(z_target),
                jnp.max(z_traj_ctrl), jnp.max(z_traj_unctrl))
 
-    # Error color scale (tracking error)
-    error_ctrl = jnp.abs(z_traj_ctrl - z_target[None, :, :])
-    error_unctrl = jnp.abs(z_traj_unctrl - z_target[None, :, :])
-    error_max = max(jnp.max(error_ctrl), jnp.max(error_unctrl))
-
     # Control intensity color scale
     u_min = jnp.min(u_traj_ctrl)
     u_max = jnp.max(u_traj_ctrl)
 
-    # Plot field snapshots
-    for col_idx, t in enumerate(timesteps):
-        # Row 1: Uncontrolled Evolution
-        ax = fig.add_subplot(gs[0, col_idx])
-        im = ax.imshow(z_traj_unctrl[t], origin='lower', extent=[0, 1, 0, 1],
-                      cmap='RdBu_r', vmin=vmin, vmax=vmax, interpolation='nearest')
-        draw_obstacles(ax, OBSTACLES)  # Draw obstacles
-        if col_idx == 0:
-            ax.set_ylabel('Uncontrolled\nEvolution', fontsize=11, fontweight='bold')
-        ax.set_title(f't={t}', fontsize=10)
-        ax.set_xticks([0, 0.5, 1])
-        ax.set_yticks([0, 0.5, 1])
-        if col_idx > 0:
-            ax.set_yticklabels([])
+    z_target_np = np.array(z_target)
+    target_min = float(jnp.min(z_target))
+    target_max = float(jnp.max(z_target))
+    contour_levels = np.linspace(target_min, target_max, 7)
 
-        # Row 2: DPC Controlled Evolution
-        ax = fig.add_subplot(gs[1, col_idx])
+    # Plot field snapshots
+    row_left = None
+    row_right = None
+    row_top = None
+    row_pos = None
+    title_fontprops = None
+    for col_idx, t in enumerate(timesteps):
+        # Row 1: DPC Controlled Evolution
+        ax = fig.add_subplot(gs_dpc[0, col_idx])
         im = ax.imshow(z_traj_ctrl[t], origin='lower', extent=[0, 1, 0, 1],
-                      cmap='RdBu_r', vmin=vmin, vmax=vmax, interpolation='nearest')
-        draw_obstacles(ax, OBSTACLES)  # Draw obstacles
+                       cmap='RdBu_r', vmin=vmin, vmax=vmax, interpolation='nearest')
+        contours = ax.contour(
+            z_target_np,
+            levels=contour_levels,
+            origin='lower',
+            extent=[0, 1, 0, 1],
+            cmap='RdBu_r',
+            linestyles='--',
+            linewidths=1.0,
+            alpha=0.9,
+        )
+        contours.set_path_effects([
+            patheffects.SimpleLineShadow(offset=(0.6, -0.6), shadow_color='black', alpha=0.3),
+            patheffects.Normal(),
+        ])
+        draw_obstacles(ax, OBSTACLES)
 
         # Overlay actuators with control intensity as color
         u_colors = u_traj_ctrl[t]
         norm = Normalize(vmin=u_min, vmax=u_max)
         scatter = ax.scatter(xi_traj_ctrl[t, :, 0], xi_traj_ctrl[t, :, 1],
-                           c=u_colors, cmap='YlOrRd', norm=norm,
-                           s=25, edgecolors='black', linewidths=0.5, zorder=10)
+                             c=u_colors, cmap='viridis', norm=norm,
+                             s=25, edgecolors='black', linewidths=0.5, zorder=10)
 
-        if col_idx == 0:
-            ax.set_ylabel('DPC Controlled\nEvolution', fontsize=11, fontweight='bold')
-        ax.set_xticks([0, 0.5, 1])
-        ax.set_yticks([0, 0.5, 1])
-        if col_idx > 0:
-            ax.set_yticklabels([])
-
-        # Row 3: Tracking Error
-        ax = fig.add_subplot(gs[2, col_idx])
-        im_err = ax.imshow(error_ctrl[t], origin='lower', extent=[0, 1, 0, 1],
-                          cmap='hot', vmin=0, vmax=error_max, interpolation='nearest')
-        draw_obstacles(ax, OBSTACLES)  # Draw obstacles
-
-        # Overlay actuators (same positions, cyan dots)
-        ax.scatter(xi_traj_ctrl[t, :, 0], xi_traj_ctrl[t, :, 1],
-                  c='cyan', s=20, edgecolors='black', linewidths=0.5,
-                  zorder=10, alpha=0.8)
-
-        if col_idx == 0:
-            ax.set_ylabel('Tracking\nError', fontsize=11, fontweight='bold')
+        ax.set_title(f't={t}', fontsize=10, fontweight='normal')
         ax.set_xlabel('x', fontsize=10)
         ax.set_xticks([0, 0.5, 1])
         ax.set_yticks([0, 0.5, 1])
         if col_idx > 0:
             ax.set_yticklabels([])
+        if col_idx == 0:
+            row_pos = ax.get_position()
+            row_left = row_pos.x0
+            row_top = row_pos.y1
+            title_fontprops = ax.title.get_fontproperties()
+        if col_idx == n_cols - 1:
+            row_right = ax.get_position().x1
 
-    # Add colorbars (aligned to each field row)
-    # Field colorbar (temperature)
-    cax1 = fig.add_subplot(gs[0, -1])
-    cb1 = fig.colorbar(ScalarMappable(norm=Normalize(vmin=vmin, vmax=vmax),
-                                     cmap='RdBu_r'),
-                      cax=cax1, label='Temperature')
+    if row_left is not None and row_right is not None and row_top is not None:
+        title_y = min(row_top + 0.03, 0.97)
+        fig.text(
+            (row_left + row_right) / 2,
+            title_y,
+            'DPC Controlled Evolution',
+            ha='center',
+            va='bottom',
+            fontproperties=title_fontprops,
+            fontweight='bold',
+        )
+
+    # Add colorbars (aligned to DPC row, matched to square height)
+    cbar_gap = 0.008
+    cbar_width = 0.014
+    if row_pos is not None and row_left is not None and row_right is not None:
+        cbar_height = row_pos.height
+        cbar_y0 = row_pos.y0
+        cax2 = fig.add_axes([row_left - 4*cbar_gap - cbar_width, cbar_y0, cbar_width, cbar_height])
+        cax1 = fig.add_axes([row_right + cbar_gap, cbar_y0, cbar_width, cbar_height])
+    else:
+        cax2 = fig.add_axes([0.1, 0.7, cbar_width, 0.2])
+        cax1 = fig.add_axes([0.9, 0.7, cbar_width, 0.2])
+    cb1 = fig.colorbar(
+        ScalarMappable(norm=Normalize(vmin=vmin, vmax=vmax), cmap='RdBu_r'),
+        cax=cax1,
+        label='Temperature',
+    )
     cb1.ax.tick_params(labelsize=8)
 
     # Control intensity colorbar
-    cax2 = fig.add_subplot(gs[1, -1])
-    cb2 = fig.colorbar(ScalarMappable(norm=Normalize(vmin=u_min, vmax=u_max),
-                                     cmap='YlOrRd'),
-                      cax=cax2, label='Control u')
-    cb2.ax.tick_params(labelsize=8)
+    cb2 = fig.colorbar(
+        ScalarMappable(norm=Normalize(vmin=u_min, vmax=u_max), cmap='viridis'),
+        cax=cax2,
+        label='Control u',
+    )
+    cb2.ax.yaxis.set_ticks_position('left')
+    cb2.ax.yaxis.set_label_position('right')
+    cb2.ax.tick_params(labelsize=8, labelleft=True, labelright=False, pad=1)
+    cb2.ax.yaxis.set_label_coords(1.15, 0.5)
+    cb2.set_label('Control u', labelpad=4)
 
-    # Error colorbar
-    cax3 = fig.add_subplot(gs[2, -1])
-    cb3 = fig.colorbar(ScalarMappable(norm=Normalize(vmin=0, vmax=error_max),
-                                     cmap='hot'),
-                      cax=cax3, label='|Error|')
-    cb3.ax.tick_params(labelsize=8)
-
-    # Row 4: Time-series metrics (3 subplots)
-    metrics_gs = gs[3, :].subgridspec(1, 3, wspace=0.3)
+    # Row 2: Time-series metrics (3 subplots) - uses metrics_row_hspace for independent control
     # MSE Tracking Error
-    ax_mse = fig.add_subplot(metrics_gs[0, 0])
+    ax_mse = fig.add_subplot(gs_metrics[0, 0])
     ax_mse.plot(mse_unctrl, 'b-', lw=1.5, label='Uncontrolled', alpha=0.8)
     ax_mse.plot(mse_ctrl, 'r-', lw=1.5, label='DPC Controlled', alpha=0.8)
     time_err = np.arange(len(mse_ctrl))
@@ -300,7 +367,7 @@ def main():
     ax_mse.legend(fontsize=9, loc='center right')
 
     # Agent Speed
-    ax_speed = fig.add_subplot(metrics_gs[0, 1])
+    ax_speed = fig.add_subplot(gs_metrics[0, 1])
     ax_speed.plot(avg_speed_ctrl, 'g-', lw=1.5, alpha=0.8)
     ax_speed.set_xlabel('Time Step', fontsize=10)
     ax_speed.set_ylabel('Avg Speed', fontsize=10)
@@ -309,7 +376,7 @@ def main():
     ax_speed.set_ylim(bottom=0)
 
     # Control Intensity
-    ax_control = fig.add_subplot(metrics_gs[0, 2])
+    ax_control = fig.add_subplot(gs_metrics[0, 2])
     ax_control.plot(control_intensity, 'm-', lw=1.5, alpha=0.8)
     ax_control.set_xlabel('Time Step', fontsize=10)
     ax_control.set_ylabel('Avg |u|', fontsize=10)
@@ -317,17 +384,13 @@ def main():
     ax_control.grid(True, alpha=0.3)
     ax_control.set_ylim(bottom=0)
 
-    # Add overall title
-    fig.suptitle('2D Heat Equation with Obstacles: Decentralized DPC Control',
-                fontsize=14, fontweight='bold', y=0.98)
-
     # Save as PDF (vector graphics)
-    pdf_path = 'heat2d_obstacles_inner_decentralized_visualization.pdf'
+    pdf_path = output_dir / 'heat2d_obstacles_inner_decentralized_visualization.pdf'
     plt.savefig(pdf_path, format='pdf', dpi=300, bbox_inches='tight')
     print(f"\n✓ Saved: {pdf_path}")
 
     # Also save as high-res PNG
-    png_path = 'heat2d_obstacles_inner_decentralized_visualization.png'
+    png_path = output_dir / 'heat2d_obstacles_inner_decentralized_visualization.png'
     plt.savefig(png_path, format='png', dpi=300, bbox_inches='tight')
     print(f"✓ Saved: {png_path}")
 

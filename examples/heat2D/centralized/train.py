@@ -1,7 +1,6 @@
-"""Training script for Centralized 2D Heat Equation Control using Tesseract-JAX and ControlNet policy."""
+"""Training script for Centralized 2D Heat Equation Control using JAX and ControlNet policy."""
 import jax
 import jax.numpy as jnp
-from tesseract_core import Tesseract
 import sys
 from pathlib import Path
 import optax
@@ -25,7 +24,6 @@ parser.add_argument('--test', action='store_true', help='Quick test mode (1 samp
 args = parser.parse_args()
 
 # --- Configuration ---
-solver_ts = Tesseract.from_image("solver_heat2d_centralized:latest")
 n_grid = 32  # Default 32×32 grid (faster training)
 n_agents = 16  # 4×4 grid of agents
 
@@ -112,92 +110,90 @@ def train_step(params, opt_state, z_init_batch, xi_init_batch, z_target_batch, d
     return params, opt_state, loss, aux
 
 # --- Training Loop ---
-with solver_ts:
-    dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply,
-                           use_tesseract=False)
+dynamics = PDEDynamics(None, policy_apply_fn=model.apply, use_tesseract=False)
 
-    # Load or generate dataset
-    print("Loading/Generating 2D dataset...")
-    z_init_all, z_target_all, n_grid_actual = get_training_data(
-        n_samples=n_samples,
-        n_grid=n_grid,
-        dataset_dir='../data'
+# Load or generate dataset
+print("Loading/Generating 2D dataset...")
+z_init_all, z_target_all, n_grid_actual = get_training_data(
+    n_samples=n_samples,
+    n_grid=n_grid,
+    dataset_dir='../data'
+)
+
+# Update n_grid if it changed during loading
+if n_grid_actual != n_grid:
+    n_grid = n_grid_actual
+    print(f"Using n_grid={n_grid} from loaded dataset")
+
+    # Re-initialize model with correct grid size
+    dummy_z = jnp.zeros((n_grid, n_grid))
+    params = model.init(key, dummy_z, dummy_z, dummy_xi)
+    opt_state = optimizer.init(params)
+
+print(f"Dataset ready: {z_init_all.shape}")
+
+# Initialize agents in grid pattern
+n_side = int(jnp.sqrt(n_agents))
+spacing = 0.8 / (n_side + 1)
+xi_template = []
+for i in range(n_side):
+    for j in range(n_side):
+        if len(xi_template) < n_agents:
+            xi_template.append([0.1 + spacing * (i+1),
+                               0.1 + spacing * (j+1)])
+xi_init_single = jnp.array(xi_template)
+xi_init_batch = jnp.tile(xi_init_single, (batch_size, 1, 1))
+
+metrics = []
+start_time = time.time()
+
+print("\nStarting training...")
+for epoch in trange(epochs):
+    key, subkey = jax.random.split(key)
+    idx = jax.random.randint(subkey, (batch_size,), 0, n_samples)
+    z_init_b, z_target_b = z_init_all[idx], z_target_all[idx]
+
+    params, opt_state, loss, aux = train_step(
+        params, opt_state, z_init_b, xi_init_batch, z_target_b, dynamics
     )
 
-    # Update n_grid if it changed during loading
-    if n_grid_actual != n_grid:
-        n_grid = n_grid_actual
-        print(f"Using n_grid={n_grid} from loaded dataset")
+    if epoch % 10 == 0:
+        metrics.append((epoch, loss, *aux))
+        print(f"Epoch {epoch} | Loss: {loss:.4f} | Track: {aux[0]:.4f} | " +
+              f"Effort: {aux[1]:.4f} | Coll: {aux[2]:.4f} | Bound: {aux[3]:.4f}")
 
-        # Re-initialize model with correct grid size
-        dummy_z = jnp.zeros((n_grid, n_grid))
-        params = model.init(key, dummy_z, dummy_z, dummy_xi)
-        opt_state = optimizer.init(params)
+print(f"\nTraining finished in {time.time() - start_time:.2f}s.")
 
-    print(f"Dataset ready: {z_init_all.shape}")
+# Save parameters
+with open('centralized_params_heat2d.msgpack', 'wb') as f:
+    f.write(flax.serialization.to_bytes(params))
+print("Parameters saved to centralized_params_heat2d.msgpack")
 
-    # Initialize agents in grid pattern
-    n_side = int(jnp.sqrt(n_agents))
-    spacing = 0.8 / (n_side + 1)
-    xi_template = []
-    for i in range(n_side):
-        for j in range(n_side):
-            if len(xi_template) < n_agents:
-                xi_template.append([0.1 + spacing * (i+1),
-                                   0.1 + spacing * (j+1)])
-    xi_init_single = jnp.array(xi_template)
-    xi_init_batch = jnp.tile(xi_init_single, (batch_size, 1, 1))
+# Plot metrics
+if metrics:
+    metrics = jnp.array(metrics)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
 
-    metrics = []
-    start_time = time.time()
+    axes[0, 0].plot(metrics[:, 0], metrics[:, 1])
+    axes[0, 0].set_title('Total Loss')
+    axes[0, 0].set_xlabel('Epoch')
+    axes[0, 0].set_yscale('log')
 
-    print("\nStarting training...")
-    for epoch in trange(epochs):
-        key, subkey = jax.random.split(key)
-        idx = jax.random.randint(subkey, (batch_size,), 0, n_samples)
-        z_init_b, z_target_b = z_init_all[idx], z_target_all[idx]
+    axes[0, 1].plot(metrics[:, 0], metrics[:, 2])
+    axes[0, 1].set_title('Tracking Loss')
+    axes[0, 1].set_xlabel('Epoch')
+    axes[0, 1].set_yscale('log')
 
-        params, opt_state, loss, aux = train_step(
-            params, opt_state, z_init_b, xi_init_batch, z_target_b, dynamics
-        )
+    axes[1, 0].plot(metrics[:, 0], metrics[:, 3])
+    axes[1, 0].set_title('Effort Loss')
+    axes[1, 0].set_xlabel('Epoch')
+    axes[1, 0].set_yscale('log')
 
-        if epoch % 10 == 0:
-            metrics.append((epoch, loss, *aux))
-            print(f"Epoch {epoch} | Loss: {loss:.4f} | Track: {aux[0]:.4f} | " +
-                  f"Effort: {aux[1]:.4f} | Coll: {aux[2]:.4f} | Bound: {aux[3]:.4f}")
+    axes[1, 1].plot(metrics[:, 0], metrics[:, 4])
+    axes[1, 1].set_title('Collision Loss')
+    axes[1, 1].set_xlabel('Epoch')
+    axes[1, 1].set_yscale('log')
 
-    print(f"\nTraining finished in {time.time() - start_time:.2f}s.")
-
-    # Save parameters
-    with open('centralized_params_heat2d.msgpack', 'wb') as f:
-        f.write(flax.serialization.to_bytes(params))
-    print("Parameters saved to centralized_params_heat2d.msgpack")
-
-    # Plot metrics
-    if metrics:
-        metrics = jnp.array(metrics)
-        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-
-        axes[0, 0].plot(metrics[:, 0], metrics[:, 1])
-        axes[0, 0].set_title('Total Loss')
-        axes[0, 0].set_xlabel('Epoch')
-        axes[0, 0].set_yscale('log')
-
-        axes[0, 1].plot(metrics[:, 0], metrics[:, 2])
-        axes[0, 1].set_title('Tracking Loss')
-        axes[0, 1].set_xlabel('Epoch')
-        axes[0, 1].set_yscale('log')
-
-        axes[1, 0].plot(metrics[:, 0], metrics[:, 3])
-        axes[1, 0].set_title('Effort Loss')
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_yscale('log')
-
-        axes[1, 1].plot(metrics[:, 0], metrics[:, 4])
-        axes[1, 1].set_title('Collision Loss')
-        axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_yscale('log')
-
-        plt.tight_layout()
-        plt.savefig('training_metrics_heat2d.png')
-        print("Training metrics saved to training_metrics_heat2d.png")
+    plt.tight_layout()
+    plt.savefig('training_metrics_heat2d.png')
+    print("Training metrics saved to training_metrics_heat2d.png")

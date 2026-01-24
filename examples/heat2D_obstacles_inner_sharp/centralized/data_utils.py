@@ -250,7 +250,11 @@ def get_training_data(n_samples=5000, n_grid=32, dataset_dir='../data'):
         z_target_all: (n_samples, n_grid, n_grid)
         n_grid: Actual grid size used
     """
-    dataset_path = Path(dataset_dir) / f'heat2d_dataset_{n_grid}x{n_grid}.npz'
+    dataset_dir = Path(dataset_dir)
+    if not dataset_dir.is_absolute():
+        dataset_dir = (Path(__file__).resolve().parent / dataset_dir).resolve()
+
+    dataset_path = dataset_dir / f'heat2d_dataset_{n_grid}x{n_grid}.npz'
 
     # Check if file is a Git LFS pointer (small text file ~133 bytes) and delete it
     if dataset_path.exists() and dataset_path.stat().st_size < 1000:
