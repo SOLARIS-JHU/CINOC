@@ -2,10 +2,16 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+import matplotlib.ticker as ticker
 import numpy as np
 import sys
 import flax.serialization
 from pathlib import Path
+import cmcrameri.cm as cmc  # Crameri scientific colormaps
+
+# Force CPU for visualization
+jax.config.update("jax_platform_name", "cpu")
+jax.config.update("jax_enable_x64", True)
 
 # --- Path Setup ---
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
@@ -19,7 +25,7 @@ from data_utils import get_batch_initial_conditions
 # 1. CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 TRAINED_VISCOSITY = 5e-4
-TEST_VISCOSITIES = [2e-4, 3e-4, 4e-4, 5e-4] # Your requested range
+TEST_VISCOSITIES = [2e-4, 3e-4, 4e-4, 5e-4] 
 
 CONFIG = {
     'N_grid': 64,
@@ -33,6 +39,40 @@ CONFIG = {
     'snapshot_times': [0.0, 0.5, 1.0, 2.0] # Seconds
 }
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2. PLOTTING STYLE SETUP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def setup_paper_style():
+    """Configure matplotlib for publication-quality figures."""
+    plt.rcParams.update({
+        # Font settings - Times New Roman for papers
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
+        
+        # Font sizes
+        "font.size": 11,
+        "axes.labelsize": 12,
+        "axes.titlesize": 12,
+        "legend.fontsize": 10,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        
+        # Line widths
+        "axes.linewidth": 0.8,
+        "lines.linewidth": 1.5,
+        
+        # Spines
+        "axes.spines.top": True,
+        "axes.spines.right": True,
+        
+        # Output
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.02,
+    })
+
 def get_actuator_grid():
     grid_dim = int(np.sqrt(CONFIG['n_agents']))
     x_lin = np.linspace(0, CONFIG['L_domain'], grid_dim, endpoint=False) + (CONFIG['L_domain']/grid_dim)/2
@@ -40,7 +80,7 @@ def get_actuator_grid():
     return jnp.stack([xv.flatten(), yv.flatten()], axis=-1)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 2. EVALUATION FUNCTION
+# 3. EVALUATION FUNCTION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def evaluate_viscosity(visc, model, params):
@@ -74,54 +114,98 @@ def evaluate_viscosity(visc, model, params):
     return t_axis, w_ctrl, w_base
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3. MAIN EXECUTION & PLOTTING
+# 4. MAIN EXECUTION & PLOTTING
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    setup_paper_style()
+    
     # Load Model
     model = DecentralizedTurbulenceNet(features=(32, 64), patch_size=16, 
                                        domain_size=(1.0, 1.0), u_max=150.0)
     
-    with open(CONFIG['params_file'], 'rb') as f:
-        raw_params = f.read()
+    try:
+        with open(CONFIG['params_file'], 'rb') as f:
+            raw_params = f.read()
+    except FileNotFoundError:
+        print(f"Error: {CONFIG['params_file']} not found. Run training first.")
+        sys.exit(1)
     
     xi_grid = get_actuator_grid()
     init_params = model.init(jax.random.PRNGKey(0), xi_grid, jnp.zeros((1, 64, 64)))
     params = flax.serialization.from_bytes(init_params, raw_params)
 
-    # Setup Figure: 4 Viscosities = 4 Rows
-    fig = plt.figure(figsize=(15, 3 * len(TEST_VISCOSITIES)))
-    outer_grid = gridspec.GridSpec(len(TEST_VISCOSITIES), 2, width_ratios=[2.5, 1], hspace=0.4)
+    # Setup Figure: Full page width (approx 7.0 inches)
+    fig = plt.figure(figsize=(7.0, 1.6 * len(TEST_VISCOSITIES)))
+    
+    # Layout: Grid with rows for each viscosity
+    # Right column (Enstrophy): narrower ratio
+    outer_grid = gridspec.GridSpec(len(TEST_VISCOSITIES), 2, width_ratios=[3, 1.2], hspace=0.35, wspace=0.35)
 
     for row, visc in enumerate(TEST_VISCOSITIES):
         print(f"Testing Viscosity: {visc:.1e}...")
         t, w_ctrl, w_base = evaluate_viscosity(visc, model, params)
         
-        # --- Left: Snapshots ---
-        gs_snaps = gridspec.GridSpecFromSubplotSpec(1, 4, subplot_spec=outer_grid[row, 0], wspace=0.1)
+        # --- Left: Snapshots (Subplot Grid) ---
+        gs_snaps = gridspec.GridSpecFromSubplotSpec(1, 4, subplot_spec=outer_grid[row, 0], wspace=0.05)
         max_w = jnp.max(jnp.abs(w_ctrl[0])) * 0.8
         
         for i, t_req in enumerate(CONFIG['snapshot_times']):
             ax = fig.add_subplot(gs_snaps[i])
-            idx = (np.abs(t - t_req)).argmin()
-            im = ax.imshow(w_ctrl[idx], extent=[0,1,0,1], origin='lower', cmap='RdBu_r', vmin=-max_w, vmax=max_w)
-            ax.set_xticks([]); ax.set_yticks([])
-            if row == 0: ax.set_title(f"t = {t[idx]:.1f}s")
-            if i == 0: ax.set_ylabel(f"$\\nu$={visc:.1e}", fontweight='bold')
+            idx = int((np.abs(t - t_req)).argmin())
+            
+            im = ax.imshow(w_ctrl[idx], extent=[0,1,0,1], origin='lower', cmap=cmc.vik, vmin=-max_w, vmax=max_w)
+            
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_linewidth(0.5)
+
+            # Column Titles (Time)
+            if row == 0: 
+                ax.set_title(f"t = {t[idx]:.1f}s", fontsize=10)
+            
+            # Row Label (Viscosity)
+            if i == 0: 
+                ax.set_ylabel(f"$\\nu$={visc:.0e}", fontsize=11, fontweight='bold', rotation=90)
 
         # --- Right: Enstrophy Plot ---
         ax_plot = fig.add_subplot(outer_grid[row, 1])
         e_ctrl = jnp.mean(w_ctrl**2, axis=(1,2))
         e_base = jnp.mean(w_base**2, axis=(1,2))
         
-        ax_plot.plot(t, e_base, 'k--', alpha=0.5, label='Natural')
-        ax_plot.plot(t, e_ctrl, 'b-', label='Controlled')
+        ax_plot.plot(t, e_base, color='grey', linestyle='--', linewidth=1.2, alpha=0.8, label='Natural')
+        ax_plot.plot(t, e_ctrl, color='navy', linewidth=1.2, label='Controlled')
+        
         ax_plot.set_yscale('log')
-        ax_plot.grid(True, which='both', alpha=0.2)
-        if row == 0: ax_plot.legend(fontsize=8)
-        ax_plot.set_ylabel("Enstrophy")
-        if row == len(TEST_VISCOSITIES)-1: ax_plot.set_xlabel("Time (s)")
+        
+        # 1. Fewer Ticks: Limit to ~4 major ticks
+        ax_plot.yaxis.set_major_locator(ticker.LogLocator(base=10.0, numticks=4))
+        
+        # 2. No Scientific Notation on Labels
+        formatter = ticker.ScalarFormatter()
+        formatter.set_scientific(False)
+        ax_plot.yaxis.set_major_formatter(formatter)
+        
+        # 3. Hide Minor Tick Labels to reduce clutter
+        ax_plot.yaxis.set_minor_formatter(ticker.NullFormatter())
+        
+        ax_plot.grid(True, which='both', linestyle='--', alpha=0.3, linewidth=0.5)
+        
+        # Title for Right Section
+        if row == 0:
+            ax_plot.set_title("Enstrophy Evolution", fontsize=11)
+            ax_plot.legend(fontsize=8, loc='upper right', framealpha=0.9)
+            
+        if row == len(TEST_VISCOSITIES)-1: 
+            ax_plot.set_xlabel("Time (s)")
+        else:
+            ax_plot.set_xticklabels([])
 
-    plt.suptitle(f"Robustness Test: Policy Trained at $\\nu$={TRAINED_VISCOSITY}", fontsize=16, y=0.95)
-    plt.savefig("viscosity_robustness_comparison.pdf", dpi=150, bbox_inches='tight')
-    print("✓ Saved combined robustness plot to viscosity_robustness_comparison.pdf")
+        ax_plot.set_ylabel(r"$\langle \omega^2 \rangle$")
+
+    save_name = "viscosity_robustness_comparison.pdf"
+    plt.savefig(save_name)
+    print(f"✓ Saved combined robustness plot to {save_name}")
+    
+    plt.savefig(save_name.replace(".pdf", ".png"), dpi=300)

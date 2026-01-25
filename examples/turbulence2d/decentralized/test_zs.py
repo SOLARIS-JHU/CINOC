@@ -199,7 +199,7 @@ def main():
             params = flax.serialization.from_bytes(init_params, f.read())
 
     # --- 4. Zero-Shot Ablation ---
-    n_eval_list = [36, 64, 81, 100, 121, 144, 196, 256, 324, 400, 484, 576, 676, 784, 900, 1024] 
+    n_eval_list = [2, 4, 9, 16, 25, 36, 64, 81, 100, 121, 144, 196, 256, 324, 400, 484, 576, 676, 784, 900, 1024] 
     n_test = 5 
     w_init_test = w_init_pool[-n_test:]
     

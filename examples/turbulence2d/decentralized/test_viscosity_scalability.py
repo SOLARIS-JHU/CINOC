@@ -35,6 +35,40 @@ CONFIG = {
     'params_file': 'turbulence_params.msgpack',
 }
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2. PLOTTING STYLE SETUP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def setup_paper_style():
+    """Configure matplotlib for publication-quality figures."""
+    plt.rcParams.update({
+        # Font settings - Times New Roman for papers
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
+        
+        # Font sizes
+        "font.size": 11,
+        "axes.labelsize": 12,
+        "axes.titlesize": 12,
+        "legend.fontsize": 10,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        
+        # Line widths
+        "axes.linewidth": 0.8,
+        "lines.linewidth": 1.5,
+        
+        # Spines
+        "axes.spines.top": True,
+        "axes.spines.right": True,
+        
+        # Output
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.02,
+    })
+
 def get_actuator_grid(n_agents):
     grid_dim = int(np.sqrt(n_agents))
     x_lin = np.linspace(0, CONFIG['L_domain'], grid_dim, endpoint=False) + (CONFIG['L_domain']/grid_dim)/2
@@ -42,7 +76,7 @@ def get_actuator_grid(n_agents):
     return jnp.stack([xv.flatten(), yv.flatten()], axis=-1), (grid_dim, grid_dim)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 2. SWEEP EXECUTION
+# 3. SWEEP EXECUTION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run_scalability_sweep(model, params):
@@ -83,16 +117,22 @@ def run_scalability_sweep(model, params):
     return pd.DataFrame(results)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3. MAIN & PLOTTING
+# 4. MAIN & PLOTTING
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    setup_paper_style()
+    
     # --- 1. Setup ---
     model = DecentralizedTurbulenceNet(features=(32, 64), patch_size=16, 
                                        domain_size=(1.0, 1.0), u_max=150.0)
     
-    with open(CONFIG['params_file'], 'rb') as f:
-        raw_params = f.read()
+    try:
+        with open(CONFIG['params_file'], 'rb') as f:
+            raw_params = f.read()
+    except FileNotFoundError:
+        print(f"Error: {CONFIG['params_file']} not found. Run training first.")
+        sys.exit(1)
     
     # We init with any valid grid for loading
     xi_init, _ = get_actuator_grid(64)
@@ -102,9 +142,9 @@ if __name__ == "__main__":
     # --- 2. Run Sweep ---
     df_results = run_scalability_sweep(model, params)
 
-    # --- 3. Plotting (Scalability Style) ---
-    plt.style.use('seaborn-v0_8-whitegrid')
-    fig, ax = plt.subplots(figsize=(10, 6)) # Use subplots to get the 'ax' object
+    # --- 3. Plotting (Paper Quality) ---
+    # Standard single-column size (approx 5.0 x 3.5 inches)
+    fig, ax = plt.subplots(figsize=(5.0, 3.5))
 
     # Create palette
     palette = sns.color_palette("viridis", n_colors=len(TEST_VISCOSITIES))
@@ -115,8 +155,8 @@ if __name__ == "__main__":
         y="Enstrophy", 
         hue="Viscosity", 
         marker="o", 
-        markersize=8, 
-        linewidth=2.5,
+        markersize=6, 
+        linewidth=1.5,
         palette=palette,
         ax=ax
     )
@@ -131,23 +171,24 @@ if __name__ == "__main__":
     # 'subs' defines where the minor ticks fall (e.g., 2, 3, 4...9)
     ax.yaxis.set_minor_locator(ticker.LogLocator(base=10.0, subs=np.arange(2, 10) * 0.1, numticks=12))
 
-    # 3. Formatting: Clean up labels (optional: use ScalarFormatter for 0.01 instead of 10^-2)
+    # 3. Formatting
     ax.yaxis.set_major_formatter(ticker.LogFormatterSciNotation()) 
-    # ax.yaxis.set_major_formatter(ticker.ScalarFormatter()) # Uncomment for decimal look
-
+    
     # Visual cues
-    ax.axvline(x=64, color='red', linestyle='--', alpha=0.5, label="Training Scale (8x8)")
+    ax.axvline(x=64, color='gray', linestyle='--', alpha=0.5, label="Training (8x8)")
 
-    ax.set_title(f"Scalability & Robustness: Policy Generalization (Trained @ $\\nu={TRAINED_VISCOSITY}$)", fontsize=14)
-    ax.set_ylabel("Residual Enstrophy (Stabilization Error)", fontsize=12)
-    ax.set_xlabel("Number of Actuators", fontsize=12)
+    # Labels with LaTeX
+    ax.set_title(r"Scalability & Robustness (Trained @ $\nu={:.0e}$)".format(TRAINED_VISCOSITY))
+    ax.set_ylabel("Residual Enstrophy")
+    ax.set_xlabel("Number of Actuators")
 
     # Enable grid for both major and minor ticks
-    ax.grid(True, which="major", ls="-", alpha=0.4)
-    ax.grid(True, which="minor", ls=":", alpha=0.2)
+    ax.grid(True, which="major", linestyle='-', alpha=0.3, linewidth=0.5)
+    ax.grid(True, which="minor", linestyle=':', alpha=0.2, linewidth=0.5)
 
-    ax.legend(title="Viscosity $\\nu$", loc='upper right')
-    plt.grid(True, which="both", ls="-", alpha=0.2)
+    # Clean Legend
+    ax.legend(title=r"Viscosity $\nu$", loc='best', framealpha=0.9, fontsize=9)
     
-    plt.savefig("turbulence_scalability_viscosity.pdf", dpi=150, bbox_inches='tight')
-    print("\n✓ Scalability plot saved to turbulence_scalability_viscosity.pdf")
+    save_name = "turbulence_scalability_viscosity.pdf"
+    plt.savefig(save_name)
+    print(f"\n✓ Scalability plot saved to {save_name}")

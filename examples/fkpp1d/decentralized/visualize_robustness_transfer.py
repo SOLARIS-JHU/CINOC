@@ -1,8 +1,3 @@
-"""
-Robustness Transfer Experiment - Comprehensive Decoupled Visualization
-Generates 8 Scalability Plots covering the full matrix of noise scenarios.
-Compares Actuator-Trained vs. State-Trained models across all environments.
-"""
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -32,36 +27,28 @@ from models.policy import DecentralizedControlNet
 from data_utils import generate_grf
 
 # --- Config ---
-# We test on a spread of agent counts to show the curve
 TEST_AGENT_COUNTS = [20, 30, 40, 60, 80, 100]
 N_PDE = 100
 T_STEPS = 300
-N_TEST_SAMPLES = 20  # Reduced slightly for speed across 8 scenarios
+N_TEST_SAMPLES = 20 
 
 # --- Model Definitions ---
-# We will load ALL these models to compare them in every plot
 ALL_MODELS = [
     "baseline_clean",
-    # Actuator Specialists
     "actuator_only_0p02",
     "actuator_only_0p1",
-    # "actuator_only_0p5",
-    # State Specialists
     "state_only_0p01",
     "state_only_0p05",
-    # "state_only_0p25"
 ]
 
 # --- Scenario Definitions ---
-# The 8 scenarios requested by the user
 SCENARIOS = {
-    # 1-3: State Noise Only (Low, Mid, High)
+    # 1-3: State Noise Only
     "State_Low":  {"u": 0.0, "z": 0.01},
     "State_Mid":  {"u": 0.0, "z": 0.05},
     "State_High": {"u": 0.0, "z": 0.25},
     
-    # 4-6: Actuator Noise Only (Low, Mid, High)
-    # (Assuming "Sensor Noise" in prompt meant Actuator to cover the decoupled axis)
+    # 4-6: Actuator Noise Only
     "Actuator_Low":  {"u": 0.02, "z": 0.0},
     "Actuator_Mid":  {"u": 0.1,  "z": 0.0},
     "Actuator_High": {"u": 0.5,  "z": 0.0},
@@ -72,6 +59,39 @@ SCENARIOS = {
     "Combined_High": {"u": 0.5,  "z": 0.25},
 }
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# PLOTTING STYLE SETUP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def setup_paper_style():
+    """Configure matplotlib for publication-quality figures."""
+    plt.rcParams.update({
+        # Font settings - Times New Roman for papers
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
+        
+        # Font sizes
+        "font.size": 11,
+        "axes.labelsize": 12,
+        "axes.titlesize": 12,
+        "legend.fontsize": 10,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        
+        # Line widths
+        "axes.linewidth": 0.8,
+        "lines.linewidth": 1.5,
+        
+        # Spines
+        "axes.spines.top": True,
+        "axes.spines.right": True,
+        
+        # Output
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.02,
+    })
 
 def load_params(model, filepath):
     with open(filepath, 'rb') as f:
@@ -85,7 +105,6 @@ def evaluate_scenario(scenario_name, noise_u, noise_z, loaded_params, dynamics):
     """
     print(f"\n--- Evaluating Scenario: {scenario_name} (u={noise_u}, z={noise_z}) ---")
     
-    # Generate Test Data (Fixed Seed per scenario for fairness)
     key = jax.random.PRNGKey(42)
     key, k1, k2 = jax.random.split(key, 3)
     _, z_init_test = jax.vmap(partial(generate_grf, n_points=N_PDE, length_scale=0.2))(jax.random.split(k1, N_TEST_SAMPLES))
@@ -102,7 +121,6 @@ def evaluate_scenario(scenario_name, noise_u, noise_z, loaded_params, dynamics):
         
         for m_name, params in loaded_params.items():
             
-            # JIT Unroll wrapper
             def run_single(z_i, z_t, xi_i):
                 z_traj, _, _, _ = dynamics.unroll_controlled(
                     z_i, xi_i, z_t, params, T_STEPS, 
@@ -126,13 +144,12 @@ def evaluate_scenario(scenario_name, noise_u, noise_z, loaded_params, dynamics):
 
 def plot_comprehensive(df, title, filename):
     """
-    Plots all models with distinct color coding:
-    - Baseline: Black/Grey
-    - Actuator Models: Reds
-    - State Models: Blues
+    Plots all models with distinct color coding using Paper Style.
     """
-    plt.style.use('seaborn-v0_8-whitegrid')
-    plt.figure(figsize=(10, 6))
+    setup_paper_style()
+    
+    # Use standard single-column size (approx 5.0 x 3.5 inches)
+    fig, ax = plt.subplots(figsize=(5.0, 3.5))
     
     # 1. Prettify Labels
     def prettify(name):
@@ -140,7 +157,6 @@ def plot_comprehensive(df, title, filename):
         clean = name.replace("actuator_only", "Actuator").replace("state_only", "State")
         clean = clean.replace("_", " ")
         clean = clean.replace("p", ".")
-        # e.g. "Actuator 0.5"
         return clean
 
     df['Label'] = df['Model'].apply(prettify)
@@ -149,9 +165,8 @@ def plot_comprehensive(df, title, filename):
     unique_labels = sorted(df['Label'].unique())
     palette = {}
     
-    # Color definitions
-    actuator_colors = sns.color_palette("Reds", n_colors=4)[1:] # Skip lightest
-    state_colors = sns.color_palette("Blues", n_colors=4)[1:]   # Skip lightest
+    actuator_colors = sns.color_palette("Reds", n_colors=4)[1:] 
+    state_colors = sns.color_palette("Blues", n_colors=4)[1:]   
     
     a_idx, s_idx = 0, 0
     
@@ -159,11 +174,9 @@ def plot_comprehensive(df, title, filename):
         if "Baseline" in label:
             palette[label] = "#333333" # Dark Grey
         elif "Actuator" in label:
-            # Assign increasing red intensity
             palette[label] = actuator_colors[a_idx % len(actuator_colors)]
             a_idx += 1
         elif "State" in label:
-            # Assign increasing blue intensity
             palette[label] = state_colors[s_idx % len(state_colors)]
             s_idx += 1
         else:
@@ -177,20 +190,32 @@ def plot_comprehensive(df, title, filename):
         hue="Label", 
         style="Label", 
         markers=True, 
-        markersize=8, 
-        linewidth=2.0,
-        palette=palette
+        markersize=6, 
+        linewidth=1.5,
+        palette=palette,
+        ax=ax
     )
     
-    plt.axvline(x=30, color='gray', linestyle='--', alpha=0.5, label="Training Scale (N=30)")
-    plt.title(title, fontsize=14)
-    plt.ylabel("Final Tracking Error (MSE)", fontsize=12)
-    plt.xlabel("Deployment Agent Count", fontsize=12)
-    plt.yscale('log')
-    plt.legend(title="Policy Type", bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.axvline(x=30, color='gray', linestyle='--', alpha=0.5, label="Training (N=30)")
+    ax.set_title(title)
+    ax.set_ylabel("Final Tracking Error (MSE)")
+    ax.set_xlabel("Deployment Agent Count")
+    ax.set_yscale('log')
+    
+    # Custom grid
+    ax.grid(True, which='both', linestyle='--', alpha=0.3, linewidth=0.5)
+    
+    # Legend handling: Put outside to prevent clutter in small plot
+    ax.legend(
+        title="Policy Type", 
+        bbox_to_anchor=(1.05, 1), 
+        loc='upper left',
+        framealpha=0.9,
+        fontsize=9
+    )
     
     save_path = EXPERIMENT_DIR / filename
-    plt.savefig(save_path, bbox_inches='tight')
+    plt.savefig(save_path) # dpi and bbox handled by rcParams
     plt.close()
     print(f"Saved plot to {save_path}")
 
@@ -205,8 +230,10 @@ def run_all_scenarios():
         # Load all params once
         loaded_params = {}
         for m_name in ALL_MODELS:
+            # Try loading specific epoch or default folder
             p_path = EXPERIMENT_DIR / f"{m_name}_params_0.001.msgpack"
-            if not p_path.exists(): p_path = EXPERIMENT_DIR / f"{m_name}_params"
+            if not p_path.exists(): 
+                p_path = EXPERIMENT_DIR / f"{m_name}_params"
             
             if p_path.exists():
                 loaded_params[m_name] = load_params(model, p_path)
@@ -231,7 +258,8 @@ def run_all_scenarios():
             df_res.to_csv(EXPERIMENT_DIR / f"metrics_{sc_name}.csv", index=False)
             
             # Generate Plot
-            title_str = f"Robustness in {sc_name.replace('_', ' ')} Env ($\sigma_u={env_cfg['u']}, \sigma_z={env_cfg['z']}$)"
+            # Latex formatting for title
+            title_str = f"Robustness: {sc_name.replace('_', ' ')} ($\\sigma_u={env_cfg['u']}, \\sigma_z={env_cfg['z']}$)"
             file_str = f"plot_robustness_{sc_name}_0.001.pdf"
             
             plot_comprehensive(df_res, title_str, file_str)

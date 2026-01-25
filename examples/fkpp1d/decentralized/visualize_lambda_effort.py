@@ -1,12 +1,3 @@
-"""
-Analysis and Visualization of Control Effort vs. Control effort lagrangian penalty factor in Decentralized 1D Fisher-KPP Control 
-using Tesseract-JAX and DecentralizedControlNet policy. If our conjecture holds, we should see that increasing the penalty factor
-leads to a decrease in overall control effort, even as the number of agents scales beyond training conditions.
-
-Expected behaviours: 
-* \sum |u_i| should stay more or less CONSTANT as we increase the number of agents agents -> the control forcing term norm ||B|| is independent of N
-* \sum u_i^2 should DECREASE as we increase the number of agents -> u_i ~ O(1/N), resulting in reduced individual efforts (self-normalization)
-"""
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -37,17 +28,51 @@ FIGURES_DIR = Path("figures/conjecture")
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# PLOTTING STYLE SETUP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def setup_paper_style():
+    """Configure matplotlib for publication-quality figures."""
+    plt.rcParams.update({
+        # Font settings - Times New Roman for papers
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
+        
+        # Font sizes
+        "font.size": 11,
+        "axes.labelsize": 12,
+        "axes.titlesize": 12,
+        "legend.fontsize": 10,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        
+        # Line widths
+        "axes.linewidth": 0.8,
+        "lines.linewidth": 1.5,
+        
+        # Spines
+        "axes.spines.top": True,
+        "axes.spines.right": True,
+        
+        # Output
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.02,
+    })
+
 # --- 2. Training Logic ---
 def loss_fn(params, z_init, xi_init, z_target, dynamics, l_effort_weight, n_agents, T_steps, R_safe=0.05):
     z_traj, xi_traj, u_traj, v_traj = dynamics.unroll_controlled(
         z_init, xi_init, z_target, params, T_steps
     )
-    # Tracking Error [cite: 29]
+    # Tracking Error
     l_track = jnp.mean((z_traj - z_target[None, :]) ** 2)
-    # Control Effort Penalty [cite: 31, 125]
+    # Control Effort Penalty
     l_effort = jnp.mean(u_traj ** 2) 
     
-    # Boundary and Collision Penalties [cite: 34, 43]
+    # Boundary and Collision Penalties
     margin = 0.02
     l_bound = jnp.mean(jnp.maximum(0, margin - xi_traj)**2 + 
                        jnp.maximum(0, xi_traj - (1.0 - margin))**2)
@@ -93,7 +118,6 @@ def train_model(l_weight, n_pde, n_agents, epochs, dynamics, model, optimizer):
     with open(param_path, 'wb') as f:
         f.write(flax.serialization.to_bytes(params))
 
-# --- 3. Evaluation with Temporal Windowing ---
 # --- 3. Evaluation with Temporal Windowing (Updated) ---
 def run_comparison(solver_ts, n_agents_list, lambda_list, n_pde, T_steps, z_init, z_target, window_ratio=0.7):
     all_results = []
@@ -135,67 +159,64 @@ def run_comparison(solver_ts, n_agents_list, lambda_list, n_pde, T_steps, z_init
             })
     return pd.DataFrame(all_results)
 
-# --- 4. Plotting (Updated for 3 Subplots) ---
+# --- 4. Plotting (Updated for Paper Style) ---
 def plot_conjecture_results_separated(df, window_label):
-    plt.style.use('seaborn-v0_8-paper')
-    colors = [
-    '#2c3e50', '#2980b9', '#27ae60', '#e67e22', 
-    '#8e44ad', '#c0392b', '#d35400'
-]
+    setup_paper_style()
+    
+    # Professional color palette
+    colors = ['#2c3e50', '#2980b9', '#27ae60', '#e67e22', '#8e44ad', '#c0392b', '#d35400']
     
     # Common helper for formatting effort axes
     def format_effort_axis(ax):
         ax.yaxis.set_major_formatter(ScalarFormatter())
         ax.yaxis.get_major_formatter().set_scientific(False)
         ax.yaxis.get_major_formatter().set_useOffset(False)
-        ax.grid(True, which="both", ls="--", alpha=0.3)
-        ax.legend()
+        ax.grid(True, which="both", ls="--", alpha=0.3, linewidth=0.5)
+        # Legend outside to save space in small plots
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', framealpha=0.9, fontsize=9)
 
     # --- Plot 1: Tracking MSE ---
-    fig1, ax1 = plt.subplots(figsize=(6, 5))
+    fig1, ax1 = plt.subplots(figsize=(5.0, 3.5))
     for i, l in enumerate(df['lambda'].unique()):
         sub = df[df['lambda'] == l]
-        ax1.semilogy(sub['n_agents'], sub['mse'], marker='o', markersize=6, 
-                     label=f'$\lambda_u={l}$', color=colors[i], linewidth=2)
+        ax1.semilogy(sub['n_agents'], sub['mse'], marker='o', markersize=5, 
+                     label=f'$\lambda_u={l}$', color=colors[i % len(colors)], linewidth=1.5)
     
-    ax1.set_title("Zero-Shot Scalability: Tracking MSE", fontsize=12, fontweight='bold')
-    ax1.set_xlabel("Number of Agents ($M$)", fontsize=10)
-    ax1.set_ylabel("Final $L^2$ Error", fontsize=10)
-    ax1.axvline(x=20, color='red', linestyle='--', alpha=0.5, label='Training $M$')
-    ax1.grid(True, which="both", ls="--", alpha=0.3)
-    ax1.legend()
-    fig1.tight_layout()
-    fig1.savefig(FIGURES_DIR / f"scaling_mse_{window_label.replace(' ', '_')}.pdf")
+    ax1.set_title("Zero-Shot Scalability: Tracking MSE")
+    ax1.set_xlabel("Number of Agents ($M$)")
+    ax1.set_ylabel("Final $L^2$ Error")
+    ax1.axvline(x=20, color='gray', linestyle='--', alpha=0.5, label='Training $M$')
+    ax1.grid(True, which="both", ls="--", alpha=0.3, linewidth=0.5)
+    ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', framealpha=0.9, fontsize=9)
+    fig1.savefig(FIGURES_DIR / f"scaling_mse_{window_label.replace(' ', '_')}.pdf", bbox_inches='tight')
 
     # --- Plot 2: Squared Effort ---
-    fig2, ax2 = plt.subplots(figsize=(6, 5))
+    fig2, ax2 = plt.subplots(figsize=(5.0, 3.5))
     for i, l in enumerate(df['lambda'].unique()):
         sub = df[df['lambda'] == l]
-        ax2.loglog(sub['n_agents'], sub['total_effort_sq'], marker='s', markersize=6,
-                   label=f'$\lambda_u={l}$', color=colors[i], linewidth=2)
+        ax2.loglog(sub['n_agents'], sub['total_effort_sq'], marker='s', markersize=5,
+                   label=f'$\lambda_u={l}$', color=colors[i % len(colors)], linewidth=1.5)
     
-    ax2.set_title(f"Steady-State Effort: $\sum u_i^2$", fontsize=12, fontweight='bold')
-    ax2.set_xlabel("Number of Agents ($M$)", fontsize=10)
-    ax2.set_ylabel("Mean $\sum u_i^2$", fontsize=10)
+    ax2.set_title(r"Steady-State Effort: $\sum u_i^2$")
+    ax2.set_xlabel("Number of Agents ($M$)")
+    ax2.set_ylabel(r"Mean $\sum u_i^2$")
     format_effort_axis(ax2)
-    fig2.tight_layout()
-    fig2.savefig(FIGURES_DIR / f"scaling_effort_sq_{window_label.replace(' ', '_')}.pdf")
+    fig2.savefig(FIGURES_DIR / f"scaling_effort_sq_{window_label.replace(' ', '_')}.pdf", bbox_inches='tight')
 
     # --- Plot 3: Absolute Effort ---
-    fig3, ax3 = plt.subplots(figsize=(6, 5))
+    fig3, ax3 = plt.subplots(figsize=(5.0, 3.5))
     for i, l in enumerate(df['lambda'].unique()):
         sub = df[df['lambda'] == l]
-        ax3.loglog(sub['n_agents'], sub['total_effort_abs'], marker='^', markersize=6,
-                   label=f'$\lambda_u={l}$', color=colors[i], linewidth=2)
+        ax3.loglog(sub['n_agents'], sub['total_effort_abs'], marker='^', markersize=5,
+                   label=f'$\lambda_u={l}$', color=colors[i % len(colors)], linewidth=1.5)
     
-    ax3.set_title(f"Steady-State Effort: $\sum |u_i|$", fontsize=12, fontweight='bold')
-    ax3.set_xlabel("Number of Agents ($M$)", fontsize=10)
-    ax3.set_ylabel("Mean $\sum |u_i|$", fontsize=10)
+    ax3.set_title(r"Steady-State Effort: $\sum |u_i|$")
+    ax3.set_xlabel("Number of Agents ($M$)")
+    ax3.set_ylabel(r"Mean $\sum |u_i|$")
     format_effort_axis(ax3)
-    fig3.tight_layout()
-    fig3.savefig(FIGURES_DIR / f"scaling_effort_abs_{window_label.replace(' ', '_')}.pdf")
+    fig3.savefig(FIGURES_DIR / f"scaling_effort_abs_{window_label.replace(' ', '_')}.pdf", bbox_inches='tight')
     
-    # Close all figures to free up memory
+    # Close all figures
     plt.close('all')
     print(f"Three separate PDFs saved to {FIGURES_DIR}")
 

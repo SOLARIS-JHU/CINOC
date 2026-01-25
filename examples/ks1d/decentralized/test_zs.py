@@ -89,7 +89,7 @@ def main():
     T_steps = 300
     
     # Zero-Shot Sweep: From Half Density (15) to 3x Density
-    n_eval_list = [15, 20, 25, 30, 40, 50, 60, 90, 100, 120, 150, 180]
+    n_eval_list = [2, 5, 10, 15, 20, 25, 30, 40, 50, 60, 90, 100, 120, 150, 180]
     
     # Model Setup
     model = DecentralizedControlNet(features=(64, 64), L_domain=L_domain, window_size=4)

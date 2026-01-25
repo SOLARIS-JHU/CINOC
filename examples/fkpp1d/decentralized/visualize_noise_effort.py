@@ -26,6 +26,40 @@ N_PDE = 100
 T_STEPS = 300
 TEST_AGENT_COUNTS = list(range(20, 201, 10)) # [20, 30, ..., 100]
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# PLOTTING STYLE SETUP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def setup_paper_style():
+    """Configure matplotlib for publication-quality figures."""
+    plt.rcParams.update({
+        # Font settings - Times New Roman for papers
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "mathtext.fontset": "stix",  # Math font compatible with Times
+        
+        # Font sizes for two-column paper
+        "font.size": 11,
+        "axes.labelsize": 12,
+        "axes.titlesize": 12,
+        "legend.fontsize": 10,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        
+        # Line widths
+        "axes.linewidth": 0.8,
+        "lines.linewidth": 1.5,
+        
+        # Remove top/right spines for cleaner look
+        "axes.spines.top": True,
+        "axes.spines.right": True,
+        
+        # High-quality output
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.02,
+    })
+
 def load_params(model, filepath):
     with open(filepath, 'rb') as f:
         bytes_data = f.read()
@@ -103,49 +137,12 @@ def evaluate_effort_scaling(solver_ts):
 
     return pd.DataFrame(results)
 
-# def plot_effort_metrics(df):
-#     plt.style.use('seaborn-v0_8-whitegrid')
-    
-#     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    
-#     # Consistent styling
-#     palette = {"Baseline": "#2c3e50", "Low Noise": "#e74c3c"}
-#     markers = {"Baseline": "o", "Low Noise": "s"}
-    
-#     # --- Subplot 1: Quadratic Effort ---
-#     sns.lineplot(
-#         data=df, x="Agents", y="Sum_Sq", hue="Model", style="Model",
-#         markers=markers, palette=palette, linewidth=2.5, ax=axes[0], markersize=9
-#     )
-#     axes[0].set_title(r"Total Quadratic Effort ($\sum u_i^2$)", fontsize=14, fontweight='bold')
-#     axes[0].set_ylabel(r"Mean $\sum u_i^2$ (Steady State)", fontsize=12)
-#     axes[0].set_xlabel("Number of Agents ($N$)", fontsize=12)
-#     axes[0].axvline(x=30, color='gray', linestyle='--', alpha=0.5, label="Training N=30")
-#     axes[0].set_xscale('log')
-#     axes[0].set_yscale('log')
-    
-#     # --- Subplot 2: Absolute Effort ---
-#     sns.lineplot(
-#         data=df, x="Agents", y="Sum_Abs", hue="Model", style="Model",
-#         markers=markers, palette=palette, linewidth=2.5, ax=axes[1], markersize=9
-#     )
-#     axes[1].set_title(r"Total Absolute Effort ($\sum |u_i|$)", fontsize=14, fontweight='bold')
-#     axes[1].set_ylabel(r"Mean $\sum |u_i|$ (Steady State)", fontsize=12)
-#     axes[1].set_xlabel("Number of Agents ($N$)", fontsize=12)
-#     axes[1].axvline(x=30, color='gray', linestyle='--', alpha=0.5, label="Training N=30")
-#     axes[1].set_xscale('log')
-#     axes[1].set_yscale('log')
-
-#     plt.tight_layout()
-#     save_path = OUTPUT_DIR / "effort_scaling_log_steady.pdf"
-#     plt.savefig(save_path, bbox_inches='tight')
-#     print(f"Plot saved to {save_path}")
-
 def plot_effort_metrics(df):
-    plt.style.use('seaborn-v0_8-whitegrid')
+    # Apply paper style settings
+    setup_paper_style()
     
-    # Changed from (1, 2) to a single plot with a standard aspect ratio
-    fig, ax = plt.subplots(figsize=(8, 6))
+    # Create figure (sized for single-column paper usage, approx 5-6 inches wide)
+    fig, ax = plt.subplots(figsize=(6, 4.5))
     
     # Consistent styling
     palette = {"Baseline": "#2c3e50", "Low Noise": "#e74c3c"}
@@ -154,12 +151,13 @@ def plot_effort_metrics(df):
     # --- Quadratic Effort Only ---
     sns.lineplot(
         data=df, x="Agents", y="Sum_Sq", hue="Model", style="Model",
-        markers=markers, palette=palette, linewidth=2.5, ax=ax, markersize=9
+        markers=markers, palette=palette, linewidth=1.5, ax=ax, markersize=7
     )
     
-    ax.set_title(r"Total Quadratic Effort ($\sum u_i^2$)", fontsize=14, fontweight='bold')
-    ax.set_ylabel(r"Mean $\sum u_i^2$ (Steady State)", fontsize=12)
-    ax.set_xlabel("Number of Agents ($N$)", fontsize=12)
+    # Set titles and labels (Font sizes are handled by rcParams now)
+    ax.set_title(r"Total Quadratic Effort ($\sum u_i^2$)", fontweight='bold')
+    ax.set_ylabel(r"Mean $\sum u_i^2$ (Steady State)")
+    ax.set_xlabel("Number of Agents ($N$)")
     
     # Vertical line for training reference
     ax.axvline(x=30, color='gray', linestyle='--', alpha=0.5, label="Training $N=30$")
@@ -168,12 +166,14 @@ def plot_effort_metrics(df):
     ax.set_xscale('log')
     ax.set_yscale('log')
     
+    # Custom grid style from the reference script
+    ax.grid(True, which='both', linestyle='--', alpha=0.3, linewidth=0.5)
+    
     # Ensure legend is visible
-    ax.legend(title="Model", frameon=True)
+    ax.legend(title="Model", frameon=True, framealpha=0.9)
 
-    plt.tight_layout()
     save_path = OUTPUT_DIR / "effort_scaling_log_steady.pdf"
-    plt.savefig(save_path, bbox_inches='tight')
+    plt.savefig(save_path) # rcParams handles dpi and bbox
     print(f"Plot saved to {save_path}")
 
 if __name__ == "__main__":

@@ -1,9 +1,3 @@
-"""
-Physics Parameter Ablation Study
-Tests the 'low_noise' model's robustness to shifts in:
-1. Diffusion Coefficient (nu)
-2. Growth Rate (rho)
-"""
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -44,6 +38,40 @@ RHO_VALUES = [3, 4, 5, 6, 7, 8]
 # Defaults
 DEFAULT_NU = 0.005
 DEFAULT_RHO = 3.0
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PLOTTING STYLE SETUP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def setup_paper_style():
+    """Configure matplotlib for publication-quality figures."""
+    plt.rcParams.update({
+        # Font settings - Times New Roman for papers
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
+        
+        # Font sizes
+        "font.size": 11,
+        "axes.labelsize": 12,
+        "axes.titlesize": 12,
+        "legend.fontsize": 10,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        
+        # Line widths
+        "axes.linewidth": 0.8,
+        "lines.linewidth": 1.5,
+        
+        # Spines
+        "axes.spines.top": True,
+        "axes.spines.right": True,
+        
+        # Output
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.02,
+    })
 
 def load_params(model, filepath):
     with open(filepath, 'rb') as f:
@@ -103,7 +131,6 @@ def run_ablation(dynamics, params, z_init_batch, z_target_batch, nu_list, rho_li
 
 if __name__ == "__main__":
     # 1. Initialize Dynamics Wrapper
-    # Note: We pass use_tesseract=False to use local JAX execution for the ablation
     solver_ts = Tesseract.from_image("solver_fkpp1d_decentralized:latest")
     model = DecentralizedControlNet(features=(64, 64))
     dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
@@ -129,28 +156,36 @@ if __name__ == "__main__":
     df_rho = run_ablation(dynamics, params, z_init_test, z_target_test, [], RHO_VALUES, 'rho')
 
     # 5. Plotting
-    sns.set_theme(style="whitegrid")
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
+    setup_paper_style()
+    
+    # Use 7.0 width for a full-width figure in a two-column paper 
+    fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.0), sharey=True)
 
     # Plot Nu Ablation
     sns.lineplot(
         ax=axes[0], data=df_nu, x="Agents", y="MSE", 
-        hue="Value", style="Value", markers=True, markersize=8, linewidth=2.5, palette="viridis"
+        hue="Value", style="Value", markers=True, markersize=6, linewidth=1.5, palette="viridis"
     )
-    axes[0].set_title(f"Sensitivity to Diffusion ($\\nu$). $\\nu for trainining is 0.005$\nFixed $\\rho={DEFAULT_RHO}$", fontsize=14)
-    axes[0].set_ylabel("Final Tracking Error (MSE)", fontsize=12)
+    axes[0].set_title(r"Sensitivity to Diffusion ($\nu$)", pad=10)
+    axes[0].set_ylabel("Final Tracking Error (MSE)")
     axes[0].set_yscale("log")
-    axes[0].legend(title="$\\nu$ Value", loc='upper right')
+    axes[0].grid(True, which='both', linestyle='--', alpha=0.3, linewidth=0.5)
+    
+    # Customize Legend
+    # We remove the title and frame to make it cleaner, or keep it minimal
+    axes[0].legend(title=r"$\nu$ Value", loc='best', framealpha=0.9, fontsize=9)
 
     # Plot Rho Ablation
     sns.lineplot(
         ax=axes[1], data=df_rho, x="Agents", y="MSE", 
-        hue="Value", style="Value", markers=True, markersize=8, linewidth=2.5, palette="magma"
+        hue="Value", style="Value", markers=True, markersize=6, linewidth=1.5, palette="magma"
     )
-    axes[1].set_title(f"Sensitivity to Growth Rate ($\\rho$). $\\rho for trainining is 3.0$\nFixed $\\nu={DEFAULT_NU}$", fontsize=14)
+    axes[1].set_title(r"Sensitivity to Growth Rate ($\rho$)", pad=10)
     axes[1].set_ylabel("") # Shared Y
     axes[1].set_yscale("log")
-    axes[1].legend(title="$\\rho$ Value", loc='upper right')
+    axes[1].grid(True, which='both', linestyle='--', alpha=0.3, linewidth=0.5)
+    
+    axes[1].legend(title=r"$\rho$ Value", loc='best', framealpha=0.9, fontsize=9)
 
     plt.tight_layout()
     save_path = OUTPUT_DIR / "physics_ablation_lownoise.pdf"
