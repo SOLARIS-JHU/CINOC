@@ -26,8 +26,8 @@ from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 import flax.serialization
 
-from examples.ns2d.centralized.dynamics import unroll_controlled
-from examples.ns2d.centralized.train import (
+from examples.density.centralized.dynamics import unroll_controlled
+from examples.density.centralized.train import (
     N_AGENTS, T_STEPS, PUSH_MAX, SIGMA_PUSH, BUOYANCY, FEATURES
 )
 from models.policy_ns2d import NS2DControlNet
@@ -61,7 +61,7 @@ def setup_style():
 
 def rollout_uncontrolled(smoke_init, xi_init, rho_target, T_steps, Nx, Ny, dt, buoyancy):
     """Rollout with zero control inputs (natural dynamics only)."""
-    from examples.ns2d.centralized.dynamics import ns2d_step_jax
+    from examples.density.centralized.dynamics import ns2d_step_jax
     
     def step_fn(carry, _):
         smoke, xi = carry

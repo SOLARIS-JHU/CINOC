@@ -20,8 +20,8 @@ import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
 import flax.serialization
-from examples.ns2d.centralized.dynamics import unroll_controlled
-from examples.ns2d.centralized.train import (
+from examples.density.centralized.dynamics import unroll_controlled
+from examples.density.centralized.train import (
     N_AGENTS, T_STEPS, PUSH_MAX, SIGMA_INJECT, SIGMA_PUSH, BUOYANCY, FEATURES
 )
 from models.policy_ns2d import NS2DControlNet

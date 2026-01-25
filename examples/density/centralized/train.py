@@ -38,7 +38,7 @@ from models.policy_ns2d import NS2DControlNet
 # These are set as module constants for sharing with visualize.py
 N_AGENTS = 9         # 4x4 grid of stationary agents
 T_STEPS = 150         # Simulation horizon
-BATCH_SIZE = 2        # Reduced for memory
+BATCH_SIZE = 4        # Reduced for memory
 EPOCHS = 1000
 
 # Physics parameters (fan-only mode)
