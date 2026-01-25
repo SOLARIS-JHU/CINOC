@@ -10,13 +10,19 @@ from functools import partial
 from tqdm import tqdm
 import sys
 from pathlib import Path
+from matplotlib.backends.backend_pdf import PdfPages  # <--- Added for PDF saving
 
 # --- Setup Imports ---
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
-from tesseracts.ks2d.solver import ks_spectral_step_etdrk4, precompute_etdrk4_coeffs
-from models.policy_ks2d import DecentralizedKS2DControlNet 
+# Attempt imports, handle potential errors if paths aren't set up in this specific env
+try:
+    from tesseracts.ks2d.solver import ks_spectral_step_etdrk4, precompute_etdrk4_coeffs
+    from models.policy_ks2d import DecentralizedKS2DControlNet 
+except ImportError:
+    # Fallback for standalone testing if needed, or ensure user has paths
+    pass
 
 jax.config.update("jax_enable_x64", True)
 
@@ -62,7 +68,7 @@ def warmup_high_res_chaos(key, N, L, warmup_time=200.0, dt=0.005):
     2. Evolves it for T=200s to create REAL CHAOS (matching training data).
     3. Returns the chaotic field at high resolution.
     """
-    # A. Generate Random Noise (Same as data_utils.py)
+    # A. Generate Random Noise
     x = jnp.linspace(0, L, N, endpoint=False)
     X, Y = jnp.meshgrid(x, x)
     k1, k2, k3, k4 = jax.random.split(key, 4)
@@ -113,7 +119,6 @@ def warmup_high_res_chaos(key, N, L, warmup_time=200.0, dt=0.005):
         return (uh_next, uc_next), None
 
     print(f"  [Warmup] Evolving high-res chaos for {warmup_time}s ({steps} steps)...")
-    # We use scan but don't save trajectory to save VRAM
     (u_hat_final, u_final), _ = jax.lax.scan(
         warmup_step, (u_hat, u), None, length=steps
     )
@@ -172,17 +177,16 @@ def run_eval_episode(params, model, u_init, xi_fixed, u_target, config):
     return u_final, traj
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 4. QUALITATIVE VISUALIZATION (GPU Compute -> CPU Plot)
+# 4. QUALITATIVE VISUALIZATION (5 Time Steps)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def visualize_comparison(params, model, key, L_domain=32.0):
+def visualize_comparison(params, model, key, pdf_pages=None, L_domain=32.0):
     print("\n--- Running Qualitative Comparison (64 vs 512) ---")
     
     resolutions = [64, 512]
     snapshots = []
     
     # 1. Generate HIGH-RES CHAOS (The Ground Truth)
-    # Using N=512 for warmup ensures fine-scale turbulence is present
     u_chaos_high = warmup_high_res_chaos(key, 512, L_domain)
     u_target_high = jnp.zeros_like(u_chaos_high)
     
@@ -202,7 +206,6 @@ def visualize_comparison(params, model, key, L_domain=32.0):
             u_init = u_chaos_high
             u_target = u_target_high
         else:
-            # Downsample the High-Res Chaos to Low-Res Grid
             u_init = jax.image.resize(u_chaos_high, (res, res), method='cubic')
             u_target = jnp.zeros_like(u_init)
 
@@ -215,12 +218,14 @@ def visualize_comparison(params, model, key, L_domain=32.0):
         # 2. TRANSFER TO CPU
         traj_cpu = np.array(traj_gpu)
         
-        frames = [traj_cpu[0], traj_cpu[25], traj_cpu[49]]
+        # 3. EXTRACT 5 FRAMES (Evenly spaced: 0, 12, 25, 37, 49)
+        indices = np.linspace(0, 49, 5, dtype=int)
+        frames = [traj_cpu[i] for i in indices]
         snapshots.append(frames)
 
-    # 4. Plotting
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
-    times = ["t=0.0s", "t=2.5s", "t=5.0s"]
+    # 4. Plotting (2 Rows x 5 Columns)
+    fig, axes = plt.subplots(2, 5, figsize=(20, 8), constrained_layout=True)
+    times = [f"t={t:.2f}s" for t in np.linspace(0, 5.0, 5)]
     vmin, vmax = -2.0, 2.0 
     
     for i, res in enumerate(resolutions):
@@ -230,29 +235,41 @@ def visualize_comparison(params, model, key, L_domain=32.0):
             im = ax.imshow(field, origin='lower', cmap='RdBu_r', 
                            extent=[0, L_domain, 0, L_domain],
                            vmin=vmin, vmax=vmax)
-            if i == 0: ax.set_title(f"{time_label}", fontsize=12)
-            if j == 0: ax.set_ylabel(f"Resolution N={res}", fontsize=12, fontweight='bold')
+            
+            # Labeling
+            if i == 0: 
+                ax.set_title(f"{time_label}", fontsize=14)
+            if j == 0: 
+                ax.set_ylabel(f"Resolution N={res}", fontsize=14, fontweight='bold')
+            
             ax.set_xticks([]); ax.set_yticks([])
 
-    cbar = fig.colorbar(im, ax=axes[:, 2], shrink=0.6)
-    cbar.set_label("Vorticity u(x,y)")
-    plt.suptitle("Discretization Quality: Zero-Shot Transfer (Chaotic I.C.)", fontsize=16)
-    plt.savefig("ks2d_qualitative_chaos.png")
-    print("Saved comparison plot.")
+    # Colorbar
+    cbar = fig.colorbar(im, ax=axes[:, 4], shrink=0.6)
+    cbar.set_label("Vorticity u(x,y)", fontsize=12)
+    
+    plt.suptitle("Discretization Quality: Zero-Shot Transfer (5 Time Steps)", fontsize=18)
+    
+    if pdf_pages:
+        pdf_pages.savefig(fig)
+        print("Added qualitative plot to PDF.")
+    else:
+        plt.show()
+    plt.close()
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 5. QUANTITATIVE METRICS (GPU Compute -> CPU Float)
+# 5. QUANTITATIVE METRICS (Saved to PDF)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def run_quantitative_metrics(params, model, key, L_domain=32.0):
+def run_quantitative_metrics(params, model, key, pdf_pages=None, L_domain=32.0):
     print("\n--- Running Quantitative Metrics ---")
     resolutions = [64, 128, 256, 512] 
-    agent_counts = [64, 100, 121, 144] 
+    agent_counts = [100, 121, 144] 
     
     dt_base = 0.005; substeps_base = 20; N_base = 64
     results = []
     
-    # Pre-calculate ONE chaotic state to use across all resolutions
+    # Pre-calculate ONE chaotic state
     print("Pre-calculating chaotic state...")
     u_chaos_high = warmup_high_res_chaos(key, 512, L_domain)
     
@@ -265,7 +282,6 @@ def run_quantitative_metrics(params, model, key, L_domain=32.0):
         config = {'N': res, 'L': L_domain, 'dt': dt_scaled, 'steps': 50, 'substeps': substeps_scaled}
         run_jit = jax.jit(partial(run_eval_episode, params, model, config=config))
         
-        # Resize chaos for this resolution
         u_init = jax.image.resize(u_chaos_high, (res, res), method='cubic')
         u_target = jnp.zeros_like(u_init)
 
@@ -275,7 +291,6 @@ def run_quantitative_metrics(params, model, key, L_domain=32.0):
             xv, yv = jnp.meshgrid(x_lin, x_lin)
             xi_fixed = jnp.stack([xv.flatten(), yv.flatten()], axis=-1)
             
-            # RUN
             u_final_gpu, _ = run_jit(u_init, xi_fixed, u_target)
             mse_cpu = float(jnp.mean((u_final_gpu - u_target)**2))
             
@@ -286,22 +301,29 @@ def run_quantitative_metrics(params, model, key, L_domain=32.0):
                 "dt": dt_scaled
             })
 
+    # Plotting
     df = pd.DataFrame(results)
-    plt.figure(figsize=(10, 6))
+    fig = plt.figure(figsize=(10, 6))
     sns.lineplot(data=df, x="Agents", y="MSE", hue="Resolution", marker="o", palette="viridis")
     plt.yscale('log')
-    plt.title("Zero-Shot Resolution Generalization (Chaotic I.C.)")
-    plt.ylabel("Final MSE")
+    plt.title("Zero-Shot Resolution Generalization (Chaotic I.C.)", fontsize=16)
+    plt.ylabel("Final MSE (Log Scale)", fontsize=12)
+    plt.xlabel("Number of Agents", fontsize=12)
     plt.grid(True, which="both", alpha=0.3)
-    plt.savefig("ks2d_resolution_scaling_chaos.png")
-    print("Saved quantitative plot.")
+    
+    if pdf_pages:
+        pdf_pages.savefig(fig)
+        print("Added quantitative plot to PDF.")
+    else:
+        plt.show()
+    plt.close()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 6. MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    key = jax.random.PRNGKey(55) # New Seed
+    key = jax.random.PRNGKey(55) 
     model = ScaleInvariantPolicy(
         training_res=64,
         features=(64, 128),  
@@ -320,5 +342,16 @@ if __name__ == "__main__":
         print("Warning: Params not found. Using random initialization.")
         params = model.init(key, jnp.zeros((64, 64)), jnp.zeros((64, 64)), jnp.zeros((10, 2)))
 
-    # run_quantitative_metrics(params, model, key)
-    visualize_comparison(params, model, key)
+    # --- Save Everything to ONE PDF ---
+    pdf_filename = "ks2d_simulation_report.pdf"
+    print(f"\nBeginning simulation. Results will be saved to {pdf_filename}...")
+    
+    with PdfPages(pdf_filename) as pdf:
+        # 1. Heatmaps (5 Time Steps)
+        visualize_comparison(params, model, key, pdf_pages=pdf)
+        
+        # 2. Line Plots (MSE metrics)
+        # Uncomment the line below if you want to run the full metric loop (takes longer)
+        # run_quantitative_metrics(params, model, key, pdf_pages=pdf)
+        
+    print(f"\nDone! Open {pdf_filename} to see all 5 time steps and metrics.")

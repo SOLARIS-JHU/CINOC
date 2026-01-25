@@ -83,7 +83,7 @@ def main():
     T_steps = 300
     
     # Sweep range for Zero-Shot Evaluation
-    n_eval_list = [9, 16, 25, 36, 49, 64, 81, 100]
+    n_eval_list = [9, 16, 25, 36, 49, 64, 81, 100, 121, 144, 196, 256, 324, 400, 484, 576, 676, 784, 900, 1024]
     
     model = DecentralizedHeat2DControlNet(features=(16, 32))
     dynamics = PDEDynamics(solver_ts="", policy_apply_fn=model.apply, use_tesseract=False)

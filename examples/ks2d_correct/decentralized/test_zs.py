@@ -143,8 +143,7 @@ def main():
     pool_size = 100   # Pool of initial conditions
     
     # Zero-Shot Sweep (Perfect Squares for regular grids)
-    # 36 (6x6), 64 (8x8), 100 (10x10), 144 (12x12), 196 (14x14), 256 (16x16)
-    n_eval_list = [144, 196, 256, 324, 400, 484, 576, 676, 784, 900, 1024]
+    n_eval_list = [144, 196, 256, 324, 400, 484, 576, 676, 784]
     
     # Model Setup
     model = DecentralizedKS2DControlNet(

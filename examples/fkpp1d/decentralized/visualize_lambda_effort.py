@@ -20,7 +20,7 @@ from pathlib import Path
 from functools import partial
 from tqdm import trange
 from tesseract_core import Tesseract
-# NEW IMPORT for formatting
+import matplotlib.cm as cm
 from matplotlib.ticker import ScalarFormatter
 
 # Add project root to sys.path
@@ -138,7 +138,10 @@ def run_comparison(solver_ts, n_agents_list, lambda_list, n_pde, T_steps, z_init
 # --- 4. Plotting (Updated for 3 Subplots) ---
 def plot_conjecture_results_separated(df, window_label):
     plt.style.use('seaborn-v0_8-paper')
-    colors = ['#2c3e50', '#2980b9', '#27ae60', '#e67e22']
+    colors = [
+    '#2c3e50', '#2980b9', '#27ae60', '#e67e22', 
+    '#8e44ad', '#c0392b', '#d35400'
+]
     
     # Common helper for formatting effort axes
     def format_effort_axis(ax):
@@ -156,9 +159,9 @@ def plot_conjecture_results_separated(df, window_label):
                      label=f'$\lambda_u={l}$', color=colors[i], linewidth=2)
     
     ax1.set_title("Zero-Shot Scalability: Tracking MSE", fontsize=12, fontweight='bold')
-    ax1.set_xlabel("Number of Agents ($N$)", fontsize=10)
+    ax1.set_xlabel("Number of Agents ($M$)", fontsize=10)
     ax1.set_ylabel("Final $L^2$ Error", fontsize=10)
-    ax1.axvline(x=20, color='red', linestyle='--', alpha=0.5, label='Training $N$')
+    ax1.axvline(x=20, color='red', linestyle='--', alpha=0.5, label='Training $M$')
     ax1.grid(True, which="both", ls="--", alpha=0.3)
     ax1.legend()
     fig1.tight_layout()
@@ -172,7 +175,7 @@ def plot_conjecture_results_separated(df, window_label):
                    label=f'$\lambda_u={l}$', color=colors[i], linewidth=2)
     
     ax2.set_title(f"Steady-State Effort: $\sum u_i^2$", fontsize=12, fontweight='bold')
-    ax2.set_xlabel("Number of Agents ($N$)", fontsize=10)
+    ax2.set_xlabel("Number of Agents ($M$)", fontsize=10)
     ax2.set_ylabel("Mean $\sum u_i^2$", fontsize=10)
     format_effort_axis(ax2)
     fig2.tight_layout()
@@ -186,7 +189,7 @@ def plot_conjecture_results_separated(df, window_label):
                    label=f'$\lambda_u={l}$', color=colors[i], linewidth=2)
     
     ax3.set_title(f"Steady-State Effort: $\sum |u_i|$", fontsize=12, fontweight='bold')
-    ax3.set_xlabel("Number of Agents ($N$)", fontsize=10)
+    ax3.set_xlabel("Number of Agents ($M$)", fontsize=10)
     ax3.set_ylabel("Mean $\sum |u_i|$", fontsize=10)
     format_effort_axis(ax3)
     fig3.tight_layout()
@@ -198,7 +201,7 @@ def plot_conjecture_results_separated(df, window_label):
 
 def main():
     n_pde, T_steps = 100, 300
-    lambda_list = [5e-2, 1e-1, 0.5, 1]
+    lambda_list = [1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 0.5, 1]
     n_agents_list = [15, 20, 30, 40, 50, 60]
     WINDOW_RATIO = 0.7
 
