@@ -27,7 +27,7 @@ from tqdm import trange, tqdm
 import flax.serialization
 import numpy as np
 
-from examples.ns2d.decentralized.dynamics import unroll_with_full_loss, unroll_controlled
+from examples.density.decentralized.dynamics import unroll_with_full_loss, unroll_controlled
 from models.policy_ns2d import DecentralizedNS2DControlNet
 
 
@@ -52,12 +52,12 @@ FEATURES = (32, 32, 64)  #(32, 32, 64)# CNN feature channels - keep same
 PATCH_SIZE = 12      
 
 # Loss weights
-W_HOLD = 3.0      #3   # TERMINAL: smoke must stay at target (time-weighted Wasserstein)
-W_COLL = 10.0         # Avoid other agents
+W_HOLD = 4.0      #3   # TERMINAL: smoke must stay at target (time-weighted Wasserstein)
+W_COLL = 14.0         # Avoid other agents
 W_BOUND = 10.0        # Stay in domain
 W_SMOOTH = 0.1        # Velocity smoothness
 W_EFFORT = 0.001      # Control energy
-W_MASS = 5.0        #5 # Preserve smoke mass #30
+W_MASS = 6.0        #5 # Preserve smoke mass #30
 R_SAFE = 0.15         # Safe radius for collision
 
 
