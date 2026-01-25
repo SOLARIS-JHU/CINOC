@@ -137,7 +137,7 @@ def plot_comprehensive(df, title, filename):
     # 1. Prettify Labels
     def prettify(name):
         if "baseline" in name: return "Baseline"
-        clean = name.replace("actuator_only", "Actuator").replace("state_only", "State")
+        clean = name.replace("actuator_only", "Actuator").replace("state_only", "Sensor")
         clean = clean.replace("_", " ")
         clean = clean.replace("p", ".")
         # e.g. "Actuator 0.5"
@@ -231,7 +231,7 @@ def run_all_scenarios():
             df_res.to_csv(EXPERIMENT_DIR / f"metrics_{sc_name}.csv", index=False)
             
             # Generate Plot
-            title_str = f"Robustness in {sc_name.replace('_', ' ')} Env ($\sigma_u={env_cfg['u']}, \sigma_z={env_cfg['z']}$)"
+            title_str = f"Robustness in {sc_name.replace('_', ' ')} Env ($\\sigma_u={env_cfg['u']}, \\sigma_z={env_cfg['z']}$)"
             file_str = f"plot_robustness_{sc_name}_0.001.pdf"
             
             plot_comprehensive(df_res, title_str, file_str)

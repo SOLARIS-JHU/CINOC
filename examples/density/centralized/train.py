@@ -26,7 +26,7 @@ from tqdm import trange, tqdm
 import flax.serialization
 import numpy as np
 
-from examples.ns2d.centralized.dynamics import unroll_with_full_loss, unroll_controlled
+from examples.density.centralized.dynamics import unroll_with_full_loss, unroll_controlled
 from models.policy_ns2d import NS2DControlNet
 
 
