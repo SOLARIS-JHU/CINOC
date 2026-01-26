@@ -319,10 +319,6 @@ if __name__ == "__main__":
     test_data = np.load(data_dir / 'test_data.npz', allow_pickle=True)
     config = np.load(data_dir / 'config.npz', allow_pickle=True)
     
-    sample_idx = 0
-    smoke_init = jnp.array(test_data['rho_init'][sample_idx])
-    rho_target = jnp.array(test_data['rho_target'][sample_idx])
-    
     # Agent grid
     n_side = int(np.sqrt(n_agents))
     xi_init = jnp.stack(jnp.meshgrid(
@@ -330,48 +326,61 @@ if __name__ == "__main__":
         jnp.linspace(0.15, 1.0, n_side)
     ), axis=-1).reshape(-1, 2)
     
-    # 4. Run Simulations
-    print(f"\nRunning controlled trajectory ({T_steps} steps)...")
-    smoke_traj_ctrl, xi_traj_ctrl, vel_traj_ctrl = unroll_controlled(
-        smoke_init, xi_init, rho_target, params, model.apply, T_steps,
-        Nx=Nx, Ny=Ny, dt=dt, buoyancy=BUOYANCY,
-        sigma_push=SIGMA_PUSH, push_max=PUSH_MAX
-    )
+    # Number of test cases to process
+    n_samples = min(30, len(test_data['rho_init']))
+    print(f"\nProcessing {n_samples} test cases...")
     
-    print(f"Running uncontrolled trajectory ({T_steps} steps)...")
-    smoke_traj_unctrl, xi_traj_unctrl, _ = rollout_uncontrolled(
-        smoke_init, xi_init, T_steps, Nx, Ny, dt, BUOYANCY
-    )
-    
-    # 5. Compute Metrics
-    print("\nComputing metrics...")
-    
-    # Wasserstein distance over time
-    def compute_wasserstein_at_t(smoke_t):
-        return compute_wasserstein_loss(smoke_t, rho_target)
-    
-    wasserstein_ctrl = jax.vmap(compute_wasserstein_at_t)(smoke_traj_ctrl)
-    wasserstein_unctrl = jax.vmap(compute_wasserstein_at_t)(smoke_traj_unctrl)
-    
-    # Agent speeds
-    speeds_ctrl = jnp.sqrt(jnp.sum(vel_traj_ctrl**2, axis=-1))
-    avg_speed = jnp.mean(speeds_ctrl, axis=1)
-    
-    # Control intensity (velocity magnitude)
-    control_intensity = jnp.mean(jnp.sqrt(jnp.sum(vel_traj_ctrl**2, axis=-1)), axis=1)
-    
-    print(f"  Final Wasserstein (Controlled):   {float(wasserstein_ctrl[-1]):.4f}")
-    print(f"  Final Wasserstein (Uncontrolled): {float(wasserstein_unctrl[-1]):.4f}")
-    
-    # 6. Generate Figure
-    print("\nGenerating paper figure...")
-    create_paper_figure(
-        smoke_traj_ctrl, smoke_traj_unctrl, xi_traj_ctrl, vel_traj_ctrl,
-        rho_target, wasserstein_ctrl, wasserstein_unctrl, 
-        avg_speed, control_intensity,
-        save_name="density_centralized_paper_figure.pdf"
-    )
+    for sample_idx in range(n_samples):
+        print(f"\n{'='*60}")
+        print(f"Processing Sample {sample_idx + 1}/{n_samples}")
+        print("="*60)
+        
+        smoke_init = jnp.array(test_data['rho_init'][sample_idx])
+        rho_target = jnp.array(test_data['rho_target'][sample_idx])
+        
+        # 4. Run Simulations
+        print(f"▶ Running controlled trajectory ({T_steps} steps)...")
+        smoke_traj_ctrl, xi_traj_ctrl, vel_traj_ctrl = unroll_controlled(
+            smoke_init, xi_init, rho_target, params, model.apply, T_steps,
+            Nx=Nx, Ny=Ny, dt=dt, buoyancy=BUOYANCY,
+            sigma_push=SIGMA_PUSH, push_max=PUSH_MAX
+        )
+        
+        print(f"▶ Running uncontrolled trajectory ({T_steps} steps)...")
+        smoke_traj_unctrl, xi_traj_unctrl, _ = rollout_uncontrolled(
+            smoke_init, xi_init, T_steps, Nx, Ny, dt, BUOYANCY
+        )
+        
+        # 5. Compute Metrics
+        print("▶ Computing metrics...")
+        
+        # Wasserstein distance over time
+        def compute_wasserstein_at_t(smoke_t):
+            return compute_wasserstein_loss(smoke_t, rho_target)
+        
+        wasserstein_ctrl = jax.vmap(compute_wasserstein_at_t)(smoke_traj_ctrl)
+        wasserstein_unctrl = jax.vmap(compute_wasserstein_at_t)(smoke_traj_unctrl)
+        
+        # Agent speeds
+        speeds_ctrl = jnp.sqrt(jnp.sum(vel_traj_ctrl**2, axis=-1))
+        avg_speed = jnp.mean(speeds_ctrl, axis=1)
+        
+        # Control intensity (velocity magnitude)
+        control_intensity = jnp.mean(jnp.sqrt(jnp.sum(vel_traj_ctrl**2, axis=-1)), axis=1)
+        
+        print(f"  Final Wasserstein (Controlled):   {float(wasserstein_ctrl[-1]):.4f}")
+        print(f"  Final Wasserstein (Uncontrolled): {float(wasserstein_unctrl[-1]):.4f}")
+        
+        # 6. Generate Figure
+        print("▶ Generating paper figure...")
+        save_name = f"density_centralized_paper_figure_sample_{sample_idx + 1}.pdf"
+        create_paper_figure(
+            smoke_traj_ctrl, smoke_traj_unctrl, xi_traj_ctrl, vel_traj_ctrl,
+            rho_target, wasserstein_ctrl, wasserstein_unctrl, 
+            avg_speed, control_intensity,
+            save_name=save_name
+        )
     
     print("\n" + "=" * 60)
-    print("Done!")
+    print(f"Done! Generated {n_samples} paper figures.")
     print("=" * 60)
