@@ -1,6 +1,7 @@
 """
 Paper-Quality Visualization for Lambda-Effort Analysis in FKPP1D Control.
 Reads pre-computed CSV data and generates publication-ready plots.
+Matching the style from visualization_updates branch.
 """
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -19,12 +20,12 @@ def setup_paper_style():
         "font.family": "serif",
         "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
         "mathtext.fontset": "stix",
-        "font.size": 11,
-        "axes.labelsize": 12,
-        "axes.titlesize": 12,
-        "legend.fontsize": 10,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
+        "font.size": 24,
+        "axes.labelsize": 24,
+        "axes.titlesize": 24,
+        "legend.fontsize": 24,
+        "xtick.labelsize": 24,
+        "ytick.labelsize": 24,
         "axes.linewidth": 0.8,
         "lines.linewidth": 1.5,
         "savefig.dpi": 300,
@@ -37,68 +38,77 @@ def plot_lambda_effort_paper(df):
     """Generate paper-quality plots for lambda-effort analysis."""
     setup_paper_style()
     
-    colors = ['#2c3e50', '#2980b9', '#27ae60', '#e67e22']
-    markers = ['o', 's', '^', 'D']
+    # Colors matching the reference image (7 lambda values)
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2']
     
-    def format_effort_axis(ax):
-        ax.yaxis.set_major_formatter(ScalarFormatter())
-        ax.yaxis.get_major_formatter().set_scientific(False)
-        ax.yaxis.get_major_formatter().set_useOffset(False)
-        ax.grid(True, which="both", ls="--", alpha=0.3)
-        ax.legend(framealpha=0.9)
-        for spine in ['top', 'right']:
-            ax.spines[spine].set_visible(False)
-
+    # Sort lambda values for consistent ordering
+    lambda_vals = sorted(df['lambda'].unique())
+    
     # --- Plot 1: Tracking MSE ---
-    fig1, ax1 = plt.subplots(figsize=(6, 5))
-    for i, l in enumerate(df['lambda'].unique()):
-        sub = df[df['lambda'] == l]
-        ax1.semilogy(sub['n_agents'], sub['mse'], marker=markers[i % len(markers)], 
-                     markersize=6, label=f'$\\lambda_u={l}$', 
-                     color=colors[i % len(colors)], linewidth=2)
+    fig1, ax1 = plt.subplots(figsize=(7, 4.5))
+    for i, l in enumerate(lambda_vals):
+        sub = df[df['lambda'] == l].sort_values('n_agents')
+        ax1.semilogy(sub['n_agents'], sub['mse'], marker='s', markersize=5, 
+                     label=f'$\\lambda_u = {l}$', color=colors[i % len(colors)], linewidth=1.5)
     
-    ax1.set_xlabel("Number of Agents ($N$)")
-    ax1.set_ylabel("Final $L^2$ Error")
-    ax1.axvline(x=20, color='red', linestyle='--', alpha=0.5, label='Training $N$')
-    ax1.grid(True, which="both", ls="--", alpha=0.3)
-    ax1.legend(framealpha=0.9)
-    for spine in ['top', 'right']:
-        ax1.spines[spine].set_visible(False)
-    fig1.tight_layout()
-    fig1.savefig(FIGURES_DIR / "paper_scaling_mse.pdf")
-    fig1.savefig(FIGURES_DIR / "paper_scaling_mse.png", dpi=300)
+    ax1.set_title("Zero-Shot Scalability: Tracking MSE", fontsize=13, fontweight='bold')
+    ax1.set_xlabel("Number of Agents ($M$)", fontsize=11)
+    ax1.set_ylabel("Final $L^2$ Error", fontsize=11)
+    ax1.set_xscale('log')
+    ax1.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), framealpha=0.95, edgecolor='none')
+    ax1.grid(True, which="both", ls="-", alpha=0.2)
+    # Complete border
+    for spine in ax1.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(0.8)
+    fig1.subplots_adjust(right=0.75)  # Make room for legend
+    fig1.savefig(FIGURES_DIR / "paper_scaling_mse.pdf", bbox_inches='tight')
+    fig1.savefig(FIGURES_DIR / "paper_scaling_mse.png", dpi=300, bbox_inches='tight')
     print(f"✓ Saved: paper_scaling_mse.pdf/png")
 
     # --- Plot 2: Squared Effort ---
-    fig2, ax2 = plt.subplots(figsize=(6, 5))
-    for i, l in enumerate(df['lambda'].unique()):
-        sub = df[df['lambda'] == l]
-        ax2.loglog(sub['n_agents'], sub['total_effort_sq'], marker=markers[i % len(markers)],
-                   markersize=6, label=f'$\\lambda_u={l}$', 
-                   color=colors[i % len(colors)], linewidth=2)
+    fig2, ax2 = plt.subplots(figsize=(9, 5))  # Wider figure
+    for i, l in enumerate(lambda_vals):
+        sub = df[df['lambda'] == l].sort_values('n_agents')
+        ax2.loglog(sub['n_agents'], sub['total_effort_sq'], marker='s', markersize=5,
+                   label=f'$\\lambda_u = {l}$', color=colors[i % len(colors)], linewidth=1.5)
     
-    ax2.set_xlabel("Number of Agents ($N$)")
-    ax2.set_ylabel("Mean $\\sum u_i^2$")
-    format_effort_axis(ax2)
-    fig2.tight_layout()
-    fig2.savefig(FIGURES_DIR / "paper_scaling_effort_sq.pdf")
-    fig2.savefig(FIGURES_DIR / "paper_scaling_effort_sq.png", dpi=300)
+    ax2.set_title(r"Steady-State Effort: $\sum u_i^2$", fontsize=24)
+    ax2.set_xlabel("Number of Agents ($M$)", fontsize=24)
+    ax2.set_ylabel(r"Mean $\sum u_i^2$", fontsize=24)
+    # Fix x-axis ticks to avoid overlap
+    ax2.set_xticks([15, 20, 30, 40, 50, 60])
+    ax2.set_xticklabels(['15', '20', '30', '40', '50', '60'])
+    ax2.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), framealpha=0.95, edgecolor='none', fontsize=24)
+    ax2.grid(True, which="both", ls="-", alpha=0.2)
+    # Complete border
+    for spine in ax2.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(0.8)
+    fig2.subplots_adjust(right=0.72)  # Make room for legend
+    fig2.savefig(FIGURES_DIR / "paper_scaling_effort_sq.pdf", bbox_inches='tight')
+    fig2.savefig(FIGURES_DIR / "paper_scaling_effort_sq.png", dpi=300, bbox_inches='tight')
     print(f"✓ Saved: paper_scaling_effort_sq.pdf/png")
 
     # --- Plot 3: Absolute Effort ---
-    fig3, ax3 = plt.subplots(figsize=(6, 5))
-    for i, l in enumerate(df['lambda'].unique()):
-        sub = df[df['lambda'] == l]
-        ax3.loglog(sub['n_agents'], sub['total_effort_abs'], marker=markers[i % len(markers)],
-                   markersize=6, label=f'$\\lambda_u={l}$', 
-                   color=colors[i % len(colors)], linewidth=2)
+    fig3, ax3 = plt.subplots(figsize=(7, 4.5))
+    for i, l in enumerate(lambda_vals):
+        sub = df[df['lambda'] == l].sort_values('n_agents')
+        ax3.loglog(sub['n_agents'], sub['total_effort_abs'], marker='s', markersize=5,
+                   label=f'$\\lambda_u = {l}$', color=colors[i % len(colors)], linewidth=1.5)
     
-    ax3.set_xlabel("Number of Agents ($N$)")
-    ax3.set_ylabel("Mean $\\sum |u_i|$")
-    format_effort_axis(ax3)
-    fig3.tight_layout()
-    fig3.savefig(FIGURES_DIR / "paper_scaling_effort_abs.pdf")
-    fig3.savefig(FIGURES_DIR / "paper_scaling_effort_abs.png", dpi=300)
+    ax3.set_title(r"Steady-State Effort: $\sum |u_i|$", fontsize=13, fontweight='bold')
+    ax3.set_xlabel("Number of Agents ($M$)", fontsize=11)
+    ax3.set_ylabel(r"Mean $\sum |u_i|$", fontsize=11)
+    ax3.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), framealpha=0.95, edgecolor='none')
+    ax3.grid(True, which="both", ls="-", alpha=0.2)
+    # Complete border
+    for spine in ax3.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(0.8)
+    fig3.subplots_adjust(right=0.75)  # Make room for legend
+    fig3.savefig(FIGURES_DIR / "paper_scaling_effort_abs.pdf", bbox_inches='tight')
+    fig3.savefig(FIGURES_DIR / "paper_scaling_effort_abs.png", dpi=300, bbox_inches='tight')
     print(f"✓ Saved: paper_scaling_effort_abs.pdf/png")
     
     plt.close('all')

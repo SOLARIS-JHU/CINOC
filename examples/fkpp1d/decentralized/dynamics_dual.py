@@ -4,7 +4,7 @@ Enables controlled simulations via a ControlNet policy, either through Tesseract
 """ 
 import jax
 import jax.numpy as jnp
-from tesseract_jax import apply_tesseract
+# from tesseract_jax import apply_tesseract
 from jax.flatten_util import ravel_pytree
 
 import tesseracts.solverFKPP_decentralized.solver as solver 

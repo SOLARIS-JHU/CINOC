@@ -19,7 +19,7 @@ import optax
 from pathlib import Path
 from functools import partial
 from tqdm import trange
-from tesseract_core import Tesseract
+# from tesseract_core import Tesseract
 # NEW IMPORT for formatting
 from matplotlib.ticker import ScalarFormatter
 
