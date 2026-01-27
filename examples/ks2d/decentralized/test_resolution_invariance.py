@@ -246,7 +246,7 @@ def visualize_comparison(params, model, key, pdf_pages=None, L_domain=32.0):
 
     # Colorbar
     cbar = fig.colorbar(im, ax=axes[:, 4], shrink=0.6)
-    cbar.set_label("Vorticity u(x,y)", fontsize=12)
+    cbar.set_label("u(x,y)", fontsize=12)
     
     plt.suptitle("Discretization Quality: Zero-Shot Transfer (5 Time Steps)", fontsize=18)
     
