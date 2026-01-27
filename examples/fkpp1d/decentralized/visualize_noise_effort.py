@@ -70,7 +70,7 @@ def evaluate_effort_scaling(solver_ts):
     print(f"Analyzing metrics from step {start_step} to {T_STEPS} (Steady State)")
 
     for n_agents in TEST_AGENT_COUNTS:
-        print(f"Evaluating N={n_agents}...")
+        print(f"Evaluating M={n_agents}...")
         
         # Interpolate positions for this agent count
         xi_init = jnp.linspace(0.2, 0.8, n_agents)

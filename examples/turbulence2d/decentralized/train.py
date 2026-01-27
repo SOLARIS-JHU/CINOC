@@ -161,7 +161,7 @@ if __name__ == "__main__":
     
     # Optimizer
     lr_schedule = optax.warmup_cosine_decay_schedule(
-        init_value=1e-4, peak_value=5e-4, warmup_steps=20, # was 50 !!! 
+        init_value=1e-4, peak_value=5e-4, warmup_steps=20,
         decay_steps=CONFIG['epochs'], end_value=1e-6
     )
     optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(lr_schedule))

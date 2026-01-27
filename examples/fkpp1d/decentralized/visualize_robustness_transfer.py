@@ -55,6 +55,7 @@ ALL_MODELS = [
 # --- Scenario Definitions ---
 # The 8 scenarios requested by the user
 SCENARIOS = {
+    "Noise-Free":  {"u": 0.0, "z": 0.0},
     # 1-3: State Noise Only (Low, Mid, High)
     "State_Low":  {"u": 0.0, "z": 0.01},
     "State_Mid":  {"u": 0.0, "z": 0.05},
@@ -124,52 +125,60 @@ def evaluate_scenario(scenario_name, noise_u, noise_z, loaded_params, dynamics):
     print(" Done.")
     return pd.DataFrame(results)
 
+
 def plot_comprehensive(df, title, filename):
     """
-    Plots all models with distinct color coding:
-    - Baseline: Black/Grey
-    - Actuator Models: Reds
-    - State Models: Blues
+    Plots all models using STIX fonts (Times New Roman equivalent)
+    and increased text sizes for better legibility.
     """
+    # 1. Set Style and High-Compatibility Font Config
     plt.style.use('seaborn-v0_8-whitegrid')
-    plt.figure(figsize=(10, 6))
     
-    # 1. Prettify Labels
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["STIXGeneral", "DejaVu Serif", "Times New Roman", "serif"],
+        "mathtext.fontset": "stix", # Match math symbols to the text font
+        "font.size": 16,             
+        "axes.titlesize": 21,        
+        "axes.labelsize": 18,        
+        "xtick.labelsize": 16,       
+        "ytick.labelsize": 16,       
+        "legend.fontsize": 15,       
+        "legend.title_fontsize": 16,
+    })
+
+    plt.figure(figsize=(11, 7)) # Slightly larger figure for larger text
+    
+    # 2. Prettify Labels
     def prettify(name):
         if "baseline" in name: return "Baseline"
         clean = name.replace("actuator_only", "Actuator").replace("state_only", "Sensor")
         clean = clean.replace("_", " ")
         clean = clean.replace("p", ".")
-        # e.g. "Actuator 0.5"
         return clean
 
     df['Label'] = df['Model'].apply(prettify)
     
-    # 2. Assign Colors manually
+    # 3. Assign Colors
     unique_labels = sorted(df['Label'].unique())
     palette = {}
-    
-    # Color definitions
-    actuator_colors = sns.color_palette("Reds", n_colors=4)[1:] # Skip lightest
-    state_colors = sns.color_palette("Blues", n_colors=4)[1:]   # Skip lightest
+    actuator_colors = sns.color_palette("Reds", n_colors=4)[1:] 
+    state_colors = sns.color_palette("Blues", n_colors=4)[1:]   
     
     a_idx, s_idx = 0, 0
-    
     for label in unique_labels:
         if "Baseline" in label:
-            palette[label] = "#333333" # Dark Grey
+            palette[label] = "#333333"
         elif "Actuator" in label:
-            # Assign increasing red intensity
             palette[label] = actuator_colors[a_idx % len(actuator_colors)]
             a_idx += 1
-        elif "State" in label:
-            # Assign increasing blue intensity
+        elif "State" in label or "Sensor" in label:
             palette[label] = state_colors[s_idx % len(state_colors)]
             s_idx += 1
         else:
             palette[label] = "gray"
 
-    # 3. Plot
+    # 4. Plot
     sns.lineplot(
         data=df, 
         x="Agents", 
@@ -177,22 +186,26 @@ def plot_comprehensive(df, title, filename):
         hue="Label", 
         style="Label", 
         markers=True, 
-        markersize=8, 
-        linewidth=2.0,
+        markersize=10, 
+        linewidth=2.5, 
         palette=palette
     )
     
-    plt.axvline(x=30, color='gray', linestyle='--', alpha=0.5, label="Training Scale (N=30)")
-    plt.title(title, fontsize=14)
-    plt.ylabel("Final Tracking Error (MSE)", fontsize=12)
-    plt.xlabel("Deployment Agent Count", fontsize=12)
+    plt.axvline(x=30, color='gray', linestyle='--', alpha=0.5, label="Training Scale (M=30)")
+    
+    plt.title(title, pad=20) # Added padding for the larger title
+    plt.ylabel("Final Tracking Error (MSE)")
+    plt.xlabel("Deployment Agent Count")
     plt.yscale('log')
-    plt.legend(title="Policy Type", bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    # Adjust legend to not overlap the plot
+    plt.legend(title="Policy Type", bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0.)
     
     save_path = EXPERIMENT_DIR / filename
-    plt.savefig(save_path, bbox_inches='tight')
+    plt.savefig(save_path, bbox_inches='tight', dpi=300)
     plt.close()
     print(f"Saved plot to {save_path}")
+    
 
 def run_all_scenarios():
     print("Loading Models...")
