@@ -101,9 +101,30 @@ def run_ablation(dynamics, params, z_init_batch, z_target_batch, nu_list, rho_li
             
     return pd.DataFrame(results)
 
+def get_style_maps(df, param_col, baseline_val, cmap_name):
+    """
+    Helper to create palette and dashes so the baseline is always a black solid line.
+    """
+    unique_vals = sorted(df[param_col].unique())
+    baseline_str = str(baseline_val)
+    
+    # 1. Palette: Map baseline to black, others to colormap
+    non_baseline = [v for v in unique_vals if v != baseline_str]
+    colors = sns.color_palette(cmap_name, len(non_baseline))
+    palette = dict(zip(non_baseline, colors))
+    palette[baseline_str] = 'black'
+    
+    # 2. Dashes: Map baseline to Solid (""), others to Dashed ((2, 2))
+    dashes = {v: (2, 2) for v in non_baseline}
+    dashes[baseline_str] = "" 
+
+    # 3. Order: Ensure baseline plots last (on top)
+    hue_order = non_baseline + [baseline_str]
+    
+    return palette, dashes, hue_order
+
 if __name__ == "__main__":
     # 1. Initialize Dynamics Wrapper
-    # Note: We pass use_tesseract=False to use local JAX execution for the ablation
     solver_ts = Tesseract.from_image("solver_fkpp1d_decentralized:latest")
     model = DecentralizedControlNet(features=(64, 64))
     dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
@@ -132,22 +153,33 @@ if __name__ == "__main__":
     sns.set_theme(style="whitegrid")
     fig, axes = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
 
-    # Plot Nu Ablation
+    # --- Plot Nu Ablation ---
+    # Baseline for Nu is 0.005
+    pal_nu, dash_nu, order_nu = get_style_maps(df_nu, "Value", DEFAULT_NU, "viridis")
+    
     sns.lineplot(
         ax=axes[0], data=df_nu, x="Agents", y="MSE", 
-        hue="Value", style="Value", markers=True, markersize=8, linewidth=2.5, palette="viridis"
+        hue="Value", style="Value", 
+        palette=pal_nu, dashes=dash_nu, hue_order=order_nu, style_order=order_nu,
+        markers=True, markersize=8, linewidth=2.5
     )
-    axes[0].set_title(f"Sensitivity to Diffusion ($\\nu$). $\\nu for trainining is 0.005$\nFixed $\\rho={DEFAULT_RHO}$", fontsize=14)
+    axes[0].set_title(f"Sensitivity to Diffusion ($\\nu$)\nTraining $\\nu={DEFAULT_NU}$ (Black Line)", fontsize=14)
     axes[0].set_ylabel("Final Tracking Error (MSE)", fontsize=12)
     axes[0].set_yscale("log")
     axes[0].legend(title="$\\nu$ Value", loc='upper right')
 
-    # Plot Rho Ablation
+    # --- Plot Rho Ablation ---
+    # Baseline for Rho is 3 (integer from list), DEFAULT_RHO is 3.0 (float)
+    # The dataframe uses str(val), so we need to match the integer input 3
+    pal_rho, dash_rho, order_rho = get_style_maps(df_rho, "Value", 3, "magma")
+    
     sns.lineplot(
         ax=axes[1], data=df_rho, x="Agents", y="MSE", 
-        hue="Value", style="Value", markers=True, markersize=8, linewidth=2.5, palette="magma"
+        hue="Value", style="Value", 
+        palette=pal_rho, dashes=dash_rho, hue_order=order_rho, style_order=order_rho,
+        markers=True, markersize=8, linewidth=2.5
     )
-    axes[1].set_title(f"Sensitivity to Growth Rate ($\\rho$). $\\rho for trainining is 3.0$\nFixed $\\nu={DEFAULT_NU}$", fontsize=14)
+    axes[1].set_title(f"Sensitivity to Growth Rate ($\\rho$)\nTraining $\\rho={DEFAULT_RHO}$ (Black Line)", fontsize=14)
     axes[1].set_ylabel("") # Shared Y
     axes[1].set_yscale("log")
     axes[1].legend(title="$\\rho$ Value", loc='upper right')
