@@ -12,6 +12,8 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib import colors as mcolors
+import matplotlib.patheffects as pe
 import numpy as np
 import sys
 import flax.serialization
@@ -118,19 +120,19 @@ def rollout_uncontrolled(z_init, xi_init, T_steps):
 
 def get_initial_conditions(key):
     """Generate initial and target temperature fields."""
-    k1, k2 = jax.random.split(key, 2)
+    _, k1, k2 = jax.random.split(key, 3)
     
     xx, yy, z_init = data_utils.generate_grf_2d(k1, n_points=CONFIG['n_grid'])
     _, _, z_target = data_utils.generate_grf_2d(k2, n_points=CONFIG['n_grid'])
     
-    # Initialize agents in grid pattern
+    # Initialize agents in grid pattern at exact positions [0.2, 0.4, 0.6, 0.8]
     n_side = int(jnp.sqrt(CONFIG['n_agents']))
-    spacing = 0.8 / (n_side + 1)
+    positions_1d = jnp.array([0.2, 0.4, 0.6, 0.8])[:n_side]
     xi_init = []
     for i in range(n_side):
         for j in range(n_side):
             if len(xi_init) < CONFIG['n_agents']:
-                xi_init.append([0.1 + spacing*(i+1), 0.1 + spacing*(j+1)])
+                xi_init.append([float(positions_1d[i]), float(positions_1d[j])])
     xi_init = jnp.array(xi_init)
     
     return z_init, z_target, xi_init
@@ -139,13 +141,30 @@ def get_initial_conditions(key):
 # 4. PLOTTING FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def plot_snapshot_row(ax_list, z_traj, xi_traj, timesteps, v_lim, show_agents=False):
+def plot_snapshot_row(
+    ax_list,
+    z_traj,
+    xi_traj,
+    timesteps,
+    v_lim,
+    show_agents=False,
+    z_ref=None,
+    ref_alphas=None,
+    ref_linewidths=None,
+):
     """Plot a row of temperature field snapshots using contourf."""
     N = CONFIG['n_grid']
     x = np.linspace(0, 1, N)
     y = np.linspace(0, 1, N)
     X, Y = np.meshgrid(x, y)
     levels = np.linspace(-v_lim, v_lim, 100)
+    ref_levels = np.linspace(-v_lim, v_lim, 11)
+    zero_gap = 0.02 * v_lim
+    ref_levels = ref_levels[np.abs(ref_levels) >= zero_gap]
+    if ref_levels.size < 4:
+        ref_levels = np.linspace(-v_lim, v_lim, 11)
+    z_ref_np = np.array(z_ref) if z_ref is not None else None
+    norm = mcolors.Normalize(vmin=-v_lim, vmax=v_lim)
     
     cf = None
     for i, t in enumerate(timesteps):
@@ -158,12 +177,33 @@ def plot_snapshot_row(ax_list, z_traj, xi_traj, timesteps, v_lim, show_agents=Fa
             cmap=cmc.vik,  # Crameri diverging colormap
             extend='both'
         )
+
+        # Reference target contour (dashed, lightly shaded)
+        if z_ref_np is not None:
+            alpha = ref_alphas[i] if ref_alphas is not None else 1.0
+            lw = ref_linewidths[i] if ref_linewidths is not None else 0.8
+            cs = ax.contour(
+                X, Y, z_ref_np,
+                levels=ref_levels,
+                cmap=cmc.vik,
+                norm=norm,
+                linestyles='--',
+                linewidths=lw,
+                alpha=alpha,
+                zorder=6
+            )
+            shadow_effect = (
+                pe.SimpleLineShadow(offset=(0.4, -0.4), shadow_color='black', alpha=0.15)
+                if hasattr(pe, "SimpleLineShadow")
+                else pe.Stroke(linewidth=lw + 0.3, foreground='black', alpha=0.15)
+            )
+            cs.set_path_effects([shadow_effect, pe.Normal()])
         
         # Optionally show agent positions
         if show_agents and xi_traj is not None:
             xi = xi_traj[t]
-            ax.scatter(xi[:, 0], xi[:, 1], c='#404040', s=12, 
-                       edgecolors='white', linewidths=0.5, zorder=10, alpha=0.9)
+            ax.scatter(xi[:, 0], xi[:, 1], c='#E74C3C', s=16,
+                       edgecolors='white', linewidths=0.8, zorder=10, alpha=1.0)
         
         # Set axis limits and aspect ratio
         ax.set_xlim(0, 1)
@@ -254,14 +294,28 @@ def create_paper_figure(z_traj_ctrl, z_traj_unctrl, xi_traj_ctrl, z_target,
     v_lim = max(float(jnp.max(jnp.abs(z_traj_ctrl))),
                 float(jnp.max(jnp.abs(z_traj_unctrl)))) * 0.9
     
-    # Plot Natural Evolution (top row)
-    cf = plot_snapshot_row(ax_row1, z_traj_unctrl, None, 
-                           CONFIG['snapshot_times'], v_lim, show_agents=False)
+    # Plot Natural Evolution (top row) - no reference contour
+    cf = plot_snapshot_row(
+        ax_row1,
+        z_traj_unctrl,
+        None,
+        CONFIG['snapshot_times'],
+        v_lim,
+        show_agents=False,
+        z_ref=None,
+    )
     ax_row1[2].set_title("Natural Evolution", pad=4)
     
     # Plot Controlled Evolution (middle row)
-    plot_snapshot_row(ax_row2, z_traj_ctrl, xi_traj_ctrl,
-                      CONFIG['snapshot_times'], v_lim, show_agents=True)
+    plot_snapshot_row(
+        ax_row2,
+        z_traj_ctrl,
+        xi_traj_ctrl,
+        CONFIG['snapshot_times'],
+        v_lim,
+        show_agents=True,
+        z_ref=z_target,
+    )
     ax_row2[2].set_title("Controlled Evolution", pad=4)
     
     # Add colorbar on the right (spans rows 0-1)

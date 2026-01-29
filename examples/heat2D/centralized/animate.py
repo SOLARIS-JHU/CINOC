@@ -292,14 +292,14 @@ def main():
         xx, yy, z_init = data_utils.generate_grf_2d(k1, n_points=n_grid)
         _, _, z_target = data_utils.generate_grf_2d(k2, n_points=n_grid)
 
-        # Initialize agents in grid pattern
+        # Initialize agents in grid pattern at exact positions [0.2, 0.4, 0.6, 0.8]
         n_side = int(jnp.sqrt(n_agents))
-        spacing = 0.8 / (n_side + 1)
+        positions_1d = jnp.array([0.2, 0.4, 0.6, 0.8])[:n_side]
         xi_init = []
         for i in range(n_side):
             for j in range(n_side):
                 if len(xi_init) < n_agents:
-                    xi_init.append([0.1 + spacing*(i+1), 0.1 + spacing*(j+1)])
+                    xi_init.append([float(positions_1d[i]), float(positions_1d[j])])
         xi_init = jnp.array(xi_init)
 
         print("▶ Running controlled trajectory...")

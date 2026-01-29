@@ -133,15 +133,14 @@ with solver_ts:
 
     print(f"Dataset ready: {z_init_all.shape}")
 
-    # Initialize agents in grid pattern
+    # Initialize agents in grid pattern at exact positions [0.2, 0.4, 0.6, 0.8]
     n_side = int(jnp.sqrt(n_agents))
-    spacing = 0.8 / (n_side + 1)
+    positions_1d = jnp.array([0.2, 0.4, 0.6, 0.8])[:n_side]
     xi_template = []
     for i in range(n_side):
         for j in range(n_side):
             if len(xi_template) < n_agents:
-                xi_template.append([0.1 + spacing * (i+1),
-                                   0.1 + spacing * (j+1)])
+                xi_template.append([float(positions_1d[i]), float(positions_1d[j])])
     xi_init_single = jnp.array(xi_template)
     xi_init_batch = jnp.tile(xi_init_single, (batch_size, 1, 1))
 

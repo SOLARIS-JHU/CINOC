@@ -44,13 +44,14 @@ else:
     epochs = 500
     print(f"Config: {n_samples} samples, {epochs} epochs, T={T_steps} steps")
 
-R_safe = 0.08  # Collision radius in 2D
+R_safe = 0.08  # Collision radius for agent-agent in 2D
+R_safe_obstacle = 0.04  # Safety distance for obstacles
 
 # Obstacle configuration: [x_center, y_center, radius]
 OBSTACLES = jnp.array([
-    [0.15, 0.50, 0.08],   # Left middle (outside agent grid)
-    [0.85, 0.50, 0.08],   # Right middle (outside agent grid)
-    [0.50, 0.15, 0.08],   # Bottom middle (outside agent grid)
+    [0.30, 0.30, 0.06],   # Diagonal line obstacle 1
+    [0.50, 0.50, 0.06],   # Diagonal line obstacle 2 (center)
+    [0.70, 0.70, 0.06],   # Diagonal line obstacle 3
 ])
 
 model = DecentralizedHeat2DControlNet(features=(16, 32))
@@ -101,16 +102,16 @@ def loss_fn(params, z_init, xi_init, z_target, dynamics):
     diff_obstacles = xi_traj[:, :, None, :] - obstacle_centers[None, None, :, :]
     dists_obstacles = jnp.sqrt(jnp.sum(diff_obstacles**2, axis=-1) + 1e-8)  # (T, M, K)
 
-    # Collision threshold: agent must be at least (R_safe + obstacle_radius) away
-    # For each agent-obstacle pair, penalize if distance < R_safe + r_obstacle
-    safety_distances = R_safe + obstacle_radii[None, None, :]  # (1, 1, K)
+    # Collision threshold: agent must be at least (R_safe_obstacle + obstacle_radius) away
+    # For each agent-obstacle pair, penalize if distance < R_safe_obstacle + r_obstacle
+    safety_distances = R_safe_obstacle + obstacle_radii[None, None, :]  # (1, 1, K)
     l_coll_obstacles = jnp.mean(jnp.maximum(0, safety_distances - dists_obstacles) ** 2)
 
     # 5. Acceleration penalty
     l_accel = jnp.mean(jnp.sum(jnp.diff(v_traj, axis=0)**2, axis=-1))
 
     total_loss = 5.0 * l_track + 0.001 * l_effort + 100.0 * l_bound + \
-                 20.0 * l_coll_agents + 50.0 * l_coll_obstacles + 0.1 * l_accel
+                 20.0 * l_coll_agents + 100.0 * l_coll_obstacles + 0.1 * l_accel
 
     return total_loss, (l_track, l_effort, l_coll_agents, l_coll_obstacles, l_bound)
 
@@ -152,15 +153,14 @@ if n_grid_actual != n_grid:
 
 print(f"Dataset ready: {z_init_all.shape}")
 
-# Initialize agents in grid pattern
+# Initialize agents in grid pattern at exact positions [0.2, 0.4, 0.6, 0.8]
 n_side = int(jnp.sqrt(n_agents))
-spacing = 0.8 / (n_side + 1)
+positions_1d = jnp.array([0.2, 0.4, 0.6, 0.8])[:n_side]
 xi_template = []
 for i in range(n_side):
     for j in range(n_side):
         if len(xi_template) < n_agents:
-            xi_template.append([0.1 + spacing * (i+1),
-                               0.1 + spacing * (j+1)])
+            xi_template.append([float(positions_1d[i]), float(positions_1d[j])])
 xi_init_single = jnp.array(xi_template)
 xi_init_batch = jnp.tile(xi_init_single, (batch_size, 1, 1))
 
