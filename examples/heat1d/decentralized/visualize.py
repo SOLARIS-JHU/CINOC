@@ -98,8 +98,20 @@ def main():
         if n_agents <= 8: ax4.legend(loc='right', fontsize='xx-small')
         
     plt.tight_layout()
-    plt.savefig('decentralized_visual_results_new.png')
-    print("Visualization saved to decentralized_visual_results_new.png")
+
+    # --- SAVE LOGIC START ---
+    # Define output directory
+    output_dir = Path("figures/images/vanilla_viz")
+    
+    # Create directory if it doesn't exist (parents=True creates intermediate dirs)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Define full path
+    save_path = output_dir / 'decentralized_visual_results.png'
+    
+    plt.savefig(save_path)
+    print(f"Visualization saved to {save_path}")
+    # --- SAVE LOGIC END ---
 
 if __name__ == "__main__":
     main()

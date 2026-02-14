@@ -66,12 +66,11 @@ def main():
     n_eval_list = [15, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 140, 160, 180, 200]
     epochs = 500 # 500 iterations as requested
     
-    # No Tesseract solver context; local JAX solving only
-    solver_ts = "NA"
     model = DecentralizedControlNet(features=(64, 64))
     optimizer = optax.adam(1e-3)
     
-    dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
+    # CHANGED: Initialize Dynamics without 'solver_ts' or 'use_tesseract'
+    dynamics = PDEDynamics(policy_apply_fn=model.apply)
     
     # Initialize params template
     key = jax.random.PRNGKey(42)
@@ -111,6 +110,7 @@ def main():
     for n in n_eval_list:
         print(f"Evaluating Zero-Shot N={n}...")
         xi_init = jnp.linspace(0.1, 0.9, n)
+        # Note: dynamics.unroll_controlled no longer requires flattening
         z_traj, _, _, _ = dynamics.unroll_controlled(test_z_init, xi_init, test_z_target, params, 300)
         mse = jnp.mean((z_traj[-1] - test_z_target)**2)
         results.append({"n_agents": n, "mse": float(mse)})
@@ -145,8 +145,8 @@ def main():
     ax.legend()
     
     plt.tight_layout()
-    fig.savefig(PLOT_PATH)
-    print(f"Plot saved to {PLOT_PATH}")
+    # fig.savefig(PLOT_PATH)
+    # print(f"Plot saved to {PLOT_PATH}")
 
 if __name__ == "__main__":
     main()

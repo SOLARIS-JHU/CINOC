@@ -16,9 +16,10 @@ from functools import partial
 # Force CPU for visualization
 jax.config.update("jax_platform_name", "cpu")
 
-# Add project root to sys.path
-script_dir = Path(__file__).resolve().parent.parent.parent.parent
-sys.path.append(str(script_dir))
+# --- Path Setup for Imports ---
+# We need the project root to import 'dynamics_dual', 'models', etc.
+project_root = Path(__file__).resolve().parent.parent.parent.parent
+sys.path.append(str(project_root))
 
 from dynamics_dual import PDEDynamics
 from models.policy import DecentralizedControlNet
@@ -50,14 +51,23 @@ def setup_style():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def load_params(model, filepath, n_pde=100, n_agents=8):
-    with open(filepath, 'rb') as f:
+    # Try to find the params file in the current script directory first
+    current_dir = Path(__file__).resolve().parent
+    file_path_obj = current_dir / filepath
+    
+    if not file_path_obj.exists():
+        # Fallback to just the filename (if run from local dir)
+        file_path_obj = Path(filepath)
+
+    with open(file_path_obj, 'rb') as f:
         serialized_bytes = f.read()
     key = jax.random.PRNGKey(0)
     init_params = model.init(key, jnp.zeros((n_pde,)), jnp.zeros((n_pde,)), jnp.zeros((n_agents,)))
     return flax.serialization.from_bytes(init_params, serialized_bytes)
 
-def rollout_uncontrolled(z_init, xi_init, T_steps):
+def rollout_uncontrolled(z_init, xi_init, dynamics, T_steps):
     """Rollout with zero control inputs."""
+    # Local import to avoid dependency issues if solver isn't strictly needed globally
     from tesseracts.solverHeat_decentralized import solver
     
     def step_fn(carry, _):
@@ -65,10 +75,13 @@ def rollout_uncontrolled(z_init, xi_init, T_steps):
         u_zero = jnp.zeros_like(xi_curr)
         v_zero = jnp.zeros_like(xi_curr)
         z_next, xi_next = solver.implicit_step(z_curr, xi_curr, u_zero, v_zero)
-        return (z_next, xi_next), (z_next, xi_next)
+        return (z_next, xi_next), z_next # Return state for scan
     
-    _, (z_traj, xi_traj) = jax.lax.scan(step_fn, (z_init, xi_init), None, length=T_steps)
-    return z_traj, xi_traj
+    # We only need z trajectory for visualization usually, but here we return z
+    # Note: The scan function structure depends on what you need. 
+    # Adjusted to return z_traj matching the structure used in main.
+    _, z_traj = jax.lax.scan(step_fn, (z_init, xi_init), None, length=T_steps)
+    return z_traj, xi_init # xi doesn't change in uncontrolled if v=0
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ANIMATION FUNCTIONS
@@ -208,7 +221,7 @@ def create_side_by_side_animation(x_grid, z_target, z_traj_ctrl, z_traj_unctrl,
         return [line_unctrl, line_ctrl, line_mse_unctrl, line_mse_ctrl, time_marker, time_text] + agent_markers + agent_lines
     
     anim = animation.FuncAnimation(fig, animate, init_func=init,
-                                    frames=total_frames, interval=1000/fps, blit=True)
+                                   frames=total_frames, interval=1000/fps, blit=True)
     
     return fig, anim
 
@@ -224,7 +237,7 @@ def main():
     # Initialize model directly
     model = DecentralizedControlNet(features=(64, 64))
     
-    # Initialize Dynamics without Tesseract argument
+    # Initialize Dynamics
     dynamics = PDEDynamics(policy_apply_fn=model.apply)
     
     try:
@@ -235,7 +248,6 @@ def main():
         return
     
     x_grid = jnp.linspace(0, 1, n_pde)
-    # SAME random seed as centralized for comparison
     key = jax.random.PRNGKey(42)
     
     print("\n▶ Generating trajectories...")
@@ -250,7 +262,7 @@ def main():
     )
     
     # Uncontrolled rollout
-    z_traj_unctrl, xi_traj_unctrl = rollout_uncontrolled(z_init, xi_init, T_steps)
+    z_traj_unctrl, _ = rollout_uncontrolled(z_init, xi_init, dynamics, T_steps)
     
     print(f"✓ Generated {T_steps} timesteps")
     
@@ -261,18 +273,27 @@ def main():
         xi_traj_ctrl, u_traj, fps=fps, duration=duration
     )
     
+    # --- SAVE LOGIC START ---
+    # Define output directory relative to this script
+    current_script_dir = Path(__file__).resolve().parent
+    output_dir = current_script_dir / "figures" / "images" / "animations"
+    
+    print(f"Ensuring output directory exists: {output_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # --- SAVE LOGIC END ---
+
     # Save as GIF
     print("▶ Saving GIF (this may take a minute)...")
-    gif_path = 'heat_decentralized_animation.gif'
+    gif_path = output_dir / 'heat_decentralized_animation.gif'
     anim.save(gif_path, writer='pillow', fps=fps)
     print(f"✓ Saved: {gif_path}")
     
     # Save as MP4 (if ffmpeg is available)
     try:
         print("▶ Saving MP4...")
-        mp4_path = 'heat_decentralized_animation.mp4'
+        mp4_path = output_dir / 'heat_decentralized_animation.mp4'
         anim.save(mp4_path, writer='ffmpeg', fps=fps, 
-                    extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
+                  extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
         print(f"✓ Saved: {mp4_path}")
     except Exception as e:
         print(f"⚠ MP4 save failed (ffmpeg may not be installed): {e}")

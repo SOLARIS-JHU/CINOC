@@ -6,6 +6,7 @@ Three rows:
 - Bottom Row: Metrics (MSE, Agent Speed, Control Intensity)
 
 Style: contourf (Space-Time), cmcrameri colormaps, Times New Roman fonts.
+Requires: pip install cmcrameri
 """
 
 import jax
@@ -21,9 +22,10 @@ import cmcrameri.cm as cmc
 # Force CPU for visualization
 jax.config.update("jax_platform_name", "cpu")
 
-# --- Path Setup ---
-script_dir = Path(__file__).resolve().parent.parent.parent.parent
-sys.path.append(str(script_dir))
+# --- Path Setup for Imports ---
+# We need the project root to import 'dynamics_dual', 'models', etc.
+project_root = Path(__file__).resolve().parent.parent.parent.parent
+sys.path.append(str(project_root))
 
 # Imports using the high-level wrappers
 from dynamics_dual import PDEDynamics
@@ -38,7 +40,7 @@ CONFIG = {
     'n_pde': 100,
     'n_agents': 8,
     'T_steps': 300,
-    'params_file': 'decentralized_params.msgpack'
+    'params_file': 'decentralized_params.msgpack' 
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -47,9 +49,21 @@ CONFIG = {
 
 def setup_paper_style():
     """Configure matplotlib for publication-quality figures."""
+    font_family = "serif"
+    font_serif = ["Times New Roman", "Times", "DejaVu Serif"]
+    
+    try:
+        import matplotlib.font_manager
+        found = matplotlib.font_manager.findfont("Times New Roman")
+        if "Times New Roman" not in found:
+             print("Note: 'Times New Roman' font not found. Falling back to default serif.")
+             font_serif = ["DejaVu Serif"]
+    except:
+        pass
+
     plt.rcParams.update({
-        "font.family": "serif",
-        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "font.family": font_family,
+        "font.serif": font_serif,
         "mathtext.fontset": "stix",
         "font.size": 11,
         "axes.labelsize": 12,
@@ -111,7 +125,7 @@ def plot_spacetime_heatmap(ax, z_traj, xi_traj, title, v_min=None, v_max=None, s
     t = np.arange(T)
     X, Time = np.meshgrid(x, t)
     
-    # Use 'lajolla' (diverging/sequential) or 'batlow'
+    # Use 'lajolla' (diverging/sequential) or 'batlow' from cmcrameri
     cmap = cmc.lajolla
     
     # Contourf plot
@@ -222,9 +236,10 @@ def create_paper_figure(z_traj_ctrl, z_traj_unctrl, xi_traj_ctrl, z_target,
     plt.savefig(save_name, dpi=300, bbox_inches='tight')
     print(f"✓ Saved paper figure to {save_name}")
     
-    png_name = save_name.replace('.pdf', '.png')
-    plt.savefig(png_name, dpi=300, bbox_inches='tight')
-    print(f"✓ Saved PNG version to {png_name}")
+    # Handle PNG replacement robustly using pathlib
+    png_path = Path(save_name).with_suffix('.png')
+    plt.savefig(png_path, dpi=300, bbox_inches='tight')
+    print(f"✓ Saved PNG version to {png_path}")
     plt.close()
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -240,12 +255,19 @@ if __name__ == "__main__":
     model = DecentralizedControlNet(features=(64, 64))
     
     # 2. Setup Dynamics Wrappers
-    # Clean initialization without solver_ts or use_tesseract flags
     dynamics_ctrl = PDEDynamics(policy_apply_fn=model.apply)
     dynamics_nat = PDEDynamics(policy_apply_fn=zero_policy_apply)
 
     # 3. Load Parameters
-    params = load_params(model, CONFIG['params_file'])
+    # Define current directory for finding parameters and saving output
+    current_dir = Path(__file__).resolve().parent
+
+    params_path = current_dir / CONFIG['params_file']
+    if not params_path.exists():
+         # Fallback just in case
+         params_path = CONFIG['params_file']
+
+    params = load_params(model, params_path)
     
     if params is None:
         # Init random params if file missing so script still runs
@@ -285,11 +307,26 @@ if __name__ == "__main__":
     print(f"  Final MSE (Controlled):   {float(mse_ctrl[-1]):.6f}")
     print(f"  Final MSE (Uncontrolled): {float(mse_unctrl[-1]):.6f}")
     
-    # 7. Generate Figure
+    # 7. Generate Figure with Output Folder Logic
     print("\nGenerating paper figure...")
+
+    # --- SAVE LOGIC START ---
+    # Define output directory RELATIVE TO THIS SCRIPT
+    # This puts the folder in the same directory where this .py file lives
+    output_dir = current_dir / "figures" / "images" / "paper_viz"
+
+    # Create directory if it doesn't exist (parents=True creates intermediate dirs)
+    print(f"Ensuring output directory exists: {output_dir.resolve()}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Define full path for the PDF filename
+    full_save_path = output_dir / "heat1d_paper_figure_final.pdf"
+    # --- SAVE LOGIC END ---
+
     create_paper_figure(
         z_traj_ctrl, z_traj_unctrl, xi_traj_ctrl, z_target,
-        mse_ctrl, mse_unctrl, avg_speed, control_intensity
+        mse_ctrl, mse_unctrl, avg_speed, control_intensity,
+        save_name=str(full_save_path) # Pass the full path string
     )
     
 print("\n" + "=" * 60)
