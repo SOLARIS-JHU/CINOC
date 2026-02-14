@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.patches import Circle
 import numpy as np
-from tesseract_core import Tesseract
 import sys
 import flax.serialization
 from pathlib import Path
@@ -222,67 +221,67 @@ def main():
     fps = 30
     duration = 10  # seconds
     
-    solver_ts = Tesseract.from_image("solver_heat_decentralized:latest")
+    # Initialize model directly
+    model = DecentralizedControlNet(features=(64, 64))
     
-    with solver_ts:
-        model = DecentralizedControlNet(features=(64, 64))
-        dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
-        
-        try:
-            params = load_params(model, 'decentralized_params.msgpack', n_pde, n_agents)
-            print(f"✓ Loaded trained parameters ({n_agents} agents)")
-        except FileNotFoundError:
-            print("✗ Error: decentralized_params.msgpack not found")
-            return
-        
-        x_grid = jnp.linspace(0, 1, n_pde)
-        # SAME random seed as centralized for comparison
-        key = jax.random.PRNGKey(42)
-        
-        print("\n▶ Generating trajectories...")
-        key, k1, k2 = jax.random.split(key, 3)
-        _, z_init = data_utils.generate_grf(k1, n_points=n_pde, length_scale=0.2)
-        _, z_target = data_utils.generate_grf(k2, n_points=n_pde, length_scale=0.4)
-        xi_init = jnp.linspace(0.15, 0.85, n_agents)
-        
-        # Controlled rollout
-        z_traj_ctrl, xi_traj_ctrl, u_traj, v_traj = dynamics.unroll_controlled(
-            z_init, xi_init, z_target, params, T_steps
-        )
-        
-        # Uncontrolled rollout
-        z_traj_unctrl, xi_traj_unctrl = rollout_uncontrolled(z_init, xi_init, T_steps)
-        
-        print(f"✓ Generated {T_steps} timesteps")
-        
-        # Create animation
-        print(f"\n▶ Creating animation ({duration}s @ {fps}fps)...")
-        fig, anim = create_side_by_side_animation(
-            x_grid, z_target, z_traj_ctrl, z_traj_unctrl,
-            xi_traj_ctrl, u_traj, fps=fps, duration=duration
-        )
-        
-        # Save as GIF
-        print("▶ Saving GIF (this may take a minute)...")
-        gif_path = 'heat_decentralized_animation.gif'
-        anim.save(gif_path, writer='pillow', fps=fps)
-        print(f"✓ Saved: {gif_path}")
-        
-        # Save as MP4 (if ffmpeg is available)
-        try:
-            print("▶ Saving MP4...")
-            mp4_path = 'heat_decentralized_animation.mp4'
-            anim.save(mp4_path, writer='ffmpeg', fps=fps, 
-                     extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
-            print(f"✓ Saved: {mp4_path}")
-        except Exception as e:
-            print(f"⚠ MP4 save failed (ffmpeg may not be installed): {e}")
-        
-        plt.close()
-        
-        print("\n" + "=" * 60)
-        print("  ANIMATION COMPLETE")
-        print("=" * 60)
+    # Initialize Dynamics without Tesseract argument
+    dynamics = PDEDynamics(policy_apply_fn=model.apply)
+    
+    try:
+        params = load_params(model, 'decentralized_params.msgpack', n_pde, n_agents)
+        print(f"✓ Loaded trained parameters ({n_agents} agents)")
+    except FileNotFoundError:
+        print("✗ Error: decentralized_params.msgpack not found")
+        return
+    
+    x_grid = jnp.linspace(0, 1, n_pde)
+    # SAME random seed as centralized for comparison
+    key = jax.random.PRNGKey(42)
+    
+    print("\n▶ Generating trajectories...")
+    key, k1, k2 = jax.random.split(key, 3)
+    _, z_init = data_utils.generate_grf(k1, n_points=n_pde, length_scale=0.2)
+    _, z_target = data_utils.generate_grf(k2, n_points=n_pde, length_scale=0.4)
+    xi_init = jnp.linspace(0.15, 0.85, n_agents)
+    
+    # Controlled rollout
+    z_traj_ctrl, xi_traj_ctrl, u_traj, v_traj = dynamics.unroll_controlled(
+        z_init, xi_init, z_target, params, T_steps
+    )
+    
+    # Uncontrolled rollout
+    z_traj_unctrl, xi_traj_unctrl = rollout_uncontrolled(z_init, xi_init, T_steps)
+    
+    print(f"✓ Generated {T_steps} timesteps")
+    
+    # Create animation
+    print(f"\n▶ Creating animation ({duration}s @ {fps}fps)...")
+    fig, anim = create_side_by_side_animation(
+        x_grid, z_target, z_traj_ctrl, z_traj_unctrl,
+        xi_traj_ctrl, u_traj, fps=fps, duration=duration
+    )
+    
+    # Save as GIF
+    print("▶ Saving GIF (this may take a minute)...")
+    gif_path = 'heat_decentralized_animation.gif'
+    anim.save(gif_path, writer='pillow', fps=fps)
+    print(f"✓ Saved: {gif_path}")
+    
+    # Save as MP4 (if ffmpeg is available)
+    try:
+        print("▶ Saving MP4...")
+        mp4_path = 'heat_decentralized_animation.mp4'
+        anim.save(mp4_path, writer='ffmpeg', fps=fps, 
+                    extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
+        print(f"✓ Saved: {mp4_path}")
+    except Exception as e:
+        print(f"⚠ MP4 save failed (ffmpeg may not be installed): {e}")
+    
+    plt.close()
+    
+    print("\n" + "=" * 60)
+    print("  ANIMATION COMPLETE")
+    print("=" * 60)
 
 if __name__ == "__main__":
     main()

@@ -17,7 +17,6 @@ import sys
 import flax.serialization
 from pathlib import Path
 import cmcrameri.cm as cmc
-from tesseract_core import Tesseract
 
 # Force CPU for visualization
 jax.config.update("jax_platform_name", "cpu")
@@ -37,10 +36,9 @@ import data_utils
 
 CONFIG = {
     'n_pde': 100,
-    'n_agents': 8,  # Based on your heat1d legacy script
+    'n_agents': 8,
     'T_steps': 300,
-    'params_file': 'decentralized_params.msgpack',
-    'solver_image': 'solver_heat_decentralized:latest'
+    'params_file': 'decentralized_params.msgpack'
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -183,7 +181,7 @@ def plot_metrics_row(ax_list, mse_ctrl, mse_unctrl, avg_speed, control_intensity
 
 def create_paper_figure(z_traj_ctrl, z_traj_unctrl, xi_traj_ctrl, z_target,
                         mse_ctrl, mse_unctrl, avg_speed, control_intensity,
-                        save_name="heat1d_paper_figure.pdf"):
+                        save_name="heat1d_paper_figure__.pdf"):
     setup_paper_style()
     
     fig = plt.figure(figsize=(8, 7.5)) 
@@ -238,66 +236,62 @@ if __name__ == "__main__":
     print("Heat 1D - Paper Figure Generation")
     print("=" * 60)
     
-    # 1. Setup Solver and Model
-    print(f"Initializing Tesseract solver: {CONFIG['solver_image']}")
-    solver_ts = Tesseract.from_image(CONFIG['solver_image'])
+    # 1. Setup Model (No Tesseract Solver needed)
+    model = DecentralizedControlNet(features=(64, 64))
     
-    with solver_ts:
-        model = DecentralizedControlNet(features=(64, 64))
-        
-        # 2. Setup Dynamics Wrappers
-        # Note: use_tesseract=True per your legacy script requirement
-        dynamics_ctrl = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
-        dynamics_nat = PDEDynamics(solver_ts, policy_apply_fn=zero_policy_apply, use_tesseract=False)
+    # 2. Setup Dynamics Wrappers
+    # Clean initialization without solver_ts or use_tesseract flags
+    dynamics_ctrl = PDEDynamics(policy_apply_fn=model.apply)
+    dynamics_nat = PDEDynamics(policy_apply_fn=zero_policy_apply)
 
-        # 3. Load Parameters
-        params = load_params(model, CONFIG['params_file'])
+    # 3. Load Parameters
+    params = load_params(model, CONFIG['params_file'])
+    
+    if params is None:
+        # Init random params if file missing so script still runs
+        key = jax.random.PRNGKey(0)
+        dummy_z = jnp.zeros((CONFIG['n_pde'],))
+        dummy_xi = jnp.zeros((CONFIG['n_agents'],))
+        params = model.init(key, dummy_z, dummy_z, dummy_xi)
+        print("Using initialized (random) parameters for visualization test.")
+    else:
+        print("✓ Parameters loaded successfully")
         
-        if params is None:
-            # Init random params if file missing so script still runs
-            key = jax.random.PRNGKey(0)
-            dummy_z = jnp.zeros((CONFIG['n_pde'],))
-            dummy_xi = jnp.zeros((CONFIG['n_agents'],))
-            params = model.init(key, dummy_z, dummy_z, dummy_xi)
-            print("Using initialized (random) parameters for visualization test.")
-        else:
-            print("✓ Parameters loaded successfully")
-            
-        # 4. Generate Scenario
-        print("\nGenerating test scenario...")
-        key = jax.random.PRNGKey(1234)
-        key, init_key = jax.random.split(key)
-        z_init, z_target, xi_init = get_initial_conditions(init_key)
-        
-        # 5. Run Simulations
-        print(f"\nRunning controlled trajectory ({CONFIG['T_steps']} steps)...")
-        z_traj_ctrl, xi_traj_ctrl, u_traj_ctrl, v_traj_ctrl = dynamics_ctrl.unroll_controlled(
-            z_init, xi_init, z_target, params, CONFIG['T_steps']
-        )
-        
-        print(f"Running natural (uncontrolled) trajectory ({CONFIG['T_steps']} steps)...")
-        z_traj_unctrl, xi_traj_unctrl, _, _ = dynamics_nat.unroll_controlled(
-            z_init, xi_init, z_target, params, CONFIG['T_steps']
-        )
-        
-        # 6. Compute Metrics
-        print("\nComputing metrics...")
-        mse_ctrl = jnp.mean((z_traj_ctrl - z_target[None, :])**2, axis=1)
-        mse_unctrl = jnp.mean((z_traj_unctrl - z_target[None, :])**2, axis=1)
-        
-        avg_speed = jnp.mean(jnp.abs(v_traj_ctrl), axis=1)
-        control_intensity = jnp.mean(jnp.abs(u_traj_ctrl), axis=1)
-        
-        print(f"  Final MSE (Controlled):   {float(mse_ctrl[-1]):.6f}")
-        print(f"  Final MSE (Uncontrolled): {float(mse_unctrl[-1]):.6f}")
-        
-        # 7. Generate Figure
-        print("\nGenerating paper figure...")
-        create_paper_figure(
-            z_traj_ctrl, z_traj_unctrl, xi_traj_ctrl, z_target,
-            mse_ctrl, mse_unctrl, avg_speed, control_intensity
-        )
-        
-    print("\n" + "=" * 60)
-    print("Done!")
-    print("=" * 60)
+    # 4. Generate Scenario
+    print("\nGenerating test scenario...")
+    key = jax.random.PRNGKey(1234)
+    key, init_key = jax.random.split(key)
+    z_init, z_target, xi_init = get_initial_conditions(init_key)
+    
+    # 5. Run Simulations
+    print(f"\nRunning controlled trajectory ({CONFIG['T_steps']} steps)...")
+    z_traj_ctrl, xi_traj_ctrl, u_traj_ctrl, v_traj_ctrl = dynamics_ctrl.unroll_controlled(
+        z_init, xi_init, z_target, params, CONFIG['T_steps']
+    )
+    
+    print(f"Running natural (uncontrolled) trajectory ({CONFIG['T_steps']} steps)...")
+    z_traj_unctrl, xi_traj_unctrl, _, _ = dynamics_nat.unroll_controlled(
+        z_init, xi_init, z_target, params, CONFIG['T_steps']
+    )
+    
+    # 6. Compute Metrics
+    print("\nComputing metrics...")
+    mse_ctrl = jnp.mean((z_traj_ctrl - z_target[None, :])**2, axis=1)
+    mse_unctrl = jnp.mean((z_traj_unctrl - z_target[None, :])**2, axis=1)
+    
+    avg_speed = jnp.mean(jnp.abs(v_traj_ctrl), axis=1)
+    control_intensity = jnp.mean(jnp.abs(u_traj_ctrl), axis=1)
+    
+    print(f"  Final MSE (Controlled):   {float(mse_ctrl[-1]):.6f}")
+    print(f"  Final MSE (Uncontrolled): {float(mse_unctrl[-1]):.6f}")
+    
+    # 7. Generate Figure
+    print("\nGenerating paper figure...")
+    create_paper_figure(
+        z_traj_ctrl, z_traj_unctrl, xi_traj_ctrl, z_target,
+        mse_ctrl, mse_unctrl, avg_speed, control_intensity
+    )
+    
+print("\n" + "=" * 60)
+print("Done!")
+print("=" * 60)

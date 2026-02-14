@@ -245,7 +245,7 @@ def create_comparison_figure(x_grid, z_init, z_target, z_traj_ctrl, z_traj_unctr
     
     plt.tight_layout(rect=[0, 0.06, 1, 1])
     
-    save_path = f'heat_dpc_decentralized_ex{example_idx}.png'
+    save_path = f'heat_dpc_decentralized_ex{example_idx}__.png'
     plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
     print(f"✓ Saved: {save_path}")
     plt.close()
@@ -335,7 +335,7 @@ def create_agent_analysis_figure(xi_traj, u_traj, v_traj, z_traj, z_target, exam
     )
     
     plt.tight_layout(rect=[0, 0.06, 1, 1])
-    save_path = f'heat_dpc_decentralized_agents_ex{example_idx}.png'
+    save_path = f'heat_dpc_decentralized_agents_ex{example_idx}___.png'
     plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
     print(f"✓ Saved: {save_path}")
     plt.close()
@@ -350,61 +350,61 @@ def main():
     n_pde, n_agents, T_steps = 100, 8, 300
     n_examples = 3  # Number of test cases (same as centralized)
     
-    solver_ts = Tesseract.from_image("solver_heat_decentralized:latest")
+    # Initialize model directly
+    model = DecentralizedControlNet(features=(64, 64))
     
-    with solver_ts:
-        model = DecentralizedControlNet(features=(64, 64))
-        dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
+    # Initialize Dynamics without Tesseract argument
+    dynamics = PDEDynamics(policy_apply_fn=model.apply)
+    
+    try:
+        params = load_params(model, 'decentralized_params.msgpack', n_pde, n_agents)
+        print(f"✓ Loaded trained parameters ({n_agents} agents)")
+    except FileNotFoundError:
+        print("✗ Error: decentralized_params.msgpack not found")
+        return
+    
+    x_grid = jnp.linspace(0, 1, n_pde)
+    # SAME random seed as centralized for comparison
+    key = jax.random.PRNGKey(42)
+    
+    saved_files = []
+    
+    for i in range(n_examples):
+        print(f"\n▶ Generating Example {i+1}/{n_examples}...")
         
-        try:
-            params = load_params(model, 'decentralized_params.msgpack', n_pde, n_agents)
-            print(f"✓ Loaded trained parameters ({n_agents} agents)")
-        except FileNotFoundError:
-            print("✗ Error: decentralized_params.msgpack not found")
-            return
+        key, k1, k2 = jax.random.split(key, 3)
+        # SAME initial conditions as centralized
+        _, z_init = data_utils.generate_grf(k1, n_points=n_pde, length_scale=0.15 + i*0.05)
+        _, z_target = data_utils.generate_grf(k2, n_points=n_pde, length_scale=0.35 + i*0.05)
+        xi_init = jnp.linspace(0.15, 0.85, n_agents)
         
-        x_grid = jnp.linspace(0, 1, n_pde)
-        # SAME random seed as centralized for comparison
-        key = jax.random.PRNGKey(42)
+        # Controlled rollout
+        z_traj_ctrl, xi_traj, u_traj, v_traj = dynamics.unroll_controlled(
+            z_init, xi_init, z_target, params, T_steps
+        )
         
-        saved_files = []
+        # Uncontrolled rollout
+        z_traj_unctrl = rollout_uncontrolled(z_init, xi_init, dynamics, T_steps)
         
-        for i in range(n_examples):
-            print(f"\n▶ Generating Example {i+1}/{n_examples}...")
-            
-            key, k1, k2 = jax.random.split(key, 3)
-            # SAME initial conditions as centralized
-            _, z_init = data_utils.generate_grf(k1, n_points=n_pde, length_scale=0.15 + i*0.05)
-            _, z_target = data_utils.generate_grf(k2, n_points=n_pde, length_scale=0.35 + i*0.05)
-            xi_init = jnp.linspace(0.15, 0.85, n_agents)
-            
-            # Controlled rollout
-            z_traj_ctrl, xi_traj, u_traj, v_traj = dynamics.unroll_controlled(
-                z_init, xi_init, z_target, params, T_steps
-            )
-            
-            # Uncontrolled rollout
-            z_traj_unctrl = rollout_uncontrolled(z_init, xi_init, dynamics, T_steps)
-            
-            # Create comparison figure
-            f1 = create_comparison_figure(
-                x_grid, z_init, z_target, z_traj_ctrl, z_traj_unctrl,
-                u_traj, v_traj, xi_traj, T_steps, example_idx=i+1
-            )
-            saved_files.append(f1)
-            
-            # Create agent analysis figure
-            f2 = create_agent_analysis_figure(
-                xi_traj, u_traj, v_traj, z_traj_ctrl, z_target, example_idx=i+1
-            )
-            saved_files.append(f2)
+        # Create comparison figure
+        f1 = create_comparison_figure(
+            x_grid, z_init, z_target, z_traj_ctrl, z_traj_unctrl,
+            u_traj, v_traj, xi_traj, T_steps, example_idx=i+1
+        )
+        saved_files.append(f1)
         
-        print("\n" + "=" * 60)
-        print("  VISUALIZATION COMPLETE")
-        print("=" * 60)
-        print("\nGenerated files:")
-        for f in saved_files:
-            print(f"  • {f}")
+        # Create agent analysis figure
+        f2 = create_agent_analysis_figure(
+            xi_traj, u_traj, v_traj, z_traj_ctrl, z_target, example_idx=i+1
+        )
+        saved_files.append(f2)
+    
+    print("\n" + "=" * 60)
+    print("  VISUALIZATION COMPLETE")
+    print("=" * 60)
+    print("\nGenerated files:")
+    for f in saved_files:
+        print(f"  • {f}")
 
 if __name__ == "__main__":
     main()
