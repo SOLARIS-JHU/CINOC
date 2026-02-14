@@ -5,7 +5,6 @@ to steer the FKPP dynamics towards target states while respecting constraints.
 """
 import jax
 import jax.numpy as jnp
-from tesseract_core import Tesseract
 import sys
 import os
 from pathlib import Path
@@ -24,7 +23,6 @@ from models.policy import DecentralizedControlNet
 from data_utils import generate_grf
 
 # --- 1. Initialization ---
-solver_ts = Tesseract.from_image("solver_heat_decentralized:latest")
 n_pde, n_agents, batch_size = 100, 8, 32
 T_steps = 300
 R_safe = 0.05
@@ -81,76 +79,75 @@ def train_step(params, opt_state, z_init_batch, xi_init_batch, z_target_batch, d
     return params, opt_state, loss, aux
 
 # --- 3. Training Loop ---
-with solver_ts:
-    dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False) # Training without tesseract for speed
+dynamics = PDEDynamics(policy_apply_fn=model.apply)
 
-    print("Generating dataset...")
-    all_keys = jax.random.split(key, 5000)
-    _, z_init_all = jax.vmap(partial(generate_grf, n_points=n_pde, length_scale=0.2))(all_keys)
-    _, z_target_all = jax.vmap(partial(generate_grf, n_points=n_pde, length_scale=0.4))(all_keys)
+print("Generating dataset...")
+all_keys = jax.random.split(key, 5000)
+_, z_init_all = jax.vmap(partial(generate_grf, n_points=n_pde, length_scale=0.2))(all_keys)
+_, z_target_all = jax.vmap(partial(generate_grf, n_points=n_pde, length_scale=0.4))(all_keys)
+
+# Initialize agents spatially across the domain [0.2, 0.8]
+xi_init_single = jnp.linspace(0.2, 0.8, n_agents)
+xi_init_batch = jnp.tile(xi_init_single, (batch_size, 1))
+
+metrics = []
+start_time = time.time()
+
+for epoch in trange(epochs):
+    # Sample batch
+    idx = jax.random.randint(key, (batch_size,), 0, 5000)
+    z_init_b, z_target_b = z_init_all[idx], z_target_all[idx]
+
+    # Single train step handles everything through the Tesseract VJP
+    params, opt_state, loss, aux = train_step(
+        params, opt_state, z_init_b, xi_init_batch, z_target_b, dynamics
+    )
     
-    # Initialize agents spatially across the domain [0.2, 0.8]
-    xi_init_single = jnp.linspace(0.2, 0.8, n_agents)
-    xi_init_batch = jnp.tile(xi_init_single, (batch_size, 1))
+    if epoch % 10 == 0:
+        metrics.append((epoch, loss, *aux))
+        print(f"Epoch {epoch} | Loss: {loss:.4f} | Track: {aux[0]:.4f}")
 
-    metrics = []
-    start_time = time.time()
-    
-    for epoch in trange(epochs):
-        # Sample batch
-        idx = jax.random.randint(key, (batch_size,), 0, 5000)
-        z_init_b, z_target_b = z_init_all[idx], z_target_all[idx]
+print(f"Training finished in {time.time() - start_time:.2f}s.")
 
-        # Single train step handles everything through the Tesseract VJP
-        params, opt_state, loss, aux = train_step(
-            params, opt_state, z_init_b, xi_init_batch, z_target_b, dynamics
-        )
-        
-        if epoch % 10 == 0:
-            metrics.append((epoch, loss, *aux))
-            print(f"Epoch {epoch} | Loss: {loss:.4f} | Track: {aux[0]:.4f}")
+# --- 4. Plotting and Saving ---
+metrics = jnp.array(metrics)
+epochs_recorded = metrics[:, 0]
 
-    print(f"Training finished in {time.time() - start_time:.2f}s.")
-    
-    # --- 4. Plotting and Saving ---
-    metrics = jnp.array(metrics)
-    epochs_recorded = metrics[:, 0]
-    
-    plt.figure(figsize=(12, 8))
-    
-    # Subplot 1: Total Loss
-    plt.subplot(2, 2, 1)
-    plt.plot(epochs_recorded, metrics[:, 1], color='black', label='Total Loss')
-    plt.yscale('log')
-    plt.title('Total Loss (Log Scale)')
-    plt.legend()
+plt.figure(figsize=(12, 8))
 
-    # Subplot 2: Performance vs Constraints (Tracking and Boundary)
-    plt.subplot(2, 2, 2)
-    plt.plot(epochs_recorded, metrics[:, 2], label='Tracking')
-    plt.plot(epochs_recorded, metrics[:, 5], label='Boundary', alpha=0.7)
-    plt.yscale('log')
-    plt.title('Performance vs Constraints')
-    plt.legend()
+# Subplot 1: Total Loss
+plt.subplot(2, 2, 1)
+plt.plot(epochs_recorded, metrics[:, 1], color='black', label='Total Loss')
+plt.yscale('log')
+plt.title('Total Loss (Log Scale)')
+plt.legend()
 
-    # Subplot 3: Effort Loss
-    plt.subplot(2, 2, 3)
-    plt.plot(epochs_recorded, metrics[:, 3], color='green', label='Effort')
-    plt.title('Effort Loss')
-    plt.legend()
+# Subplot 2: Performance vs Constraints (Tracking and Boundary)
+plt.subplot(2, 2, 2)
+plt.plot(epochs_recorded, metrics[:, 2], label='Tracking')
+plt.plot(epochs_recorded, metrics[:, 5], label='Boundary', alpha=0.7)
+plt.yscale('log')
+plt.title('Performance vs Constraints')
+plt.legend()
 
-    # Subplot 4: Collision Avoidance
-    plt.subplot(2, 2, 4)
-    plt.plot(epochs_recorded, metrics[:, 4], color='red', label='Collision')
-    plt.title('Collision Avoidance')
-    plt.legend()
+# Subplot 3: Effort Loss
+plt.subplot(2, 2, 3)
+plt.plot(epochs_recorded, metrics[:, 3], color='green', label='Effort')
+plt.title('Effort Loss')
+plt.legend()
 
-    plt.tight_layout()
-    # plt.savefig('decentralized_training.png')
-    # print("Training metrics plotted and saved to decentralized_training.png")
-    
-    # Save parameters
-    import flax.serialization
-    with open('decentralized_params.msgpack', 'wb') as f:
-        f.write(flax.serialization.to_bytes(params))
-    print(f"Training finished in {time.time() - start_time:.2f}s. Params saved.")
+# Subplot 4: Collision Avoidance
+plt.subplot(2, 2, 4)
+plt.plot(epochs_recorded, metrics[:, 4], color='red', label='Collision')
+plt.title('Collision Avoidance')
+plt.legend()
+
+plt.tight_layout()
+# plt.savefig('decentralized_training.png')
+# print("Training metrics plotted and saved to decentralized_training.png")
+
+# Save parameters
+import flax.serialization
+with open('decentralized_params.msgpack', 'wb') as f:
+    f.write(flax.serialization.to_bytes(params))
+print(f"Training finished in {time.time() - start_time:.2f}s. Params saved.")
