@@ -102,15 +102,13 @@ def load_params(model, filepath):
 
 def rollout_uncontrolled(z_init, xi_init, T_steps):
     """Rollout with zero control inputs."""
-    # Local import to avoid circular dependencies if any
-    from tesseracts.solverHeat2D_centralized import solver as central_solver
 
     def step_fn(carry, _):
         z_curr, xi_curr = carry
         u_zero = jnp.zeros(xi_curr.shape[0])
         v_zero = jnp.zeros_like(xi_curr)
-        # Using central solver for pure physics step (no obstacles)
-        z_next, xi_next = central_solver.adi_step(z_curr, xi_curr, u_zero, v_zero)
+        # Using solver for pure physics step
+        z_next, xi_next = solver.adi_step(z_curr, xi_curr, u_zero, v_zero)
         return (z_next, xi_next), (z_next, xi_next, u_zero, v_zero)
 
     _, (z_traj, xi_traj, u_traj, v_traj) = jax.lax.scan(
@@ -397,10 +395,13 @@ if __name__ == "__main__":
     
     # 6. Generate Figure
     print("\nGenerating paper figure...")
+    save_dir = Path("figures/images/paper_viz")
+    save_dir.mkdir(parents=True, exist_ok=True)
+
     create_paper_figure(
         z_traj_ctrl, z_traj_unctrl, xi_traj_ctrl, z_target,
         mse_ctrl, mse_unctrl, avg_speed, control_intensity,
-        save_name="heat2d_no_obs_paper_figure.pdf"
+        save_name=str(save_dir / "heat2d_no_obs_paper_figure.pdf")
     )
     
     print("\n" + "=" * 60)

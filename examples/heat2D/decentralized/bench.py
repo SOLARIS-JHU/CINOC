@@ -9,7 +9,6 @@ import flax.serialization
 import sys
 import argparse
 from pathlib import Path
-from tesseract_core import Tesseract
 
 # Add project root to sys.path
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
@@ -80,7 +79,10 @@ if args.cpu:
     jax.config.update("jax_platform_name", "cpu")
 
 # --- 1. Setup & Configuration ---
-solver_ts = Tesseract.from_image("solver_heat2d_decentralized:latest")
+# Setup output directory
+save_dir = Path("figures/images/bench_viz")
+save_dir.mkdir(parents=True, exist_ok=True)
+
 model = DecentralizedHeat2DControlNet(features=(16, 32))
 
 n_grid = args.n_grid
@@ -118,47 +120,46 @@ print("Loading trained parameters...")
 params = load_params(model, args.params_file, n_grid, n_agents)
 
 # --- 4. Evaluation Loop ---
-with solver_ts:
-    # A. Controlled Dynamics
-    dynamics_ctrl = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
-    
-    # B. Uncontrolled Dynamics
-    dynamics_unc = PDEDynamics(solver_ts, policy_apply_fn=zero_policy_apply, use_tesseract=False)
+# A. Controlled Dynamics
+dynamics_ctrl = PDEDynamics(policy_apply_fn=model.apply)
 
-    print("Running simulations (this may take a moment)...")
+# B. Uncontrolled Dynamics
+dynamics_unc = PDEDynamics(policy_apply_fn=zero_policy_apply)
 
-    def run_comparison(z_init, xi_init, z_target):
-        z_c, xi_c, _, _ = dynamics_ctrl.unroll_controlled(
-            z_init, xi_init, z_target, params, T_steps
-        )
-        z_u, xi_u, _, _ = dynamics_unc.unroll_controlled(
-            z_init, xi_init, z_target, params, T_steps
-        )
-        return z_c, xi_c, z_u, xi_u
+print("Running simulations (this may take a moment)...")
 
-    z_ctrl_chunks = []
-    xi_ctrl_chunks = []
-    z_unc_chunks = []
-    xi_unc_chunks = []
+def run_comparison(z_init, xi_init, z_target):
+    z_c, xi_c, _, _ = dynamics_ctrl.unroll_controlled(
+        z_init, xi_init, z_target, params, T_steps
+    )
+    z_u, xi_u, _, _ = dynamics_unc.unroll_controlled(
+        z_init, xi_init, z_target, params, T_steps
+    )
+    return z_c, xi_c, z_u, xi_u
 
-    for start in range(0, N_eval, args.chunk_size):
-        end = min(N_eval, start + args.chunk_size)
-        z_init_chunk = z_init_batch[start:end]
-        xi_init_chunk = xi_init_batch[start:end]
-        z_target_chunk = z_target_batch[start:end]
+z_ctrl_chunks = []
+xi_ctrl_chunks = []
+z_unc_chunks = []
+xi_unc_chunks = []
 
-        z_c, xi_c, z_u, xi_u = jax.vmap(run_comparison)(
-            z_init_chunk, xi_init_chunk, z_target_chunk
-        )
-        z_ctrl_chunks.append(z_c)
-        xi_ctrl_chunks.append(xi_c)
-        z_unc_chunks.append(z_u)
-        xi_unc_chunks.append(xi_u)
+for start in range(0, N_eval, args.chunk_size):
+    end = min(N_eval, start + args.chunk_size)
+    z_init_chunk = z_init_batch[start:end]
+    xi_init_chunk = xi_init_batch[start:end]
+    z_target_chunk = z_target_batch[start:end]
 
-    z_ctrl_all = jnp.concatenate(z_ctrl_chunks, axis=0)
-    xi_ctrl_all = jnp.concatenate(xi_ctrl_chunks, axis=0)
-    z_unc_all = jnp.concatenate(z_unc_chunks, axis=0)
-    xi_unc_all = jnp.concatenate(xi_unc_chunks, axis=0)
+    z_c, xi_c, z_u, xi_u = jax.vmap(run_comparison)(
+        z_init_chunk, xi_init_chunk, z_target_chunk
+    )
+    z_ctrl_chunks.append(z_c)
+    xi_ctrl_chunks.append(xi_c)
+    z_unc_chunks.append(z_u)
+    xi_unc_chunks.append(xi_u)
+
+z_ctrl_all = jnp.concatenate(z_ctrl_chunks, axis=0)
+xi_ctrl_all = jnp.concatenate(xi_ctrl_chunks, axis=0)
+z_unc_all = jnp.concatenate(z_unc_chunks, axis=0)
+xi_unc_all = jnp.concatenate(xi_unc_chunks, axis=0)
 
 # --- 5. Analysis & Visualization ---
 print("Calculating metrics...")
@@ -259,5 +260,6 @@ plt.xlabel('X')
 plt.ylabel('Y')
 
 plt.tight_layout()
-plt.savefig(args.out_file)
-print(f"Comparison plot saved to '{args.out_file}'")
+save_path = save_dir / args.out_file
+plt.savefig(save_path)
+print(f"Comparison plot saved to '{save_path}'")

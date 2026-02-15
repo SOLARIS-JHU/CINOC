@@ -13,7 +13,6 @@ import flax.serialization
 import sys
 import argparse
 from pathlib import Path
-from tesseract_core import Tesseract
 
 # Add project root to sys.path
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
@@ -143,7 +142,10 @@ def main():
 
     # Load model and parameters
     model = DecentralizedHeat2DControlNet(features=(16, 32))
-    solver_ts = Tesseract.from_image("solver_heat2d_decentralized:latest")
+
+    # Setup output directory
+    save_dir = Path("figures/images/obstacle_ablation_viz")
+    save_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\nLoading parameters...")
     params = load_params(model, args.params_file, n_grid, n_agents)
@@ -171,48 +173,47 @@ def main():
     # Run simulations
     print("\nRunning simulations...")
 
-    with solver_ts:
-        # Scenario 1: Uncontrolled
-        dynamics_unc = PDEDynamics(solver_ts, policy_apply_fn=zero_policy_apply, use_tesseract=False)
+    # Scenario 1: Uncontrolled
+    dynamics_unc = PDEDynamics(policy_apply_fn=zero_policy_apply)
 
-        # Scenario 2: Controlled (no obstacles)
-        dynamics_ctrl = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
+    # Scenario 2: Controlled (no obstacles)
+    dynamics_ctrl = PDEDynamics(policy_apply_fn=model.apply)
 
-        # Scenario 3: Controlled (with obstacles) - uses same dynamics, different params
-        dynamics_ctrl_obs = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
+    # Scenario 3: Controlled (with obstacles) - uses same dynamics, different params
+    dynamics_ctrl_obs = PDEDynamics(policy_apply_fn=model.apply)
 
-        def run_all_scenarios(z_init, xi_init, z_target):
-            # Uncontrolled
-            z_u, xi_u, _, _ = dynamics_unc.unroll_controlled(
-                z_init, xi_init, z_target, params, T_steps
-            )
-            # Controlled (no obstacles)
-            z_c, xi_c, _, _ = dynamics_ctrl.unroll_controlled(
-                z_init, xi_init, z_target, params, T_steps
-            )
-            # Controlled (with obstacles)
-            z_co, xi_co, _, _ = dynamics_ctrl_obs.unroll_controlled(
-                z_init, xi_init, z_target, params_obstacles, T_steps
-            )
-            return z_u, xi_u, z_c, xi_c, z_co, xi_co
+    def run_all_scenarios(z_init, xi_init, z_target):
+        # Uncontrolled
+        z_u, xi_u, _, _ = dynamics_unc.unroll_controlled(
+            z_init, xi_init, z_target, params, T_steps
+        )
+        # Controlled (no obstacles)
+        z_c, xi_c, _, _ = dynamics_ctrl.unroll_controlled(
+            z_init, xi_init, z_target, params, T_steps
+        )
+        # Controlled (with obstacles)
+        z_co, xi_co, _, _ = dynamics_ctrl_obs.unroll_controlled(
+            z_init, xi_init, z_target, params_obstacles, T_steps
+        )
+        return z_u, xi_u, z_c, xi_c, z_co, xi_co
 
-        results = []
-        for start in range(0, N_eval, args.chunk_size):
-            end = min(N_eval, start + args.chunk_size)
-            chunk_results = jax.vmap(run_all_scenarios)(
-                z_init_batch[start:end],
-                xi_init_batch[start:end],
-                z_target_batch[start:end]
-            )
-            results.append(chunk_results)
+    results = []
+    for start in range(0, N_eval, args.chunk_size):
+        end = min(N_eval, start + args.chunk_size)
+        chunk_results = jax.vmap(run_all_scenarios)(
+            z_init_batch[start:end],
+            xi_init_batch[start:end],
+            z_target_batch[start:end]
+        )
+        results.append(chunk_results)
 
-        # Concatenate all chunks
-        z_unc_all = jnp.concatenate([r[0] for r in results], axis=0)
-        xi_unc_all = jnp.concatenate([r[1] for r in results], axis=0)
-        z_ctrl_all = jnp.concatenate([r[2] for r in results], axis=0)
-        xi_ctrl_all = jnp.concatenate([r[3] for r in results], axis=0)
-        z_ctrl_obs_all = jnp.concatenate([r[4] for r in results], axis=0)
-        xi_ctrl_obs_all = jnp.concatenate([r[5] for r in results], axis=0)
+    # Concatenate all chunks
+    z_unc_all = jnp.concatenate([r[0] for r in results], axis=0)
+    xi_unc_all = jnp.concatenate([r[1] for r in results], axis=0)
+    z_ctrl_all = jnp.concatenate([r[2] for r in results], axis=0)
+    xi_ctrl_all = jnp.concatenate([r[3] for r in results], axis=0)
+    z_ctrl_obs_all = jnp.concatenate([r[4] for r in results], axis=0)
+    xi_ctrl_obs_all = jnp.concatenate([r[5] for r in results], axis=0)
 
     print("✓ Simulations complete")
 
@@ -329,13 +330,14 @@ def main():
     plt.tight_layout()
 
     # Save figure
-    plt.savefig(args.out_file, format='pdf', dpi=300, bbox_inches='tight')
-    print(f"\n✓ Saved: {args.out_file}")
+    save_path = save_dir / args.out_file
+    plt.savefig(save_path, format='pdf', dpi=300, bbox_inches='tight')
+    print(f"\n✓ Saved: {save_path}")
 
     # Also save PNG version
-    png_file = args.out_file.replace('.pdf', '.png')
-    plt.savefig(png_file, format='png', dpi=300, bbox_inches='tight')
-    print(f"✓ Saved: {png_file}")
+    png_path = save_dir / Path(args.out_file).with_suffix('.png').name
+    plt.savefig(png_path, format='png', dpi=300, bbox_inches='tight')
+    print(f"✓ Saved: {png_path}")
 
     plt.close()
 

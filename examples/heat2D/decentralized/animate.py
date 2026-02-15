@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
-from tesseract_core import Tesseract
 import sys
 from pathlib import Path
 import flax.serialization
@@ -269,78 +268,79 @@ def main():
     fps = 30
     duration = 10  # seconds
 
-    # Load tesseract and model
-    solver_ts = Tesseract.from_image("solver_heat2d_decentralized:latest")
+    # Setup output directory
+    save_dir = Path("figures/images/animations")
+    save_dir.mkdir(parents=True, exist_ok=True)
 
-    with solver_ts:
-        model = DecentralizedHeat2DControlNet(features=(16, 32))
-        dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=True)
+    # Initialize model and dynamics
+    model = DecentralizedHeat2DControlNet(features=(16, 32))
+    dynamics = PDEDynamics(policy_apply_fn=model.apply)
 
-        try:
-            params = load_params(model, 'decentralized_params_heat2d.msgpack', n_grid, n_agents)
-            print(f"✓ Loaded trained parameters ({n_agents} agents)")
-        except FileNotFoundError:
-            print("✗ Error: decentralized_params_heat2d.msgpack not found")
-            return
+    try:
+        params = load_params(model, 'decentralized_params_heat2d.msgpack', n_grid, n_agents)
+        print(f"✓ Loaded trained parameters ({n_agents} agents)")
+    except FileNotFoundError:
+        print("✗ Error: decentralized_params_heat2d.msgpack not found")
+        return
 
-        # Generate test scenario (same as visualize.py - scenario 1)
-        print("\n▶ Generating test scenario...")
-        key = jax.random.PRNGKey(1234)
-        key, k1, k2 = jax.random.split(key, 3)
+    # Generate test scenario (same as visualize.py - scenario 1)
+    print("\n▶ Generating test scenario...")
+    key = jax.random.PRNGKey(1234)
+    key, k1, k2 = jax.random.split(key, 3)
 
-        xx, yy, z_init = data_utils.generate_grf_2d(k1, n_points=n_grid)
-        _, _, z_target = data_utils.generate_grf_2d(k2, n_points=n_grid)
+    xx, yy, z_init = data_utils.generate_grf_2d(k1, n_points=n_grid)
+    _, _, z_target = data_utils.generate_grf_2d(k2, n_points=n_grid)
 
-        # Initialize agents in grid pattern at exact positions [0.2, 0.4, 0.6, 0.8]
-        n_side = int(jnp.sqrt(n_agents))
-        positions_1d = jnp.array([0.2, 0.4, 0.6, 0.8])[:n_side]
-        xi_init = []
-        for i in range(n_side):
-            for j in range(n_side):
-                if len(xi_init) < n_agents:
-                    xi_init.append([float(positions_1d[i]), float(positions_1d[j])])
-        xi_init = jnp.array(xi_init)
+    # Initialize agents in grid pattern at exact positions [0.2, 0.4, 0.6, 0.8]
+    n_side = int(jnp.sqrt(n_agents))
+    positions_1d = jnp.array([0.2, 0.4, 0.6, 0.8])[:n_side]
+    xi_init = []
+    for i in range(n_side):
+        for j in range(n_side):
+            if len(xi_init) < n_agents:
+                xi_init.append([float(positions_1d[i]), float(positions_1d[j])])
+    xi_init = jnp.array(xi_init)
 
-        print("▶ Running controlled trajectory...")
-        z_traj_ctrl, xi_traj_ctrl, u_traj_ctrl, v_traj_ctrl = dynamics.unroll_controlled(
-            z_init, xi_init, z_target, params, T_steps
-        )
+    print("▶ Running controlled trajectory...")
+    z_traj_ctrl, xi_traj_ctrl, u_traj_ctrl, v_traj_ctrl = dynamics.unroll_controlled(
+        z_init, xi_init, z_target, params, T_steps
+    )
 
-        print("▶ Running uncontrolled trajectory...")
-        z_traj_unctrl, xi_traj_unctrl, u_traj_unctrl, v_traj_unctrl = rollout_uncontrolled(
-            z_init, xi_init, T_steps
-        )
+    print("▶ Running uncontrolled trajectory...")
+    z_traj_unctrl, xi_traj_unctrl, u_traj_unctrl, v_traj_unctrl = rollout_uncontrolled(
+        z_init, xi_init, T_steps
+    )
 
-        print(f"✓ Generated {T_steps} timesteps")
+    print(f"✓ Generated {T_steps} timesteps")
 
-        # Create animation
-        print(f"\n▶ Creating animation ({duration}s @ {fps}fps)...")
-        fig, anim = create_2x2_animation(
-            z_traj_unctrl, z_traj_ctrl, xi_traj_ctrl, u_traj_ctrl,
-            z_target, fps=fps, duration=duration
-        )
+    # Create animation
+    print(f"\n▶ Creating animation ({duration}s @ {fps}fps)...")
+    fig, anim = create_2x2_animation(
+        z_traj_unctrl, z_traj_ctrl, xi_traj_ctrl, u_traj_ctrl,
+        z_target, fps=fps, duration=duration
+    )
 
-        # Save as GIF
-        print("▶ Saving GIF (this may take a few minutes)...")
-        gif_path = 'heat2d_animation.gif'
-        anim.save(gif_path, writer='pillow', fps=fps, dpi=150)
-        print(f"✓ Saved: {gif_path}")
+    # Save as GIF
+    print("▶ Saving GIF (this may take a few minutes)...")
+    gif_path = save_dir / 'heat2d_animation.gif'
+    anim.save(gif_path, writer='pillow', fps=fps, dpi=150)
+    print(f"✓ Saved: {gif_path}")
 
-        # Save as MP4 (higher quality)
-        try:
-            print("▶ Saving MP4 (high resolution)...")
-            mp4_path = 'heat2d_animation.mp4'
-            anim.save(mp4_path, writer='ffmpeg', fps=fps, dpi=200,
-                     extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
-            print(f"✓ Saved: {mp4_path}")
-        except Exception as e:
-            print(f"⚠ MP4 save failed (ffmpeg may not be installed): {e}")
+    # Save as MP4 (higher quality)
+    try:
+        print("▶ Saving MP4 (high resolution)...")
+        mp4_path = save_dir / 'heat2d_animation.mp4'
+        anim.save(mp4_path, writer='ffmpeg', fps=fps, dpi=200,
+                  extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
+        print(f"✓ Saved: {mp4_path}")
+    except Exception as e:
+        print(f"⚠ MP4 save failed (ffmpeg may not be installed): {e}")
 
-        plt.close()
+    plt.close()
 
-        print("\n" + "=" * 70)
-        print("  ANIMATION COMPLETE")
-        print("=" * 70)
+    print("\n" + "=" * 70)
+    print("  ANIMATION COMPLETE")
+    print("=" * 70)
 
 if __name__ == "__main__":
     main()

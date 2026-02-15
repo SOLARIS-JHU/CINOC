@@ -1,7 +1,7 @@
-tesseract-core==1.2.0
-tesseract-jax==0.2.2
-jax[cpu]==0.8.1
-# jax[cuda]==0.8.1
+# tesseract-core==1.2.0
+# tesseract-jax==0.2.2
+# jax[cpu]==0.8.1
+jax[cuda]==0.8.1
 matplotlib==3.10.8
 flax==0.12.2
 numpy==2.3.5
@@ -10,3 +10,4 @@ pandas
 # phiflow
 # h5py
 seaborn
+cmcrameri
