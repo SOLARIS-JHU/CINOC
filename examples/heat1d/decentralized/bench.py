@@ -10,7 +10,6 @@ import flax.serialization
 import sys
 from pathlib import Path
 from functools import partial
-from tesseract_core import Tesseract
 
 # Add project root to sys.path
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
@@ -21,8 +20,9 @@ from models.policy import DecentralizedControlNet
 from data_utils import generate_grf
 
 # --- 1. Setup & Configuration ---
-# NOTE: Using the Heat Equation solver image
-solver_ts = Tesseract.from_image("solver_heat_decentralized:latest")
+# Setup output directory
+save_dir = Path("figures/images/bench_viz")
+save_dir.mkdir(parents=True, exist_ok=True)
 
 # Config must match training script
 n_pde = 100
@@ -71,31 +71,30 @@ dummy_params = model.init(dummy_key, jnp.zeros((n_pde,)), jnp.zeros((n_pde,)), j
 params = flax.serialization.from_bytes(dummy_params, serialized_bytes)
 
 # --- 4. Evaluation Loop ---
-with solver_ts:
-    # A. Controlled Dynamics
-    dynamics_ctrl = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
-    
-    # B. Uncontrolled Dynamics (Zero Policy)
-    dynamics_unc = PDEDynamics(solver_ts, policy_apply_fn=zero_policy_apply, use_tesseract=False)
+# A. Controlled Dynamics
+dynamics_ctrl = PDEDynamics(policy_apply_fn=model.apply)
 
-    print("Running simulations...")
+# B. Uncontrolled Dynamics (Zero Policy)
+dynamics_unc = PDEDynamics(policy_apply_fn=zero_policy_apply)
 
-    def run_comparison(z_init, xi_init, z_target):
-        # Controlled run
-        z_c, xi_c, u_c, v_c = dynamics_ctrl.unroll_controlled(
-            z_init, xi_init, z_target, params, T_steps
-        )
-        # Uncontrolled run
-        z_u, xi_u, u_u, v_u = dynamics_unc.unroll_controlled(
-            z_init, xi_init, z_target, params, T_steps
-        )
-        return (z_c, xi_c), (z_u, xi_u)
+print("Running simulations...")
 
-    # Vmap over the 100 I.C.s
-    (traj_ctrl, traj_unc) = jax.vmap(run_comparison)(z_init_batch, xi_init_batch, z_target_batch)
+def run_comparison(z_init, xi_init, z_target):
+    # Controlled run
+    z_c, xi_c, u_c, v_c = dynamics_ctrl.unroll_controlled(
+        z_init, xi_init, z_target, params, T_steps
+    )
+    # Uncontrolled run
+    z_u, xi_u, u_u, v_u = dynamics_unc.unroll_controlled(
+        z_init, xi_init, z_target, params, T_steps
+    )
+    return (z_c, xi_c), (z_u, xi_u)
 
-    z_ctrl_all, xi_ctrl_all = traj_ctrl
-    z_unc_all, xi_unc_all = traj_unc
+# Vmap over the 100 I.C.s
+(traj_ctrl, traj_unc) = jax.vmap(run_comparison)(z_init_batch, xi_init_batch, z_target_batch)
+
+z_ctrl_all, xi_ctrl_all = traj_ctrl
+z_unc_all, xi_unc_all = traj_unc
 
 # --- 5. Analysis & Visualization ---
 print("Calculating metrics...")
@@ -149,5 +148,6 @@ plt.ylabel('Position (x)')
 plt.ylim(0, 1)
 
 plt.tight_layout()
-plt.savefig('heat_comparison_results.png')
-print("Comparison plot saved to 'heat_comparison_results.png'")
+save_path = save_dir / 'heat_comparison_results.png'
+plt.savefig(save_path)
+print(f"Comparison plot saved to '{save_path}'")
