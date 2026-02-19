@@ -75,7 +75,7 @@ def load_params(model, filepath, n_grid=32, n_agents=16):
 
 def rollout_uncontrolled(z_init, xi_init, T_steps):
     """Rollout with zero control inputs."""
-    from tesseracts.solverHeat2D_centralized import solver
+    from tesseracts.solverHeat2D_decentralized import solver
 
     def step_fn(carry, _):
         z_curr, xi_curr = carry
@@ -111,6 +111,10 @@ def main():
     print("=" * 70)
     print("  2D HEAT EQUATION WITH OBSTACLES - DECENTRALIZED VISUALIZATION")
     print("=" * 70)
+
+    # Create output directory
+    output_dir = Path("figures/images/vanilla")
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     setup_style()
 
@@ -322,12 +326,12 @@ def main():
                 fontsize=14, fontweight='bold', y=0.98)
 
     # Save as PDF (vector graphics)
-    pdf_path = 'heat2d_obstacles_decentralized_visualization.pdf'
+    pdf_path = 'figures/images/vanilla/heat2d_obstacles_decentralized_visualization.pdf'
     plt.savefig(pdf_path, format='pdf', dpi=300, bbox_inches='tight')
     print(f"\n✓ Saved: {pdf_path}")
-
+    
     # Also save as high-res PNG
-    png_path = 'heat2d_obstacles_decentralized_visualization.png'
+    png_path = 'figures/images/vanilla/heat2d_obstacles_decentralized_visualization.png'
     plt.savefig(png_path, format='png', dpi=300, bbox_inches='tight')
     print(f"✓ Saved: {png_path}")
 

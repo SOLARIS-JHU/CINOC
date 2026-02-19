@@ -19,7 +19,7 @@ import numpy as np
 import sys
 import flax.serialization
 from pathlib import Path
-import cmcrameri.cm as cmc  # Crameri scientific colormaps
+import cmcrameri.cm as cmc  
 
 # Force CPU for visualization
 jax.config.update("jax_platform_name", "cpu")
@@ -117,7 +117,7 @@ def load_params(model, filepath):
 
 def rollout_uncontrolled(z_init, xi_init, T_steps):
     """Rollout with zero control inputs."""
-    from tesseracts.solverHeat2D_centralized import solver
+    from tesseracts.solverHeat2D_decentralized import solver
 
     def step_fn(carry, _):
         z_curr, xi_curr = carry
@@ -280,7 +280,7 @@ def plot_metrics_row(ax_list, mse_ctrl, mse_unctrl, avg_speed, control_intensity
 
 def create_paper_figure(z_traj_ctrl, z_traj_unctrl, xi_traj_ctrl, z_target,
                         mse_ctrl, mse_unctrl, avg_speed, control_intensity,
-                        save_name="heat2d_paper_figure.pdf"):
+                        save_name="figures/images/paper/heat2d_paper_figure.pdf"):
     """
     Create the paper-quality figure with:
     - Row 1: Natural Evolution (Uncontrolled)
@@ -366,6 +366,9 @@ if __name__ == "__main__":
     print("=" * 60)
     print("Heat2D Obstacles - Paper Figure Generation")
     print("=" * 60)
+    output_dir = Path("figures/images/paper")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     
     # 1. Initialize Model
     model = DecentralizedHeat2DControlNet(features=(16, 32))
@@ -416,7 +419,7 @@ if __name__ == "__main__":
     create_paper_figure(
         z_traj_ctrl, z_traj_unctrl, xi_traj_ctrl, z_target,
         mse_ctrl, mse_unctrl, avg_speed, control_intensity,
-        save_name="heat2d_paper_figure.pdf"
+        save_name="figures/images/paper/heat2d_paper_figure.pdf"
     )
     
     print("\n" + "=" * 60)

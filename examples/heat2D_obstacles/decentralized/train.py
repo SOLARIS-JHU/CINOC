@@ -70,7 +70,7 @@ opt_state = optimizer.init(params)
 def loss_fn(params, z_init, xi_init, z_target, dynamics):
     z_traj, xi_traj, u_traj, v_traj = dynamics.unroll_controlled(
         z_init, xi_init, z_target, params, T_steps
-    )
+    ) 
 
     # 1. Tracking loss
     l_track = jnp.mean((z_traj - z_target[None, :, :]) ** 2)
@@ -226,5 +226,5 @@ if metrics:
     axes[1, 2].set_yscale('log')
 
     plt.tight_layout()
-    plt.savefig('training_metrics_heat2d_obstacles_decentralized.png')
-    print("Training metrics saved to training_metrics_heat2d_obstacles_decentralized.png")
+    # plt.savefig('training_metrics_heat2d_obstacles_decentralized_new.png')
+    # print("Training metrics saved to training_metrics_heat2d_obstacles_decentralized.png")

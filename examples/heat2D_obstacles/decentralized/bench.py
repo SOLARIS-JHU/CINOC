@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument("--chunk-size", type=int, default=10)
     parser.add_argument("--params-file", default="decentralized_params_heat2d_obstacles.msgpack")
     parser.add_argument("--dataset-dir", default="../../heat2D/data")
-    parser.add_argument("--out-file", default="heat2d_obstacles_results.png")
+    parser.add_argument("--out-file", default="figures/images/bench/heat2d_obstacles_results.png")
     parser.add_argument("--sample-idx", type=int, default=0)
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument("--cpu", action="store_true")
@@ -276,5 +276,10 @@ plt.title(f'Uncontrolled Final (MSE={mse_unc[sample_idx]:.4f})')
 plt.colorbar()
 
 plt.tight_layout()
+
+# Create output directory
+output_dir = Path(args.out_file).parent
+output_dir.mkdir(parents=True, exist_ok=True)
+
 plt.savefig(args.out_file)
 print(f"Comparison plot saved to '{args.out_file}'")

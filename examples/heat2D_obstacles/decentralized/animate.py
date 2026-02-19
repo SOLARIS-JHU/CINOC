@@ -69,7 +69,7 @@ def load_params(model, filepath, n_grid=32, n_agents=16):
 
 def rollout_uncontrolled(z_init, xi_init, T_steps):
     """Rollout with zero control inputs."""
-    from tesseracts.solverHeat2D_centralized import solver
+    from tesseracts.solverHeat2D_decentralized import solver
 
     def step_fn(carry, _):
         z_curr, xi_curr = carry
@@ -288,6 +288,10 @@ def main():
     print("  2D HEAT EQUATION WITH OBSTACLES - DECENTRALIZED ANIMATION")
     print("=" * 70)
 
+    # Create output directory
+    output_dir = Path("figures/images/animate")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     # Configuration
     n_grid = 32
     n_agents = 16
@@ -346,14 +350,14 @@ def main():
 
     # Save as GIF
     print("▶ Saving GIF (this may take a few minutes)...")
-    gif_path = 'heat2d_obstacles_decentralized_animation.gif'
+    gif_path = 'figures/images/animate/heat2d_obstacles_decentralized_animation.gif'
     anim.save(gif_path, writer='pillow', fps=fps, dpi=150)
     print(f"✓ Saved: {gif_path}")
 
     # Save as MP4 (higher quality)
     try:
         print("▶ Saving MP4 (high resolution)...")
-        mp4_path = 'heat2d_obstacles_decentralized_animation.mp4'
+        mp4_path = 'figures/images/animate/heat2d_obstacles_decentralized_animation.mp4'
         anim.save(mp4_path, writer='ffmpeg', fps=fps, dpi=200,
                  extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
         print(f"✓ Saved: {mp4_path}")
