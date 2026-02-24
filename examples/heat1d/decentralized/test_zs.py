@@ -68,8 +68,6 @@ def main():
     
     model = DecentralizedControlNet(features=(64, 64))
     optimizer = optax.adam(1e-3)
-    
-    # CHANGED: Initialize Dynamics without 'solver_ts' or 'use_tesseract'
     dynamics = PDEDynamics(policy_apply_fn=model.apply)
     
     # Initialize params template

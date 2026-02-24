@@ -86,7 +86,7 @@ def main():
     n_eval_list = [9, 16, 25, 36, 49, 64, 81, 100]
     
     model = DecentralizedHeat2DControlNet(features=(16, 32))
-    dynamics = PDEDynamics(solver_ts="", policy_apply_fn=model.apply, use_tesseract=False)
+    dynamics = PDEDynamics(policy_apply_fn=model.apply)
     
     lr_schedule = optax.exponential_decay(1e-3, 2000, 0.5)
     optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(lr_schedule))

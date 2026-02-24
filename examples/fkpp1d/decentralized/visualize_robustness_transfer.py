@@ -7,7 +7,6 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import seaborn as sns
-from tesseract_core import Tesseract
 import sys
 import flax.serialization
 from pathlib import Path
@@ -209,45 +208,44 @@ def plot_comprehensive(df, title, filename):
 
 def run_all_scenarios():
     print("Loading Models...")
-    solver_ts = Tesseract.from_image("solver_fkpp1d_decentralized:latest")
     
-    with solver_ts:
-        model = DecentralizedControlNet(features=(64, 64))
-        dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
+    # Using the simplified JAX-native dynamics
+    model = DecentralizedControlNet(features=(64, 64))
+    dynamics = PDEDynamics(policy_apply_fn=model.apply)
+    
+    # Load all params once
+    loaded_params = {}
+    for m_name in ALL_MODELS:
+        p_path = EXPERIMENT_DIR / f"{m_name}_params_0.001.msgpack"
+        if not p_path.exists(): p_path = EXPERIMENT_DIR / f"{m_name}_params"
         
-        # Load all params once
-        loaded_params = {}
-        for m_name in ALL_MODELS:
-            p_path = EXPERIMENT_DIR / f"{m_name}_params_0.001.msgpack"
-            if not p_path.exists(): p_path = EXPERIMENT_DIR / f"{m_name}_params"
-            
-            if p_path.exists():
-                loaded_params[m_name] = load_params(model, p_path)
-            else:
-                print(f"Skipping {m_name} (not found)")
+        if p_path.exists():
+            loaded_params[m_name] = load_params(model, p_path)
+        else:
+            print(f"Skipping {m_name} (not found)")
 
-        if not loaded_params:
-            print("No models found. Run the training runner first!")
-            return
+    if not loaded_params:
+        print("No models found. Run the training runner first!")
+        return
 
-        # Run Scenarios
-        for sc_name, env_cfg in SCENARIOS.items():
-            df_res = evaluate_scenario(
-                sc_name, 
-                env_cfg["u"], 
-                env_cfg["z"], 
-                loaded_params, 
-                dynamics
-            )
-            
-            # Save Data
-            df_res.to_csv(EXPERIMENT_DIR / f"metrics_{sc_name}.csv", index=False)
-            
-            # Generate Plot
-            title_str = f"Robustness in {sc_name.replace('_', ' ')} Env ($\\sigma_u={env_cfg['u']}, \\sigma_z={env_cfg['z']}$)"
-            file_str = f"plot_robustness_{sc_name}_0.001.pdf"
-            
-            plot_comprehensive(df_res, title_str, file_str)
+    # Run Scenarios
+    for sc_name, env_cfg in SCENARIOS.items():
+        df_res = evaluate_scenario(
+            sc_name, 
+            env_cfg["u"], 
+            env_cfg["z"], 
+            loaded_params, 
+            dynamics
+        )
+        
+        # Save Data
+        df_res.to_csv(EXPERIMENT_DIR / f"metrics_{sc_name}.csv", index=False)
+        
+        # Generate Plot
+        title_str = f"Robustness in {sc_name.replace('_', ' ')} Env ($\\sigma_u={env_cfg['u']}, \\sigma_z={env_cfg['z']}$)"
+        file_str = f"plot_robustness_{sc_name}_0.001.pdf"
+        
+        plot_comprehensive(df_res, title_str, file_str)
 
 if __name__ == "__main__":
     run_all_scenarios()

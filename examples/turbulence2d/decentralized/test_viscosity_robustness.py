@@ -78,10 +78,13 @@ def evaluate_viscosity(visc, model, params):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    # Create output directory
+    output_dir = Path("figures/images/params/robustness")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
     # Load Model
     model = DecentralizedTurbulenceNet(features=(32, 64), patch_size=16, 
-                                       domain_size=(1.0, 1.0), u_max=150.0)
-    
+                                       domain_size=(1.0, 1.0), u_max=150.0)    
     with open(CONFIG['params_file'], 'rb') as f:
         raw_params = f.read()
     
@@ -123,5 +126,5 @@ if __name__ == "__main__":
         if row == len(TEST_VISCOSITIES)-1: ax_plot.set_xlabel("Time (s)")
 
     plt.suptitle(f"Robustness Test: Policy Trained at $\\nu$={TRAINED_VISCOSITY}", fontsize=16, y=0.95)
-    plt.savefig("viscosity_robustness_comparison.pdf", dpi=150, bbox_inches='tight')
-    print("✓ Saved combined robustness plot to viscosity_robustness_comparison.pdf")
+    plt.savefig("figures/images/params/robustness/viscosity_robustness_comparison.pdf", dpi=150, bbox_inches='tight')
+    print("✓ Saved combined robustness plot to figures/images/params/robustness/viscosity_robustness_comparison.pdf")

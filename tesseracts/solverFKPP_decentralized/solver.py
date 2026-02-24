@@ -44,7 +44,7 @@ def solve_tridiagonal_diffusion(z_explicit, r, N):
     return out.ravel()
 
 @jit
-def fkpp_step_1d(z, xi, u, v, nu, rho):
+def fkpp_step_1d(z, xi, u, v, nu=0.005, rho=3.0):
     """
     Refactored to accept nu and rho as parameters.
     """

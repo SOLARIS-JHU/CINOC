@@ -10,8 +10,6 @@ import optax
 from pathlib import Path
 from functools import partial
 from tqdm import trange
-# from tesseract_core import Tesseract
-# NEW IMPORT for formatting
 from matplotlib.ticker import ScalarFormatter
 
 # Add project root to sys.path
@@ -119,7 +117,7 @@ def train_model(l_weight, n_pde, n_agents, epochs, dynamics, model, optimizer):
         f.write(flax.serialization.to_bytes(params))
 
 # --- 3. Evaluation with Temporal Windowing (Updated) ---
-def run_comparison(solver_ts, n_agents_list, lambda_list, n_pde, T_steps, z_init, z_target, window_ratio=0.7):
+def run_comparison(n_agents_list, lambda_list, n_pde, T_steps, z_init, z_target, window_ratio=0.7):
     all_results = []
     start_idx = int(T_steps * (1.0 - window_ratio))
     print(f"Analyzing effort from step {start_idx} to {T_steps} (Window: {window_ratio*100:.0f}%)")
@@ -127,7 +125,8 @@ def run_comparison(solver_ts, n_agents_list, lambda_list, n_pde, T_steps, z_init
     for l_weight in lambda_list:
         param_path = MODELS_DIR / f"params_lambda_{l_weight}.msgpack"
         model = DecentralizedControlNet(features=(64, 64))
-        dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=True)
+        # Initializing native JAX dynamics
+        dynamics = PDEDynamics(policy_apply_fn=model.apply)
         
         with open(param_path, 'rb') as f:
             bytes_data = f.read()
@@ -226,25 +225,25 @@ def main():
     n_agents_list = [15, 20, 30, 40, 50, 60]
     WINDOW_RATIO = 0.7
 
-    solver_ts = Tesseract.from_image("solver_fkpp1d_decentralized:latest")
     model = DecentralizedControlNet(features=(64, 64))
     lr_schedule = optax.exponential_decay(1e-3, 2000, 0.5)
     optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(lr_schedule))
 
-    with solver_ts:
-        dynamics_local = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
-        for l in lambda_list:
-            train_model(l, n_pde, 20, 500, dynamics_local, model, optimizer)
+    # Using native JAX dynamics wrapper
+    dynamics_local = PDEDynamics(policy_apply_fn=model.apply)
+    
+    for l in lambda_list:
+        train_model(l, n_pde, 20, 500, dynamics_local, model, optimizer)
 
-        key = jax.random.PRNGKey(42)
-        _, z_init = data_utils.generate_grf(key, n_points=n_pde, length_scale=0.2)
-        _, z_target = data_utils.generate_grf(jax.random.PRNGKey(43), n_points=n_pde, length_scale=0.4)
+    key = jax.random.PRNGKey(42)
+    _, z_init = data_utils.generate_grf(key, n_points=n_pde, length_scale=0.2)
+    _, z_target = data_utils.generate_grf(jax.random.PRNGKey(43), n_points=n_pde, length_scale=0.4)
+    
+    results_df = run_comparison(n_agents_list, lambda_list, n_pde, T_steps, 
+                                z_init, z_target, window_ratio=WINDOW_RATIO)
         
-        results_df = run_comparison(solver_ts, n_agents_list, lambda_list, n_pde, T_steps, 
-                                    z_init, z_target, window_ratio=WINDOW_RATIO)
-        
-        plot_conjecture_results_separated(results_df, f"Last {int(WINDOW_RATIO*100)}%")
-        results_df.to_csv(FIGURES_DIR / "conjecture_data_windowed.csv", index=False)
+    plot_conjecture_results_separated(results_df, f"Last {int(WINDOW_RATIO*100)}%")
+    results_df.to_csv(FIGURES_DIR / "conjecture_data_windowed.csv", index=False)
 
 if __name__ == "__main__":
     main()

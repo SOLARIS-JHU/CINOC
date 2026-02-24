@@ -192,7 +192,7 @@ def main():
     print(f"\nTraining completed in {elapsed:.1f}s")
     
     # Save
-    save_path = Path(__file__).parent / 'ns2d_decentralized_params.msgpack'
+    save_path = Path(__file__).parent / 'ns2d_decentralized_params_new.msgpack'
     with open(save_path, 'wb') as f:
         f.write(flax.serialization.to_bytes(params))
     print(f"Saved: {save_path}")
@@ -218,8 +218,8 @@ def main():
     axes[2].set_yscale('log')
     
     plt.tight_layout()
-    plt.savefig(Path(__file__).parent / 'training_curves.png', dpi=150)
-    print("Saved: training_curves.png")
+    plt.savefig(Path(__file__).parent / 'training_curves_new.png', dpi=150)
+    print("Saved: training_curves_new.png")
     
     print("\nDone!")
 

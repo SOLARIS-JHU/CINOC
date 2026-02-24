@@ -143,7 +143,8 @@ def main():
     pool_size = 100   # Pool of initial conditions
     
     # Zero-Shot Sweep (Perfect Squares for regular grids)
-    n_eval_list = [144, 196, 256, 324, 400, 484, 576, 676, 784]
+    # 36 (6x6), 64 (8x8), 100 (10x10), 144 (12x12), 196 (14x14), 256 (16x16)
+    n_eval_list = [144, 196, 256, 324, 400, 484, 576, 676, 784, 900, 1024]
     
     # Model Setup
     model = DecentralizedKS2DControlNet(
@@ -212,7 +213,6 @@ def main():
     u_target_test = jnp.zeros_like(u_init_test)
 
     # Use same horizon as training for consistency in this check
-    # (Or longer if checking stability, but 2D simulations are expensive)
     T_eval = CONFIG['T_steps'] 
 
     for n in n_eval_list:

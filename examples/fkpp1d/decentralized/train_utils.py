@@ -1,6 +1,5 @@
 import jax
 import jax.numpy as jnp
-from tesseract_core import Tesseract
 import sys
 import os
 from pathlib import Path
@@ -27,8 +26,6 @@ def train(n_pde=100, n_agents=20, batch_size=32, T_steps=300, R_safe=0.05, epoch
     }
 
     # --- 1. Initialization ---
-    solver_ts = Tesseract.from_image("solver_fkpp1d_centralized:latest")
-
     model = DecentralizedControlNet(features=(64, 64), sensor_range=sensor_range)
     key = jax.random.PRNGKey(0)
 
@@ -85,96 +82,95 @@ def train(n_pde=100, n_agents=20, batch_size=32, T_steps=300, R_safe=0.05, epoch
         return params, opt_state, loss, aux
 
     # --- 3. Training Loop ---
-    with solver_ts:
-        # We set use_tesseract=False for local JAX training speed, True for remote/compiled execution
-        dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
+    # Dynamics now uses the internal JAX solver by default
+    dynamics = PDEDynamics(policy_apply_fn=model.apply)
 
-        print("Generating/Loading dataset...")
-        all_keys = jax.random.split(key, 5000)
-        _, z_init_all = jax.vmap(partial(generate_grf, n_points=n_pde, length_scale=0.2))(all_keys)
-        _, z_target_all = jax.vmap(partial(generate_grf, n_points=n_pde, length_scale=0.4))(all_keys)
+    print("Generating/Loading dataset...")
+    all_keys = jax.random.split(key, 5000)
+    _, z_init_all = jax.vmap(partial(generate_grf, n_points=n_pde, length_scale=0.2))(all_keys)
+    _, z_target_all = jax.vmap(partial(generate_grf, n_points=n_pde, length_scale=0.4))(all_keys)
+    
+    xi_init_single = jnp.linspace(0.2, 0.8, n_agents)
+    xi_init_batch = jnp.tile(xi_init_single, (batch_size, 1))
+
+    metrics = []
+    start_time = time.time()
+    
+    for epoch in trange(epochs):
+        # Sample batch indices
+        key, subkey = jax.random.split(key)
+        idx = jax.random.randint(subkey, (batch_size,), 0, 5000)
+        z_init_b, z_target_b = z_init_all[idx], z_target_all[idx]
+
+        # Split a fresh key for noise generation
+        key, step_key = jax.random.split(key)
         
-        xi_init_single = jnp.linspace(0.2, 0.8, n_agents)
-        xi_init_batch = jnp.tile(xi_init_single, (batch_size, 1))
-
-        metrics = []
-        start_time = time.time()
+        params, opt_state, loss, aux = train_step(
+            params, opt_state, z_init_b, xi_init_batch, z_target_b, step_key, dynamics
+        )
         
-        for epoch in trange(epochs):
-            # Sample batch indices
-            key, subkey = jax.random.split(key)
-            idx = jax.random.randint(subkey, (batch_size,), 0, 5000)
-            z_init_b, z_target_b = z_init_all[idx], z_target_all[idx]
+        if epoch % 10 == 0:
+            metrics.append((epoch, loss, *aux))
+            print(f"Epoch {epoch:03d} | Loss: {loss:.6f} | Track: {aux[0]:.6f}")
 
-            # Split a fresh key for noise generation
-            key, step_key = jax.random.split(key)
+    print(f"Training finished in {time.time() - start_time:.2f}s.")     
             
-            params, opt_state, loss, aux = train_step(
-                params, opt_state, z_init_b, xi_init_batch, z_target_b, step_key, dynamics
-            )
-            
-            if epoch % 10 == 0:
-                metrics.append((epoch, loss, *aux))
-                print(f"Epoch {epoch:03d} | Loss: {loss:.6f} | Track: {aux[0]:.6f}")
-
-        print(f"Training finished in {time.time() - start_time:.2f}s.")     
-                
-        # 1. Determine the save directory
-        if save_repo:
-            save_dir = Path(save_repo)
-            # Create folder if it doesn't exist (parents=True handles nested folders)
-            save_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Join the directory with the filenames
-            full_plot_path = save_dir / f'{plot_filename}.png'
-            full_param_path = save_dir / f'{net_params_filename}.msgpack'
-        else:
-            # If no repo provided, save to current directory
-            full_plot_path = f'{plot_filename}.png'
-            full_param_path = f'{net_params_filename}.msgpack'
-
-        # --- 4. Plotting and Saving ---
-        if plot_metrics:
-            metrics = jnp.array(metrics)
-            epochs_recorded = metrics[:, 0]
-            plt.figure(figsize=(12, 8))
-            
-            # Subplot 1
-            plt.subplot(2, 2, 1)
-            plt.plot(epochs_recorded, metrics[:, 1], color='black', label='Total Loss')
-            plt.yscale('log')
-            plt.title('Total Loss (Log Scale)')
-            plt.legend()
-
-            # Subplot 2
-            plt.subplot(2, 2, 2)
-            plt.plot(epochs_recorded, metrics[:, 2], label='Tracking')
-            plt.plot(epochs_recorded, metrics[:, 5], label='Boundary', alpha=0.7)
-            plt.yscale('log')
-            plt.title('Performance vs Constraints')
-            plt.legend()
-
-            # Subplot 3
-            plt.subplot(2, 2, 3)
-            plt.plot(epochs_recorded, metrics[:, 3], color='green', label='Effort')
-            plt.title('Effort Loss')
-            plt.legend()
-
-            # Subplot 4
-            plt.subplot(2, 2, 4)
-            plt.plot(epochs_recorded, metrics[:, 4], color='red', label='Collision')
-            plt.title('Collision Avoidance')
-            plt.legend()
-
-            plt.tight_layout()
-            
-            # Using the full path variable
-            plt.savefig(full_plot_path) 
-            print(f"Training metrics plotted and saved to {full_plot_path}")
+    # 1. Determine the save directory
+    if save_repo:
+        save_dir = Path(save_repo)
+        # Create folder if it doesn't exist (parents=True handles nested folders)
+        save_dir.mkdir(parents=True, exist_ok=True)
         
-        # Save parameters
-        import flax.serialization
+        # Join the directory with the filenames
+        full_plot_path = save_dir / f'{plot_filename}.png'
+        full_param_path = save_dir / f'{net_params_filename}.msgpack'
+    else:
+        # If no repo provided, save to current directory
+        full_plot_path = f'{plot_filename}.png'
+        full_param_path = f'{net_params_filename}.msgpack'
+
+    # --- 4. Plotting and Saving ---
+    if plot_metrics:
+        metrics = jnp.array(metrics)
+        epochs_recorded = metrics[:, 0]
+        plt.figure(figsize=(12, 8))
+        
+        # Subplot 1
+        plt.subplot(2, 2, 1)
+        plt.plot(epochs_recorded, metrics[:, 1], color='black', label='Total Loss')
+        plt.yscale('log')
+        plt.title('Total Loss (Log Scale)')
+        plt.legend()
+
+        # Subplot 2
+        plt.subplot(2, 2, 2)
+        plt.plot(epochs_recorded, metrics[:, 2], label='Tracking')
+        plt.plot(epochs_recorded, metrics[:, 5], label='Boundary', alpha=0.7)
+        plt.yscale('log')
+        plt.title('Performance vs Constraints')
+        plt.legend()
+
+        # Subplot 3
+        plt.subplot(2, 2, 3)
+        plt.plot(epochs_recorded, metrics[:, 3], color='green', label='Effort')
+        plt.title('Effort Loss')
+        plt.legend()
+
+        # Subplot 4
+        plt.subplot(2, 2, 4)
+        plt.plot(epochs_recorded, metrics[:, 4], color='red', label='Collision')
+        plt.title('Collision Avoidance')
+        plt.legend()
+
+        plt.tight_layout()
+        
         # Using the full path variable
-        with open(full_param_path, 'wb') as f:
-            f.write(flax.serialization.to_bytes(params))
-        print(f"Params saved at {full_param_path}.")
+        plt.savefig(full_plot_path) 
+        print(f"Training metrics plotted and saved to {full_plot_path}")
+    
+    # Save parameters
+    import flax.serialization
+    # Using the full path variable
+    with open(full_param_path, 'wb') as f:
+        f.write(flax.serialization.to_bytes(params))
+    print(f"Params saved at {full_param_path}.")

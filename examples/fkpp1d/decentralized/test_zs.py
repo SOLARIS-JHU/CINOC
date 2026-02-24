@@ -60,11 +60,11 @@ def main():
     n_eval_list = [15, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 150, 180]
     epochs = 500
     
-    solver_ts = "NA"
     model = DecentralizedControlNet(features=(64, 64))
     optimizer = optax.adam(1e-3)
     
-    dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
+    # Dynamics wrapper now defaults to the internal JAX logic
+    dynamics = PDEDynamics(policy_apply_fn=model.apply)
     
     # Initialize params template (needed for either loading or training)
     key = jax.random.PRNGKey(42)
@@ -83,7 +83,10 @@ def main():
 
         for _ in trange(epochs):
             idx = jax.random.randint(key, (32,), 0, 1000)
-            params, opt_state, _ = train_step(params, opt_state, z_inits[idx], xi_init_train, z_targets[idx], dynamics, n_train, 300, optimizer)
+            params, opt_state, _ = train_step(
+                params, opt_state, z_inits[idx], xi_init_train, 
+                z_targets[idx], dynamics, n_train, 300, optimizer
+            )
         
         # Save the trained model
         with open(MODEL_PATH, 'wb') as f:

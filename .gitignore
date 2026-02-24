@@ -75,6 +75,6 @@ examples_old_reference
 .pre-commit-config.yaml
 document.tex
 
-TODO.md
+TODO*
 
 /visual_abstract

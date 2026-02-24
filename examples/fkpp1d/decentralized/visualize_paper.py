@@ -17,7 +17,6 @@ import sys
 import flax.serialization
 from pathlib import Path
 import cmcrameri.cm as cmc
-from tesseract_core import Tesseract  # Added Tesseract support
 
 # Force CPU for visualization
 jax.config.update("jax_platform_name", "cpu")
@@ -181,6 +180,11 @@ def create_paper_figure(z_traj_ctrl, z_traj_unctrl, xi_traj_ctrl, z_target,
                         save_name="fkpp1d_paper_figure.pdf"):
     setup_paper_style()
     
+    # Ensure paper directory exists
+    output_dir = Path("figures/images/paper")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    save_path = output_dir / save_name
+    
     fig = plt.figure(figsize=(8, 7.5)) # Slightly taller for better spacing
     
     # CHANGED: Increased hspace from 0.3 to 0.5 to prevent overlap between
@@ -215,11 +219,12 @@ def create_paper_figure(z_traj_ctrl, z_traj_unctrl, xi_traj_ctrl, z_target,
     
     plot_metrics_row([ax_m1, ax_m2, ax_m3], mse_ctrl, mse_unctrl, avg_speed, control_intensity)
     
-    plt.savefig(save_name, dpi=300, bbox_inches='tight')
-    print(f"✓ Saved paper figure to {save_name}")
-    png_name = save_name.replace('.pdf', '.png')
-    plt.savefig(png_name, dpi=300, bbox_inches='tight')
-    print(f"✓ Saved PNG version to {png_name}")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"✓ Saved paper figure to {save_path}")
+    
+    png_path = save_path.with_suffix('.png')
+    plt.savefig(png_path, dpi=300, bbox_inches='tight')
+    print(f"✓ Saved PNG version to {png_path}")
     plt.close()
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -231,62 +236,60 @@ if __name__ == "__main__":
     print("FKPP 1D - Paper Figure Generation")
     print("=" * 60)
     
-    # 1. Setup Solver and Model
-    solver_ts = Tesseract.from_image("solver_fkpp1d_decentralized:latest")
+    # 1. Setup Model
+    model = DecentralizedControlNet(features=(64, 64))
     
-    with solver_ts:
-        model = DecentralizedControlNet(features=(64, 64))
-        
-        # 2. Setup Dynamics Wrappers
-        # Controlled Dynamics (uses loaded model)
-        dynamics_ctrl = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
-        # Natural Dynamics (uses Zero Policy)
-        dynamics_nat = PDEDynamics(solver_ts, policy_apply_fn=zero_policy_apply, use_tesseract=False)
+    # 2. Setup Dynamics Wrappers (Native JAX)
+    # Controlled Dynamics (uses loaded model)
+    dynamics_ctrl = PDEDynamics(policy_apply_fn=model.apply)
+    # Natural Dynamics (uses Zero Policy)
+    dynamics_nat = PDEDynamics(policy_apply_fn=zero_policy_apply)
 
-        # 3. Load Parameters
-        try:
-            print(f"\nLoading parameters from {CONFIG['params_file']}...")
-            params = load_params(model, CONFIG['params_file'])
-            print("✓ Parameters loaded successfully")
-        except Exception as e:
-            print(f"Error: {e}")
-            sys.exit(1)
-            
-        # 4. Generate Scenario
-        print("\nGenerating test scenario...")
-        key = jax.random.PRNGKey(42)
-        key, init_key = jax.random.split(key)
-        z_init, z_target, xi_init = get_initial_conditions(init_key)
+    # 3. Load Parameters
+    try:
+        print(f"\nLoading parameters from {CONFIG['params_file']}...")
+        params = load_params(model, CONFIG['params_file'])
+        print("✓ Parameters loaded successfully")
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
         
-        # 5. Run Simulations
-        print(f"\nRunning controlled trajectory ({CONFIG['T_steps']} steps)...")
-        # PDEDynamics handles the key splitting and rollout internally
-        z_traj_ctrl, xi_traj_ctrl, u_traj_ctrl, v_traj_ctrl = dynamics_ctrl.unroll_controlled(
-            z_init, xi_init, z_target, params, CONFIG['T_steps']
-        )
-        
-        print(f"Running natural (uncontrolled) trajectory ({CONFIG['T_steps']} steps)...")
-        # Pass dummy params for zero policy (it ignores them anyway)
-        z_traj_unctrl, xi_traj_unctrl, _, _ = dynamics_nat.unroll_controlled(
-            z_init, xi_init, z_target, params, CONFIG['T_steps']
-        )
-        
-        # 6. Compute Metrics
-        print("\nComputing metrics...")
-        mse_ctrl = jnp.mean((z_traj_ctrl - z_target[None, :])**2, axis=1)
-        mse_unctrl = jnp.mean((z_traj_unctrl - z_target[None, :])**2, axis=1)
-        avg_speed = jnp.mean(jnp.abs(v_traj_ctrl), axis=1)
-        control_intensity = jnp.mean(jnp.abs(u_traj_ctrl), axis=1)
-        
-        print(f"  Final MSE (Controlled):   {float(mse_ctrl[-1]):.6f}")
-        print(f"  Final MSE (Uncontrolled): {float(mse_unctrl[-1]):.6f}")
-        
-        # 7. Generate Figure
-        print("\nGenerating paper figure...")
-        create_paper_figure(
-            z_traj_ctrl, z_traj_unctrl, xi_traj_ctrl, z_target,
-            mse_ctrl, mse_unctrl, avg_speed, control_intensity
-        )
+    # 4. Generate Scenario
+    print("\nGenerating test scenario...")
+    key = jax.random.PRNGKey(42)
+    key, init_key = jax.random.split(key)
+    z_init, z_target, xi_init = get_initial_conditions(init_key)
+    
+    # 5. Run Simulations
+    print(f"\nRunning controlled trajectory ({CONFIG['T_steps']} steps)...")
+    # PDEDynamics handles the key splitting and rollout internally
+    z_traj_ctrl, xi_traj_ctrl, u_traj_ctrl, v_traj_ctrl = dynamics_ctrl.unroll_controlled(
+        z_init, xi_init, z_target, params, CONFIG['T_steps']
+    )
+    
+    print(f"Running natural (uncontrolled) trajectory ({CONFIG['T_steps']} steps)...")
+    # Pass dummy params for zero policy (it ignores them anyway)
+    z_traj_unctrl, xi_traj_unctrl, _, _ = dynamics_nat.unroll_controlled(
+        z_init, xi_init, z_target, params, CONFIG['T_steps']
+    )
+    
+    # 6. Compute Metrics
+    print("\nComputing metrics...")
+    mse_ctrl = jnp.mean((z_traj_ctrl - z_target[None, :])**2, axis=1)
+    mse_unctrl = jnp.mean((z_traj_unctrl - z_target[None, :])**2, axis=1)
+    avg_speed = jnp.mean(jnp.abs(v_traj_ctrl), axis=1)
+    control_intensity = jnp.mean(jnp.abs(u_traj_ctrl), axis=1)
+    
+    print(f"  Final MSE (Controlled):   {float(mse_ctrl[-1]):.6f}")
+    print(f"  Final MSE (Uncontrolled): {float(mse_unctrl[-1]):.6f}")
+    
+    # 7. Generate Figure
+    print("\nGenerating paper figure...")
+    create_paper_figure(
+        z_traj_ctrl, z_traj_unctrl, xi_traj_ctrl, z_target,
+        mse_ctrl, mse_unctrl, avg_speed, control_intensity, 
+        save_name="fkpp1d_paper_figure.pdf"
+    )
         
     print("\n" + "=" * 60)
     print("Done!")

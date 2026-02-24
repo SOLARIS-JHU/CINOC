@@ -87,10 +87,13 @@ def run_scalability_sweep(model, params):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    # Create output directory
+    output_dir = Path("figures/images/params/scalability")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
     # --- 1. Setup ---
     model = DecentralizedTurbulenceNet(features=(32, 64), patch_size=16, 
-                                       domain_size=(1.0, 1.0), u_max=150.0)
-    
+                                       domain_size=(1.0, 1.0), u_max=150.0)    
     with open(CONFIG['params_file'], 'rb') as f:
         raw_params = f.read()
     
@@ -149,5 +152,5 @@ if __name__ == "__main__":
     ax.legend(title="Viscosity $\\nu$", loc='upper right')
     plt.grid(True, which="both", ls="-", alpha=0.2)
     
-    plt.savefig("turbulence_scalability_viscosity.pdf", dpi=150, bbox_inches='tight')
-    print("\n✓ Scalability plot saved to turbulence_scalability_viscosity.pdf")
+    plt.savefig("figures/images/params/scalability/turbulence_scalability_viscosity.pdf", dpi=150, bbox_inches='tight')
+    print("\n✓ Scalability plot saved to figures/images/params/scalability/turbulence_scalability_viscosity.pdf")

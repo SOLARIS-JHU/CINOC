@@ -199,5 +199,5 @@ if __name__ == "__main__":
     plt.ylabel('Loss')
     plt.legend()
     plt.grid(True, which="both", ls="-", alpha=0.2)
-    plt.savefig('ks2d_training_metrics.png')
-    print("Metrics plotted.")
+    # plt.savefig('ks2d_training_metrics.png')
+    # print("Metrics plotted.")

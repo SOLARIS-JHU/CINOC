@@ -64,7 +64,7 @@ def plot_lambda_effort_paper(df):
     fig1.subplots_adjust(right=0.75)  # Make room for legend
     fig1.savefig(FIGURES_DIR / "paper_scaling_mse.pdf", bbox_inches='tight')
     fig1.savefig(FIGURES_DIR / "paper_scaling_mse.png", dpi=300, bbox_inches='tight')
-    print(f"✓ Saved: paper_scaling_mse.pdf/png")
+    print(f"✓ Saved: paper_scaling_mse.pdf")
 
     # --- Plot 2: Squared Effort ---
     fig2, ax2 = plt.subplots(figsize=(9, 5))  # Wider figure
@@ -88,7 +88,7 @@ def plot_lambda_effort_paper(df):
     fig2.subplots_adjust(right=0.72)  # Make room for legend
     fig2.savefig(FIGURES_DIR / "paper_scaling_effort_sq.pdf", bbox_inches='tight')
     fig2.savefig(FIGURES_DIR / "paper_scaling_effort_sq.png", dpi=300, bbox_inches='tight')
-    print(f"✓ Saved: paper_scaling_effort_sq.pdf/png")
+    print(f"✓ Saved: paper_scaling_effort_sq.pdf")
 
     # --- Plot 3: Absolute Effort ---
     fig3, ax3 = plt.subplots(figsize=(7, 4.5))
@@ -109,7 +109,7 @@ def plot_lambda_effort_paper(df):
     fig3.subplots_adjust(right=0.75)  # Make room for legend
     fig3.savefig(FIGURES_DIR / "paper_scaling_effort_abs.pdf", bbox_inches='tight')
     fig3.savefig(FIGURES_DIR / "paper_scaling_effort_abs.png", dpi=300, bbox_inches='tight')
-    print(f"✓ Saved: paper_scaling_effort_abs.pdf/png")
+    print(f"✓ Saved: paper_scaling_effort_abs.pdf")
     
     plt.close('all')
 

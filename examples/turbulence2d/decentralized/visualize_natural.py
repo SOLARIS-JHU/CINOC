@@ -243,7 +243,7 @@ if __name__ == "__main__":
 
     # 3. Select ONE Random Index
     np.random.seed(999) # Change seed to see different examples
-    idx = np.random.choice(len(full_dataset))
+    idx = 95# np.random.choice(len(full_dataset))
     print(f"Selected Sample Index: {idx}")
 
     w0_hat = full_dataset[idx]
@@ -287,6 +287,6 @@ if __name__ == "__main__":
     plot_enstrophy_comparison(ax_plot, t_axis, w_ctrl, w_base)
 
     plt.suptitle(f"Single Sample Analysis: Index {idx}", fontsize=16, fontweight='bold')
-    save_name = "single_sample_comparison.png"
+    save_name = "figures/images/natural/single_sample_comparison.png"
     plt.savefig(save_name, dpi=150, bbox_inches='tight')
     print(f"✓ Saved plot to {save_name}")

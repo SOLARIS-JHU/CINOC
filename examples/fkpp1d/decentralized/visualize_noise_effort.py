@@ -6,7 +6,6 @@ import pandas as pd
 import sys
 import flax.serialization
 from pathlib import Path
-from tesseract_core import Tesseract
 from functools import partial
 
 # --- Setup Paths ---
@@ -33,16 +32,15 @@ def load_params(model, filepath):
     dummy_init = model.init(jax.random.PRNGKey(0), jnp.zeros((N_PDE,)), jnp.zeros((N_PDE,)), jnp.zeros((30,)))
     return flax.serialization.from_bytes(dummy_init, bytes_data)
 
-def evaluate_effort_scaling(solver_ts):
+def evaluate_effort_scaling():
     """
     Evaluates effort metrics (L1 and L2 norms of control) across varying agent counts.
-    Uses the updated API requiring key and noise arguments.
-    Considers only the last 70% of the simulation for steady-state analysis.
+    Uses native JAX dynamics for steady-state analysis.
     """
     results = []
     
     model = DecentralizedControlNet(features=(64, 64))
-    dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
+    dynamics = PDEDynamics(policy_apply_fn=model.apply)
     
     # Define models to test
     model_files = {
@@ -177,10 +175,8 @@ def plot_effort_metrics(df):
     print(f"Plot saved to {save_path}")
 
 if __name__ == "__main__":
-    solver_ts = Tesseract.from_image("solver_fkpp1d_decentralized:latest")
-    
     print("Starting Effort Scaling Analysis (Steady State + Log Scale)...")
-    df_results = evaluate_effort_scaling(solver_ts)
+    df_results = evaluate_effort_scaling()
     
     # Save CSV for reference
     df_results.to_csv(OUTPUT_DIR / "effort_data_steady.csv", index=False)

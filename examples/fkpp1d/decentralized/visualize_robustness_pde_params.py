@@ -8,7 +8,6 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import seaborn as sns
-from tesseract_core import Tesseract
 import sys
 import flax.serialization
 from pathlib import Path
@@ -124,10 +123,9 @@ def get_style_maps(df, param_col, baseline_val, cmap_name):
     return palette, dashes, hue_order
 
 if __name__ == "__main__":
-    # 1. Initialize Dynamics Wrapper
-    solver_ts = Tesseract.from_image("solver_fkpp1d_decentralized:latest")
+    # 1. Initialize Dynamics Wrapper with native JAX solver
     model = DecentralizedControlNet(features=(64, 64))
-    dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
+    dynamics = PDEDynamics(policy_apply_fn=model.apply)
     
     # 2. Load "low_noise" Params
     param_path = Path("figures/noise_experiments/robustness_transfer/low_noise_params.msgpack")

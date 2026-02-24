@@ -305,6 +305,10 @@ def plot_single_case(ax_row_snaps, ax_plot, t, w_ctrl, w_base, case_idx):
 if __name__ == "__main__":
     print(f"--- Visualizing 3 Random Examples (N={CONFIG['N_grid']}) ---")
     
+    # Create output directory
+    output_dir = Path("figures/images/vanilla")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
     # 1. Init Model
     model = DecentralizedTurbulenceNet(
         features=(32, 64), 
@@ -350,6 +354,6 @@ if __name__ == "__main__":
         plot_single_case(ax_snaps, ax_plot, t_axis, w_ctrl, w_base, case_idx=i)
 
     plt.suptitle("Turbulence Stabilization: 3 Random Test Cases", fontsize=16, fontweight='bold')
-    save_name = "random_3_cases_64x64.png"
+    save_name = "figures/images/vanilla/random_3_cases_64x64.png"
     plt.savefig(save_name, dpi=150, bbox_inches='tight')
     print(f"✓ Saved combined plot to {save_name}")

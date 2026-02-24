@@ -16,7 +16,6 @@ import numpy as np
 import sys
 import flax.serialization
 from pathlib import Path
-from tesseract_core import Tesseract
 
 # Import decentralized components
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
@@ -34,14 +33,15 @@ def load_params(model, filepath, n_pde=100, n_agents=8):
     init_params = model.init(key, jnp.zeros((n_pde,)), jnp.zeros((n_pde,)), jnp.zeros((n_agents,)))
     return flax.serialization.from_bytes(init_params, serialized_bytes)
 
-def run_simulation_suite(solver_ts, n_agents_list, params_file, z_init, z_target, n_pde, T_steps):
+def run_simulation_suite(n_agents_list, params_file, z_init, z_target, n_pde, T_steps):
     """Executes the simulation for each N and returns a DataFrame of metrics."""
     results = {"n_agents": [], "mse": [], "u_effort": []}
     
     for n_agents in n_agents_list:
         print(f">>> Simulating N={n_agents} Actuators...")
         model = DecentralizedControlNet(features=(64, 64))
-        dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=True)
+        # Initializing JAX-native dynamics
+        dynamics = PDEDynamics(policy_apply_fn=model.apply)
         
         try:
             params = load_params(model, params_file, n_pde, n_agents)
@@ -115,7 +115,8 @@ def main():
     training_anchor = 20
     jax.config.update("jax_platform_name", "cpu")
     
-    output_dir = Path("figures/fkpp_decentralized_comparison")
+    # Path updated to conference folder
+    output_dir = Path("figures/images/conference")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Setup PDE State ---
@@ -129,12 +130,10 @@ def main():
     n_agents_list = list(np.arange(10, 21, 1)) + list(np.arange(25, 65, 5))
     params_file = 'decentralized_params.msgpack'
     
-    solver_ts = Tesseract.from_image("solver_fkpp1d_decentralized:latest")
-    
-    with solver_ts:
-        results_df = run_simulation_suite(
-            solver_ts, n_agents_list, params_file, z_init, z_target, n_pde, T_steps
-        )
+    # Executing simulations without Tesseract runtime
+    results_df = run_simulation_suite(
+        n_agents_list, params_file, z_init, z_target, n_pde, T_steps
+    )
 
     # --- Save and Visualize ---
     results_df.to_csv(output_dir / "scalability_metrics.csv", index=False)
@@ -143,7 +142,7 @@ def main():
         output_dir / "scalability_plot.pdf",
         training_n=training_anchor
     )
-    print(f"\n--- Analysis Complete. Files saved to {output_dir} ---")
+    print(f"\n--- Analysis Complete. Files saved to {output_dir}/scalability_plot.pdf ---")
 
 if __name__ == "__main__":
     main()

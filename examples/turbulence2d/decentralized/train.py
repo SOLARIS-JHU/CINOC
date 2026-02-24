@@ -41,7 +41,7 @@ CONFIG = {
     # Training
     'n_agents': 64,       # 64 Agents (8x8 Grid)
     'batch_size': 4,
-    'epochs': 50,
+    'epochs': 500,
     'pool_size': 500,      
     
     # Files
@@ -208,5 +208,5 @@ if __name__ == "__main__":
     plt.ylabel('Loss')
     plt.legend()
     plt.grid(True, which="both", ls="-", alpha=0.2)
-    plt.savefig('turbulence_training_metrics.png')
-    print("Metrics plotted.")
+    # plt.savefig('turbulence_training_metrics.png')
+    # print("Metrics plotted.")

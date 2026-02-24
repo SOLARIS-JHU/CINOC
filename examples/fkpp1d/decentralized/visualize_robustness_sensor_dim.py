@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import seaborn as sns
 import numpy as np
-from tesseract_core import Tesseract
 import sys
 import flax.serialization
 from flax import linen as nn
@@ -212,7 +211,6 @@ def load_params(model, filepath):
     return flax.serialization.from_bytes(dummy_init, bytes_data)
 
 def evaluate_sensor_dims():
-    solver_ts = Tesseract.from_image("solver_fkpp1d_decentralized:latest")
     results = []
 
     # Pre-generate Test Data
@@ -223,64 +221,64 @@ def evaluate_sensor_dims():
     
     x_grid = jnp.linspace(0, 1, N_PDE)
 
-    with solver_ts:
-        for s_range in SENSOR_RANGES:
-            print(f"--- Evaluating Sensor Range: {s_range} ---")
+    for s_range in SENSOR_RANGES:
+        print(f"--- Evaluating Sensor Range: {s_range} ---")
+        
+        model = DecentralizedControlNet(
+            features=(64, 64), 
+            sensor_range=s_range
+        )
+        
+        param_path = EXPERIMENT_DIR / f"sensor_dim_{s_range}_params.msgpack"
+        params = load_params(model, param_path)
+        
+        if params is None:
+            print(f"Skipping range {s_range} (Weights not found)")
+            continue
+
+        # Initializing JAX-native dynamics
+        dynamics = PDEDynamics(policy_apply_fn=model.apply)
+
+        # Part A: Visualization (100 Agents)
+        print(f"   > Generating visualization plots for range {s_range}...")
+        viz_key = jax.random.PRNGKey(101)
+        n_viz_agents = 100 
+        
+        for ex_idx in range(1, 4):
+            viz_key, sk1, sk2 = jax.random.split(viz_key, 3)
+            _, z0_viz = generate_grf(sk1, n_points=N_PDE, length_scale=0.15 + (ex_idx*0.05))
+            _, zt_viz = generate_grf(sk2, n_points=N_PDE, length_scale=0.35 + (ex_idx*0.05))
+            xi0_viz = jnp.linspace(0.1, 0.9, n_viz_agents)
             
-            model = DecentralizedControlNet(
-                features=(64, 64), 
-                sensor_range=s_range
+            z_traj_c, xi_traj, u_traj, v_traj = dynamics.unroll_controlled(
+                z0_viz, xi0_viz, zt_viz, params, T_STEPS, key=jax.random.PRNGKey(0)
             )
+            z_traj_u = rollout_uncontrolled(z0_viz, xi0_viz, T_STEPS)
             
-            param_path = EXPERIMENT_DIR / f"sensor_dim_{s_range}_params.msgpack"
-            params = load_params(model, param_path)
-            
-            if params is None:
-                print(f"Skipping range {s_range} (Weights not found)")
-                continue
+            create_comparison_figure(x_grid, z0_viz, zt_viz, z_traj_c, z_traj_u, 
+                                    u_traj, v_traj, xi_traj, T_STEPS, s_range, ex_idx)
+        
+        # Part B: MSE Stats
+        print(f"   > Calculating MSE stats...")
+        for n_agents in TEST_AGENT_COUNTS:
+            xi_test = jnp.linspace(0.1, 0.9, n_agents)
+            xi_batch = jnp.tile(xi_test, (N_TEST_SAMPLES, 1))
 
-            dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False)
-
-            # Part A: Visualization (100 Agents)
-            print(f"   > Generating visualization plots for range {s_range}...")
-            viz_key = jax.random.PRNGKey(101)
-            n_viz_agents = 100 
-            
-            for ex_idx in range(1, 4):
-                viz_key, sk1, sk2 = jax.random.split(viz_key, 3)
-                _, z0_viz = generate_grf(sk1, n_points=N_PDE, length_scale=0.15 + (ex_idx*0.05))
-                _, zt_viz = generate_grf(sk2, n_points=N_PDE, length_scale=0.35 + (ex_idx*0.05))
-                xi0_viz = jnp.linspace(0.1, 0.9, n_viz_agents)
-                
-                z_traj_c, xi_traj, u_traj, v_traj = dynamics.unroll_controlled(
-                    z0_viz, xi0_viz, zt_viz, params, T_STEPS, key=jax.random.PRNGKey(0)
+            @jax.jit
+            def run_single(z_i, z_t, xi_i):
+                z_traj, _, _, _ = dynamics.unroll_controlled(
+                    z_i, xi_i, z_t, params, T_STEPS, 
+                    key=jax.random.PRNGKey(0), noise_u=0, noise_z=0
                 )
-                z_traj_u = rollout_uncontrolled(z0_viz, xi0_viz, T_STEPS)
-                
-                create_comparison_figure(x_grid, z0_viz, zt_viz, z_traj_c, z_traj_u, 
-                                        u_traj, v_traj, xi_traj, T_STEPS, s_range, ex_idx)
-            
-            # Part B: MSE Stats
-            print(f"   > Calculating MSE stats...")
-            for n_agents in TEST_AGENT_COUNTS:
-                xi_test = jnp.linspace(0.1, 0.9, n_agents)
-                xi_batch = jnp.tile(xi_test, (N_TEST_SAMPLES, 1))
+                return jnp.mean((z_traj[-1] - z_t)**2) 
 
-                @jax.jit
-                def run_single(z_i, z_t, xi_i):
-                    z_traj, _, _, _ = dynamics.unroll_controlled(
-                        z_i, xi_i, z_t, params, T_STEPS, 
-                        key=jax.random.PRNGKey(0), noise_u=0, noise_z=0
-                    )
-                    return jnp.mean((z_traj[-1] - z_t)**2) 
-
-                final_mses = jax.vmap(run_single)(z_init_test, z_target_test, xi_batch)
-                results.append({
-                    "Sensor Range": s_range,
-                    "Agents": n_agents,
-                    "MSE": float(jnp.mean(final_mses)),
-                    "Std": float(jnp.std(final_mses))
-                })
+            final_mses = jax.vmap(run_single)(z_init_test, z_target_test, xi_batch)
+            results.append({
+                "Sensor Range": s_range,
+                "Agents": n_agents,
+                "MSE": float(jnp.mean(final_mses)),
+                "Std": float(jnp.std(final_mses))
+            })
 
     return pd.DataFrame(results)
 

@@ -246,6 +246,10 @@ def plot_2d_transition(t_full, u_full, u_force_ctrl, example_id=1, save_name="ks
 if __name__ == "__main__":
     print("--- 2D KS Visualization Script (Generating 3 Examples) ---")
     
+    # Create output directory
+    output_dir = Path("figures/images/vanilla")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
     # 1. Re-Initialize Model with correct u_max
     model = DecentralizedKS2DControlNet(
         features=(64, 128), 
@@ -276,7 +280,7 @@ if __name__ == "__main__":
         t_full, u_full, u_force = generate_transition_data(rng_run, model, params)
         
         # Plot
-        filename = f"ks2d_transition_ex{i+1}.png"
-        plot_2d_transition(t_full, u_full, u_force, example_id=i+1, save_name=filename)
-        
+        filename = f"figures/images/vanilla/ks2d_transition_ex{i+1}.png"
+        plot_2d_transition(t_full, u_full, u_force, example_id=i+1, save_name=filename)        
+    
     print("\nAll examples generated successfully.")

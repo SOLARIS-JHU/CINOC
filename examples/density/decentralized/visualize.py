@@ -381,7 +381,8 @@ def main():
     ), axis=-1).reshape(-1, 2)
     
     T_steps = T_STEPS
-    save_dir = Path(__file__).parent
+    save_dir = Path(__file__).parent / "figures" / "images" / "vanilla"
+    save_dir.mkdir(parents=True, exist_ok=True)
     
     # Process 2 samples
     n_samples = min(2, len(test_data['rho_init']))
@@ -423,28 +424,31 @@ def main():
         
         # Create paper figure
         print("▶ Creating paper figure...")
+        paper_fig_path = save_dir / f'ns2d_decentralized_sample_{sample_idx+1}.png'
         create_paper_figure(
             smoke_unctrl, smoke_ctrl, xi_ctrl, vel_ctrl,
             rho_target_np, mse_ctrl, mse_unctrl,
             timestep=-1,
-            filename=str(save_dir / f'ns2d_decentralized_sample_{sample_idx+1}.png')
+            filename=str(paper_fig_path)
         )
         
         # Create animation
         print("▶ Creating animation...")
+        gif_path = save_dir / f'ns2d_decentralized_{sample_idx+1}.gif'
+        mp4_path = save_dir / f'ns2d_decentralized_{sample_idx+1}.mp4'
         create_animation(
             smoke_unctrl, smoke_ctrl, xi_ctrl, vel_ctrl,
             rho_target_np, mse_ctrl, mse_unctrl,
             sample_idx=sample_idx,
-            output_gif=str(save_dir / f'ns2d_decentralized_{sample_idx+1}.gif'),
-            output_mp4=str(save_dir / f'ns2d_decentralized_{sample_idx+1}.mp4'),
+            output_gif=str(gif_path),
+            output_mp4=str(mp4_path),
             fps=9, skip_frames=2
         )
     
     print("\n" + "="*60)
     print("Visualization Complete!")
     print("="*60)
-    print("\nGenerated files:")
+    print(f"\nGenerated files in {save_dir}:")
     for i in range(n_samples):
         print(f"  - ns2d_decentralized_sample_{i+1}.png")
         print(f"  - ns2d_decentralized_{i+1}.gif")
