@@ -1,3 +1,4 @@
+# We're not using this script actually.
 """
 Multi-Scale Generalization Experiment - Visualization Script
 Tests if a policy trained on L=32 can zero-shot generalize to L=22...200.

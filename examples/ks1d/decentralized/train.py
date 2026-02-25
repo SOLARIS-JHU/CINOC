@@ -17,9 +17,9 @@ from pathlib import Path
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
-from examples.ks1d.centralized.dynamics_dual import PDEDynamics 
+from examples.ks1d.decentralized.dynamics_dual import PDEDynamics 
 from models.policy_ks1d import DecentralizedControlNet
-from examples.ks1d.centralized.data_utils import get_batch_initial_conditions
+from examples.ks1d.decentralized.data_utils import get_batch_initial_conditions
 
 # --- 1. Configuration & Initialization ---
 # KS Specific Settings
@@ -160,8 +160,8 @@ plt.xlabel('Epoch')
 plt.legend()
 
 plt.tight_layout()
-plt.savefig('ks_centralized_training.png')
-print("Training metrics plotted and saved to ks_centralized_training.png")
+# plt.savefig('ks_centralized_training.png')
+# print("Training metrics plotted and saved to ks_centralized_training.png")
 
 # Save parameters
 with open('ks_centralized_params.msgpack', 'wb') as f:

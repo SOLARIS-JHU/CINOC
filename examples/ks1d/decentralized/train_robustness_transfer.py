@@ -1,3 +1,4 @@
+# We're not using this script actually.
 """
 Robustness Transfer Experiment - KS 1D (L=32)
 Trains three variants of the ControlNet (Clean, Low Noise, High Noise)

@@ -1,3 +1,4 @@
+# We're not using this script actually.
 """
 Sensor Dimension Experiment - Multi-Domain Runner (Smart Skip)
 Trains Decentralized ControlNet across multiple physical configurations (L, N).

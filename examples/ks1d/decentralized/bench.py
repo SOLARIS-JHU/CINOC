@@ -15,9 +15,9 @@ script_dir = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
 # Import KS specific modules (adjusting for the centralized folder structure)
-from examples.ks1d.centralized.dynamics_dual import PDEDynamics 
+from examples.ks1d.decentralized.dynamics_dual import PDEDynamics 
 from models.policy_ks1d import DecentralizedControlNet
-from examples.ks1d.centralized.data_utils import get_batch_initial_conditions
+from examples.ks1d.decentralized.data_utils import get_batch_initial_conditions
 
 # --- 1. Configuration ---
 N_grid = 128
@@ -155,5 +155,7 @@ plt.xlabel('Time (s)')
 plt.ylabel('Domain (x)')
 
 plt.tight_layout()
-plt.savefig('ks_comparison_results.png')
-print("Comparison plot saved to 'ks_comparison_results.png'")
+save_path = Path("figures/images/bench") / "ks_comparison_results.png"
+save_path.parent.mkdir(parents=True, exist_ok=True)
+plt.savefig(save_path)
+print(f"Comparison plot saved to '{save_path}'")

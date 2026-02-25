@@ -1,3 +1,4 @@
+# We're not using this script actually.
 """
 Robustness Transfer Experiment - Visualization Script (KS-1D L=32)
 Tests the trained KS DecentralizedControlNet models on varying agent counts (Zero-Shot Scalability)

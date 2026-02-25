@@ -1,3 +1,4 @@
+# We're not using this script actually.
 """
 Sensor Dimension Experiment - Multi-Domain Visualization (KS-1D)
 Evaluates Decentralized ControlNet across multiple physical configurations.

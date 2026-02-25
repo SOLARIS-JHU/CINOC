@@ -21,7 +21,7 @@ jax.config.update("jax_platform_name", "cpu")
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
-from examples.ks1d.centralized.dynamics_dual import PDEDynamics
+from examples.ks1d.decentralized.dynamics_dual import PDEDynamics
 from models.policy_ks1d import DecentralizedControlNet
 import tesseracts.ks1d.solver as solver 
 

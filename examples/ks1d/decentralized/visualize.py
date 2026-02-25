@@ -18,7 +18,7 @@ jax.config.update("jax_platform_name", "cpu")
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
-from examples.ks1d.centralized.dynamics_dual import PDEDynamics
+from examples.ks1d.decentralized.dynamics_dual import PDEDynamics
 from models.policy_ks1d import DecentralizedControlNet
 import tesseracts.ks1d.solver as solver 
 
@@ -178,7 +178,8 @@ def plot_paper_style(u_full, f_full, example_idx=1):
     cax2 = fig.add_subplot(gs[1, 1])
     plt.colorbar(im2, cax=cax2, label=r"Forcing $f(x,t)$")
     
-    save_path = f"ks_paper_plot_ex{example_idx}.png"
+    save_path = Path("figures/images/vanilla") / f"ks_paper_plot_ex{example_idx}.png"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
     print(f"✓ Saved: {save_path}")
     plt.close()
