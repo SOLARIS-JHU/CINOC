@@ -69,7 +69,7 @@ def evolve_to_attractor(key, N_grid, L, warmup_time=1000.0, dt=0.05):
         )
         return (u_hat_next, u_next), None
 
-    print(steps)
+    # print(steps)
     
     # Run the loop
     (u_hat_final, u_final), _ = jax.lax.scan(
