@@ -11,3 +11,4 @@ pandas
 # h5py
 seaborn
 cmcrameri
+gymnasium

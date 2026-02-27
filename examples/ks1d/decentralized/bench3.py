@@ -37,15 +37,39 @@ class CentralizedActor(nn.Module):
         out = nn.Dense(self.n_agents)(x)
         return jnp.tanh(out) * self.u_max
 
+# --- NEW: L0 Sparse Polynomial Definitions ---
+class SparsePolynomialLayer(nn.Module):
+    out_features: int = 1
+    @nn.compact
+    def __call__(self, x):
+        weights = self.param('weights', nn.initializers.glorot_uniform(), (x.shape[-1], self.out_features))
+        log_alpha = self.param('log_alpha', nn.initializers.constant(0.0), (x.shape[-1],))
+        gate = jax.nn.sigmoid(log_alpha)
+        masked_weights = weights * gate[:, None]
+        return jnp.dot(x, masked_weights)
+
+class MARLPolynomialActor(nn.Module):
+    max_action: float = 1.0
+    n_agents: int = 8
+    @nn.compact
+    def __call__(self, poly_features):
+        x = SparsePolynomialLayer(out_features=self.n_agents)(poly_features)
+        return self.max_action * jnp.tanh(x)
+
+@jax.jit
+def get_poly_features(x):
+    """JAX-Native Polynomial Expansion"""
+    ones = jnp.ones((*x.shape[:-1], 1))
+    return jnp.concatenate([ones, x, jnp.square(x)], axis=-1)
+# ---------------------------------------------
+
 # --- 2. Configuration & Paths ---
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
-# Ensure output directory exists
 output_dir = Path("figures/images/bench")
 output_dir.mkdir(parents=True, exist_ok=True)
 
-# Define the specific folder for benchmark weights
 bench_models_dir = Path("bench/models")
 bench_models_dir.mkdir(parents=True, exist_ok=True) 
 
@@ -53,6 +77,7 @@ from examples.ks1d.decentralized.dynamics_dual import PDEDynamics
 from models.policy_ks1d import DecentralizedControlNet
 from examples.ks1d.decentralized.data_utils import get_batch_initial_conditions
 
+# Make sure these paths are correct for your repo structure
 from examples.ks1d.decentralized.bench.models_hypemarl import HyperActor
 from examples.ks1d.decentralized.bench.utils_hypemarl import get_sinusoidal_encoding
 from examples.ks1d.decentralized.bench.env_ks import extract_patches_jit
@@ -60,7 +85,6 @@ from examples.ks1d.decentralized.bench.env_ks import extract_patches_jit
 N_grid, L_domain, n_agents = 128, 22.0, 8
 T_steps, N_eval, dt = 200, 100, 0.05
 
-# Registry for available benchmarks
 bench_registry = {}
 
 # --- 3. Loading Logic ---
@@ -69,25 +93,56 @@ def load_params(filename, model, dummy_input):
     if not os.path.exists(filename):
         print(f"[-] {filename} not found. Skipping benchmark.")
         return None
+        
     with open(filename, 'rb') as f:
         bytes_data = f.read()
+        
+    # Get the expected variable structure from Flax
     variables = model.init(jax.random.PRNGKey(0), *dummy_input)
+    
     try:
+        # Unpack the raw bytes into a python dictionary
         state_dict = msgpack_restore(bytes_data)
-        if 'actor' in state_dict: state_dict = state_dict['actor']
+    except Exception as e:
+        print(f"[-] Could not parse msgpack for {filename}: {e}")
+        return None
+
+    # Handle common nesting from different training scripts
+    if 'actor' in state_dict: 
+        state_dict = state_dict['actor']
+        
+    # FIX: If Flax expects a 'params' root key, but our saved dict doesn't have it, wrap it.
+    if 'params' in variables and 'params' not in state_dict:
+        state_dict = {'params': state_dict}
+    # (Optional safeguard) If saved dict has 'params' but Flax doesn't expect it
+    elif 'params' not in variables and 'params' in state_dict:
+        state_dict = state_dict['params']
+
+    try:
+        # Restore the state dict safely
         return from_state_dict(variables, state_dict)
-    except:
-        return flax.serialization.from_bytes(variables, bytes_data)
+    except Exception as e:
+        print(f"[-] Failed to load weights for {filename}. Mismatch error: {e}")
+        # Fallback to direct byte deserialization just in case
+        try:
+            return flax.serialization.from_bytes(variables, bytes_data)
+        except Exception as e2:
+            print(f"[-] Fallback also failed: {e2}")
+            return None
 
 print("Loading Models...")
 
-# 1. HypeMARL (Look in bench/models/)
+# 1. HypeMARL 
 hm_model = HyperActor()
 xi_single = jnp.linspace(0.0, L_domain, n_agents, endpoint=False) + (L_domain/n_agents)/2
 hm_pe = get_sinusoidal_encoding(xi_single, d=2048)
-hm_z = jnp.concatenate([hm_pe, jnp.tile(jnp.array([L_domain, 0.05]), (n_agents, 1))], axis=-1)
-
-hm_p = load_params(bench_models_dir / 'hypemarl_params.msgpack', hm_model, (hm_z, jnp.zeros((n_agents, 40))))
+# Handle the dummy input gracefully if it crashes during init.
+try:
+    hm_z = jnp.concatenate([hm_pe, jnp.tile(jnp.array([L_domain, 0.05]), (n_agents, 1))], axis=-1)
+    hm_p = load_params(bench_models_dir / 'hypemarl_params.msgpack', hm_model, (hm_z, jnp.zeros((n_agents, 40))))
+except Exception as e:
+    print(f"[-] HypeMARL initialization failed: {e}")
+    hm_p = None
 
 if hm_p:
     def hm_apply(p, u, target, xi):
@@ -95,13 +150,13 @@ if hm_p:
         return hm_model.apply(p, hm_z, y)
     bench_registry['HypeMARL'] = {'apply': hm_apply, 'params': hm_p, 'color': 'green'}
 
-# 2. DPC (LOCATION UNCHANGED - Root directory)
+# 2. DPC 
 dpc_model = DecentralizedControlNet(features=(64, 64), L_domain=L_domain)
 dpc_p = load_params('ks_centralized_params.msgpack', dpc_model, (jnp.zeros(N_grid), jnp.zeros(N_grid), xi_single))
 if dpc_p:
     bench_registry['DPC'] = {'apply': dpc_model.apply, 'params': dpc_p, 'color': 'blue'}
 
-# 3. MARL (Look in bench/models/)
+# 3. MARL 
 marl_model = MARLActor()
 marl_mu_val = jnp.array([L_domain, 0.05]) 
 marl_pe_val = get_sinusoidal_encoding(xi_single, d=2048)
@@ -116,12 +171,36 @@ if marl_p:
         return marl_model.apply(p, full_input).flatten()
     bench_registry['MARL'] = {'apply': marl_apply, 'params': marl_p, 'color': 'orange'}
 
-# 4. RL (Look in bench/models/)
+# 4. RL 
 rl_model = CentralizedActor()
-rl_p = load_params(bench_models_dir / 'rl_params.msgpack', rl_model, (jnp.zeros(N_grid),))
+rl_p = load_params(bench_models_dir / 'rl_centralized_params.msgpack', rl_model, (jnp.zeros(N_grid),))
 
 if rl_p:
     bench_registry['RL'] = {'apply': lambda p, u, t, xi: rl_model.apply(p, u), 'params': rl_p, 'color': 'purple'}
+
+# --- NEW: 5. L0 Sparse Poly ---
+l0_model = MARLPolynomialActor(n_agents=n_agents)
+# Global state is grid + 2 mu params. Expansion: 1 + 130 + 130 = 261
+global_state_dim = N_grid + 2
+poly_dim = 1 + global_state_dim + global_state_dim 
+dummy_poly = jnp.ones((poly_dim,))
+
+# Update filename to whatever your final L0 epoch checkpoint is named
+l0_p = load_params(bench_models_dir / 'actor_poly_ep490.msgpack', l0_model, (dummy_poly,))
+
+if l0_p:
+    def l0_apply(p, u, target, xi):
+        mu = jnp.array([L_domain, dt])
+        global_state = jnp.concatenate([u, mu])
+        poly_state = get_poly_features(global_state)
+        
+        # Guard clause: Flax serialization sometimes strips the 'params' root key
+        apply_params = p if 'params' in p else {'params': p}
+        
+        return l0_model.apply(apply_params, poly_state)
+    
+    bench_registry['L0_Poly'] = {'apply': l0_apply, 'params': l0_p, 'color': 'cyan'}
+# ---------------------------------------------
     
 # Uncontrolled
 bench_registry['Uncontrolled'] = {
@@ -156,7 +235,6 @@ print(f"{'Method':<15} | {'Mean Energy':<15} | {'2-Sigma':<20}")
 print("-" * 70)
 
 for name in bench_registry:
-    # Mean squared field at final timestep across batch
     final_e = jnp.mean(bench_registry[name]['data'][:, -1]**2, axis=1)
     mean_val, std_val = jnp.mean(final_e), jnp.std(final_e)
     print(f"{name:<15} | {mean_val:.6f}      | ±{2*std_val:.6f}")
@@ -178,7 +256,7 @@ for name in bench_registry:
 
 plt.figure(figsize=(18, 8))
 
-# 1. Boxplot (Includes Uncontrolled)
+# 1. Boxplot 
 plt.subplot(1, 2, 1)
 data_boxplot = [jnp.mean(bench_registry[n]['data'][:, -1]**2, axis=1) for n in bench_registry]
 plt.boxplot(data_boxplot, labels=list(bench_registry.keys()))
@@ -187,7 +265,7 @@ plt.title('Final System Energy (Log Scale)')
 plt.ylabel('L2 Energy')
 plt.grid(True, alpha=0.3)
 
-# 2. Energy Evolution (Log Scale, Excludes Uncontrolled)
+# 2. Energy Evolution 
 plt.subplot(1, 2, 2)
 time_axis = jnp.arange(T_steps) * dt
 for name in bench_registry:
