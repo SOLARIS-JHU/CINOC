@@ -2,11 +2,13 @@ import jax
 import jax.numpy as jnp
 import optax
 import flax.serialization
+from flax import struct
 import numpy as np
 import time
 from pathlib import Path
 import jax.tree_util
 import sys
+from functools import partial
 
 # Add project root to sys.path
 script_dir = Path(__file__).resolve().parent.parent.parent.parent.parent
@@ -21,11 +23,16 @@ from examples.ks1d.decentralized.dynamics_dual import PDEDynamics
 N_AGENTS = 8
 L_DOMAIN = 22.0
 N_GRID = 128
-BATCH_SIZE = 32
-MAX_EPISODES = 500
-WARMUP_EPISODES = 25
-MAX_STEPS = 200
-EVAL_INT = 10
+BATCH_SIZE = 512
+EVAL_INT = 500
+POLICY_DELAY = 2
+MAX_ENV_STEPS = 200 
+STATE_NORM_FACTOR = 5.0 
+
+# Vectorization Configs
+NUM_PARALLEL_ENVS = 256
+TOTAL_UPDATES = 100000 
+WARMUP_UPDATES = 500
 
 # --- Initialization ---
 key = jax.random.PRNGKey(42)
@@ -36,7 +43,6 @@ def direct_control_policy(action_params, u_obs, u_target, xi_fixed):
 dynamics = PDEDynamics(policy_apply_fn=direct_control_policy)
 xi_fixed = jnp.linspace(0.0, L_DOMAIN, N_AGENTS, endpoint=False) + (L_DOMAIN/N_AGENTS)/2
 
-# Models
 actor = CentralizedActor(n_agents=N_AGENTS)
 critic = CentralizedCritic()
 
@@ -48,111 +54,223 @@ actor_params = actor.init(subkeys[0], dummy_state)
 critic_params = critic.init(subkeys[1], dummy_state, dummy_action)
 target_actor_params, target_critic_params = actor_params, critic_params
 
-# Optimizers
 tx_actor = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-6))
 tx_critic = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(5e-5))
 opt_actor = tx_actor.init(actor_params)
 opt_critic = tx_critic.init(critic_params)
 
-# Standard Replay Buffer (Stores global state vectors)
-class GlobalReplayBuffer:
-    def __init__(self, max_size, s_dim, a_dim):
-        self.s = np.zeros((max_size, s_dim))
-        self.a = np.zeros((max_size, a_dim))
-        self.r = np.zeros((max_size, 1))
-        self.ns = np.zeros((max_size, s_dim))
-        self.ptr, self.size, self.max_size = 0, 0, max_size
+# --- 1. ON-DEVICE REPLAY BUFFER ---
+@struct.dataclass
+class DeviceReplayBuffer:
+    s: jnp.ndarray
+    a: jnp.ndarray
+    r: jnp.ndarray
+    ns: jnp.ndarray
+    d: jnp.ndarray
+    ptr: jnp.int32
+    size: jnp.int32
+    max_size: int = struct.field(pytree_node=False)
 
-    def add(self, s, a, r, ns):
-        self.s[self.ptr] = s
-        self.a[self.ptr] = a
-        self.r[self.ptr] = r
-        self.ns[self.ptr] = ns
-        self.ptr = (self.ptr + 1) % self.max_size
-        self.size = min(self.size + 1, self.max_size)
-
-    def sample(self, batch_size):
-        ind = np.random.randint(0, self.size, size=batch_size)
-        return jnp.array(self.s[ind]), jnp.array(self.a[ind]), \
-               jnp.array(self.r[ind]), jnp.array(self.ns[ind])
-
-buffer = GlobalReplayBuffer(100000, N_GRID, N_AGENTS)
-
-# --- JIT Training Functions ---
+    @classmethod
+    def create(cls, max_size, s_dim, a_dim):
+        return cls(
+            s=jnp.zeros((max_size, s_dim), dtype=jnp.float32),
+            a=jnp.zeros((max_size, a_dim), dtype=jnp.float32),
+            r=jnp.zeros((max_size, 1), dtype=jnp.float32),
+            ns=jnp.zeros((max_size, s_dim), dtype=jnp.float32),
+            d=jnp.zeros((max_size, 1), dtype=jnp.float32),
+            ptr=jnp.int32(0),
+            size=jnp.int32(0),
+            max_size=max_size
+        )
 
 @jax.jit
-def train_step(a_p, c_p, ta_p, tc_p, opt_a, opt_c, s, a, r, ns, key):
-    # TD3 Target logic
+def add_batch_to_buffer(buffer, s_batch, a_batch, r_batch, ns_batch, d_batch):
+    batch_size = s_batch.shape[0]
+    indices = (buffer.ptr + jnp.arange(batch_size)) % buffer.max_size
+    
+    new_s = buffer.s.at[indices].set(s_batch)
+    new_a = buffer.a.at[indices].set(a_batch)
+    new_r = buffer.r.at[indices].set(r_batch)
+    new_ns = buffer.ns.at[indices].set(ns_batch)
+    new_d = buffer.d.at[indices].set(d_batch)
+    
+    new_ptr = (buffer.ptr + batch_size) % buffer.max_size
+    new_size = jnp.minimum(buffer.size + batch_size, buffer.max_size)
+    
+    return buffer.replace(s=new_s, a=new_a, r=new_r, ns=new_ns, d=new_d, ptr=new_ptr, size=new_size)
+
+@partial(jax.jit, static_argnames=['batch_size'])
+def sample_buffer(buffer, batch_size, key):
+    valid_range = jnp.minimum(buffer.size, buffer.max_size)
+    indices = jax.random.randint(key, shape=(batch_size,), minval=0, maxval=valid_range)
+    return buffer.s[indices], buffer.a[indices], buffer.r[indices], buffer.ns[indices], buffer.d[indices]
+
+buffer = DeviceReplayBuffer.create(200_000, N_GRID, N_AGENTS)
+
+# --- JIT Training & Rollout Functions ---
+@jax.jit
+def update_critic(c_p, ta_p, tc_p, opt_c, s, a, r, ns, d, key): 
     key, noise_key = jax.random.split(key)
+    
+    s_norm = s / STATE_NORM_FACTOR
+    ns_norm = ns / STATE_NORM_FACTOR
+    
     noise = jnp.clip(jax.random.normal(noise_key, a.shape) * 0.2, -0.5, 0.5)
-    next_a = jnp.clip(actor.apply(ta_p, ns) + noise, -1.0, 1.0)
+    next_a = jnp.clip(actor.apply(ta_p, ns_norm) + noise, -1.0, 1.0)
     
-    t_q1, t_q2 = critic.apply(tc_p, ns, next_a)
-    target_q = r + 0.99 * jnp.minimum(t_q1, t_q2)
+    t_q1, t_q2 = critic.apply(tc_p, ns_norm, next_a)
+    target_q = r + 0.99 * (1.0 - d) * jnp.minimum(t_q1, t_q2)
     
-    # Critic Update
     def c_loss_fn(p):
-        q1, q2 = critic.apply(p, s, a)
+        q1, q2 = critic.apply(p, s_norm, a)
         return jnp.mean((q1 - target_q)**2 + (q2 - target_q)**2)
     
     l_c, grads_c = jax.value_and_grad(c_loss_fn)(c_p)
     up_c, opt_c = tx_critic.update(grads_c, opt_c)
+    return optax.apply_updates(c_p, up_c), opt_c
+
+@jax.jit
+def update_actor_and_targets(a_p, c_p, ta_p, tc_p, opt_a, s):
+    s_norm = s / STATE_NORM_FACTOR
     
-    # Actor Update
     def a_loss_fn(p):
-        return -jnp.mean(critic.apply(c_p, s, actor.apply(p, s))[0])
+        return -jnp.mean(critic.apply(c_p, s_norm, actor.apply(p, s_norm))[0])
     
     l_a, grads_a = jax.value_and_grad(a_loss_fn)(a_p)
     up_a, opt_a = tx_actor.update(grads_a, opt_a)
+    a_p = optax.apply_updates(a_p, up_a)
     
-    # Soft Updates
     tau = 0.005
-    new_ta = jax.tree_util.tree_map(lambda x, y: tau*x + (1-tau)*y, a_p, ta_p)
-    new_tc = jax.tree_util.tree_map(lambda x, y: tau*x + (1-tau)*y, c_p, tc_p)
+    new_ta = jax.tree_util.tree_map(lambda new, old: tau*new + (1-tau)*old, a_p, ta_p)
+    new_tc = jax.tree_util.tree_map(lambda new, old: tau*new + (1-tau)*old, c_p, tc_p)
+    return a_p, new_ta, new_tc, opt_a
+
+@partial(jax.jit, static_argnames=['add_noise'])
+def get_batch_actions(a_p, u_batch, key, add_noise=True):
+    u_batch_norm = u_batch / STATE_NORM_FACTOR
+    actions = jax.vmap(actor.apply, in_axes=(None, 0))(a_p, u_batch_norm)
+    if add_noise:
+        noise = jax.random.normal(key, actions.shape) * 0.1
+        actions = jnp.clip(actions + noise, -1.0, 1.0)
+    return actions
+
+@jax.jit
+def parallel_physics_step(u_batch, actions, xi_fixed):
+    def single_physics_step(u_single, act_single):
+        traj = dynamics.unroll_controlled(
+            u_single, xi_fixed, jnp.zeros(N_GRID), act_single, 
+            1, N_grid=N_GRID, L=L_DOMAIN
+        )
+        return traj[0][-1]
     
-    return optax.apply_updates(a_p, up_a), optax.apply_updates(c_p, up_c), \
-           new_ta, new_tc, opt_a, opt_c
+    next_u_batch = jax.vmap(single_physics_step)(u_batch, actions)
+    
+    is_invalid = jnp.logical_not(jnp.isfinite(next_u_batch).all(axis=-1, keepdims=True))
+    is_exploding = jnp.max(jnp.abs(next_u_batch), axis=-1, keepdims=True) > 100.0
+    dones_batch = jnp.logical_or(is_invalid, is_exploding)
+    
+    safe_u = jnp.where(dones_batch, jnp.zeros_like(next_u_batch), next_u_batch)
+    rewards_batch = -(jnp.mean(safe_u**2, axis=-1, keepdims=True) / 10.0)
+    
+    return next_u_batch, rewards_batch, dones_batch
 
-# --- Training Loop ---
-for ep in range(MAX_EPISODES):
-    # Eval
-    if ep % EVAL_INT == 0:
-        u = evolve_to_attractor(jax.random.PRNGKey(ep), N_GRID, L_DOMAIN)
-        eval_e = 0.0
-        for _ in range(MAX_STEPS):
-            action = actor.apply(actor_params, u)
-            traj = dynamics.unroll_controlled(u, xi_fixed, jnp.zeros(N_GRID), action, 1, N_grid=N_GRID, L=L_DOMAIN)
-            u = traj[0][-1]
-            eval_e += jnp.mean(u**2)
-        print(f"Eval Ep {ep:03d} | Global Energy: {eval_e/MAX_STEPS:.6f}")
+# --- 2. FAST JIT-COMPILED EVALUATION ---
+@partial(jax.jit, static_argnames=['max_steps'])
+def fast_eval_episode(actor_params, init_state, xi_fixed, max_steps):
+    def step_fn(state, _):
+        state_norm = state / STATE_NORM_FACTOR
+        act = actor.apply(actor_params, state_norm)
+        
+        traj = dynamics.unroll_controlled(
+            state, xi_fixed, jnp.zeros(N_GRID), act, 
+            1, N_grid=N_GRID, L=L_DOMAIN
+        )
+        next_state = traj[0][-1]
+        
+        energy = jnp.mean(next_state**2)
+        crashed = jnp.isnan(next_state).any() | jnp.isinf(next_state).any() | (jnp.max(jnp.abs(next_state)) > 100.0)
+        
+        return next_state, (energy, crashed)
 
-    # Real Train
-    key, subkey = jax.random.split(key)
-    u = evolve_to_attractor(subkey, N_GRID, L_DOMAIN)
-    for t in range(MAX_STEPS):
-        if ep < WARMUP_EPISODES:
-            action = np.random.uniform(-1.0, 1.0, (N_AGENTS,))
+    _, (energies, crashes) = jax.lax.scan(step_fn, init_state, None, length=max_steps)
+    return jnp.mean(energies), jnp.any(crashes)
+
+
+# --- Vectorized Training Loop ---
+print("Pre-generating starting state bank (Vectorized)...")
+bank_keys = jax.random.split(key, 1000)
+state_bank = jax.vmap(lambda k: evolve_to_attractor(k, N_GRID, L_DOMAIN))(bank_keys)
+
+key, subkey = jax.random.split(key)
+u_batch = jax.random.choice(subkey, state_bank, shape=(NUM_PARALLEL_ENVS,))
+env_step_counts = jnp.zeros(NUM_PARALLEL_ENVS)
+
+# We use this dummy counter so we never have to query the GPU for the buffer size
+python_buffer_size = 0
+
+print("Starting Massively Parallel RL Training...")
+start_time = time.time()
+
+for update_step in range(TOTAL_UPDATES):
+    
+    # 1. Ultra-Fast Evaluation Phase
+    if update_step % EVAL_INT == 0:
+        eval_u = state_bank[0] 
+        eval_e, crashed = fast_eval_episode(actor_params, eval_u, xi_fixed, MAX_ENV_STEPS)
+        
+        episode_num = update_step // MAX_ENV_STEPS
+        
+        if crashed:
+            print(f"Update {update_step:05d} | Episode {episode_num} | Eval Energy: [CRASHED] | Time: {time.time()-start_time:.1f}s")
         else:
-            action = np.array(actor.apply(actor_params, u))
+            print(f"Update {update_step:05d} | Episode {episode_num} | Eval Energy: {eval_e:.6f} | Time: {time.time()-start_time:.1f}s")
+            
+    # 2. Parallel Data Collection 
+    key, act_key, physics_key, reset_key = jax.random.split(key, 4)
+    
+    if update_step < WARMUP_UPDATES:
+        actions = jax.random.uniform(act_key, (NUM_PARALLEL_ENVS, N_AGENTS), minval=-1.0, maxval=1.0)
+    else:
+        actions = get_batch_actions(actor_params, u_batch, act_key, add_noise=True)
         
-        traj = dynamics.unroll_controlled(u, xi_fixed, jnp.zeros(N_GRID), action, 1, N_grid=N_GRID, L=L_DOMAIN)
-        next_u = traj[0][-1]
+    next_u_batch, rewards_batch, dones_batch = parallel_physics_step(u_batch, actions, xi_fixed)
+    
+    env_step_counts += 1
+    truncations_batch = env_step_counts >= MAX_ENV_STEPS
+    
+    safe_next_u = jnp.where(dones_batch, jnp.zeros_like(next_u_batch), next_u_batch)
+    safe_rewards = jnp.where(dones_batch, -1000.0, rewards_batch)
+
+    # 3. Add to Device Buffer
+    buffer = add_batch_to_buffer(buffer, u_batch, actions, safe_rewards, safe_next_u, dones_batch)
+    
+    needs_reset = jnp.logical_or(dones_batch.flatten(), truncations_batch)
+    
+    # ALWAYS generate fresh states (GPU does this instantly)
+    fresh_states = jax.random.choice(reset_key, state_bank, shape=(NUM_PARALLEL_ENVS,))
+    
+    # Apply them using jnp.where (No CPU sync required)
+    u_batch = jnp.where(needs_reset[:, None], fresh_states, safe_next_u)
+    env_step_counts = jnp.where(needs_reset, 0, env_step_counts)
         
-        # Kill switch
-        if jnp.isnan(next_u).any(): break
+    # 4. TD3 Updates (Using python_buffer_size)
+    python_buffer_size = min(python_buffer_size + NUM_PARALLEL_ENVS, 200_000)
+    
+    if python_buffer_size > BATCH_SIZE:
+        bs, ba, br, bns, bd = sample_buffer(buffer, BATCH_SIZE, subkey) 
+        key, subkey = jax.random.split(key)
         
-        reward = -jnp.mean(next_u**2)
-        buffer.add(u, action, reward, next_u)
-        u = next_u
+        critic_params, opt_critic = update_critic(
+            critic_params, target_actor_params, target_critic_params, opt_critic, bs, ba, br, bns, bd, subkey
+        )
         
-        if buffer.size > BATCH_SIZE:
-            bs, ba, br, bns = buffer.sample(BATCH_SIZE)
-            key, subkey = jax.random.split(key)
-            actor_params, critic_params, target_actor_params, target_critic_params, opt_actor, opt_critic = \
-                train_step(actor_params, critic_params, target_actor_params, target_critic_params, 
-                           opt_actor, opt_critic, bs, ba, br, bns, subkey)
+        if update_step % POLICY_DELAY == 0:
+            actor_params, target_actor_params, target_critic_params, opt_actor = update_actor_and_targets(
+                actor_params, critic_params, target_actor_params, target_critic_params, opt_actor, bs
+            )
 
 # Save
-with open('rl_centralized_params.msgpack', 'wb') as f:
+with open('models/rl_centralized_params.msgpack', 'wb') as f:
     f.write(flax.serialization.to_bytes({'actor': actor_params}))
-print("RL training finished and weights saved to rl_centralized_params.msgpack.")
+print(f"Training finished in {time.time()-start_time:.1f}s. Weights saved.")

@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 import matplotlib.pyplot as plt
 import flax.linen as nn
 import flax.serialization
@@ -40,34 +41,62 @@ class CentralizedActor(nn.Module):
 # --- NEW: L0 Sparse Polynomial Definitions ---
 class SparsePolynomialLayer(nn.Module):
     out_features: int = 1
+    gamma: float = -0.1
+    zeta: float = 1.1
     @nn.compact
     def __call__(self, x):
         weights = self.param('weights', nn.initializers.glorot_uniform(), (x.shape[-1], self.out_features))
-        log_alpha = self.param('log_alpha', nn.initializers.constant(0.0), (x.shape[-1],))
-        gate = jax.nn.sigmoid(log_alpha)
-        masked_weights = weights * gate[:, None]
-        return jnp.dot(x, masked_weights)
+        # 2D log_alpha for independent actuator masks
+        log_alpha = self.param('log_alpha', nn.initializers.constant(0.0), (x.shape[-1], self.out_features))
+        
+        s = jax.nn.sigmoid(log_alpha)
+        s_stretched = s * (self.zeta - self.gamma) + self.gamma
+        gate = jnp.clip(s_stretched, 0.0, 1.0) 
+        
+        return jnp.dot(x, weights * gate)
 
 class MARLPolynomialActor(nn.Module):
     max_action: float = 1.0
     n_agents: int = 8
     @nn.compact
     def __call__(self, poly_features):
-        x = SparsePolynomialLayer(out_features=self.n_agents)(poly_features)
+        # We must name this "sparse_layer" to match the training checkpoint
+        x = SparsePolynomialLayer(out_features=self.n_agents, name="sparse_layer")(poly_features)
         return self.max_action * jnp.tanh(x)
 
+# Local state is 8 sensors + 2 mu params = 10
+N_grid, L_domain, n_agents = 128, 22.0, 8
+n_sensors = 8
+OBS_DIM_FOR_L0 = n_sensors + 2 
+
+# The exact number of features for degree=2: 1 + N + N*(N+1)//2
+POLY_DIM = 1 + OBS_DIM_FOR_L0 + (OBS_DIM_FOR_L0 * (OBS_DIM_FOR_L0 + 1)) // 2
+
+# Precompute indices for cross-terms statically to guarantee trace safety
+_r, _c = np.triu_indices(OBS_DIM_FOR_L0)
+
 @jax.jit
-def get_poly_features(x):
-    """JAX-Native Polynomial Expansion"""
-    ones = jnp.ones((*x.shape[:-1], 1))
-    return jnp.concatenate([ones, x, jnp.square(x)], axis=-1)
+def get_poly_features_jax(x):
+    """Pure JAX equivalent of PolynomialFeatures(degree=2, include_bias=True)"""
+    is_1d = x.ndim == 1
+    x_2d = jnp.atleast_2d(x)
+    
+    def poly_single(feat):
+        bias = jnp.ones((1,))
+        linear = feat
+        outer = jnp.outer(feat, feat)
+        quad = outer[_r, _c] # Extracts cross terms and squares
+        return jnp.concatenate([bias, linear, quad])
+        
+    res = jax.vmap(poly_single)(x_2d)
+    return res[0] if is_1d else res
 # ---------------------------------------------
 
 # --- 2. Configuration & Paths ---
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
-output_dir = Path("figures/images/bench")
+output_dir = Path("figures/images/bench_new")
 output_dir.mkdir(parents=True, exist_ok=True)
 
 bench_models_dir = Path("bench/models")
@@ -82,7 +111,6 @@ from examples.ks1d.decentralized.bench.models_hypemarl import HyperActor
 from examples.ks1d.decentralized.bench.utils_hypemarl import get_sinusoidal_encoding
 from examples.ks1d.decentralized.bench.env_ks import extract_patches_jit
 
-N_grid, L_domain, n_agents = 128, 22.0, 8
 T_steps, N_eval, dt = 200, 100, 0.05
 
 bench_registry = {}
@@ -180,19 +208,23 @@ if rl_p:
 
 # --- NEW: 5. L0 Sparse Poly ---
 l0_model = MARLPolynomialActor(n_agents=n_agents)
-# Global state is grid + 2 mu params. Expansion: 1 + 130 + 130 = 261
-global_state_dim = N_grid + 2
-poly_dim = 1 + global_state_dim + global_state_dim 
-dummy_poly = jnp.ones((poly_dim,))
+dummy_poly = jnp.ones((POLY_DIM,))
 
 # Update filename to whatever your final L0 epoch checkpoint is named
 l0_p = load_params(bench_models_dir / 'actor_poly_ep490.msgpack', l0_model, (dummy_poly,))
 
+# Pre-calculate sensor indices exactly as done in the KSEnv
+sensor_indices = np.linspace(0, N_grid, n_sensors, endpoint=False, dtype=int)
+
 if l0_p:
     def l0_apply(p, u, target, xi):
+        # Extract the partial observation from the full PDE grid
+        sensor_readings = u[sensor_indices]
         mu = jnp.array([L_domain, dt])
-        global_state = jnp.concatenate([u, mu])
-        poly_state = get_poly_features(global_state)
+        obs = jnp.concatenate([sensor_readings, mu])
+        
+        # Pure JAX trace-safe expansion!
+        poly_state = get_poly_features_jax(obs)
         
         # Guard clause: Flax serialization sometimes strips the 'params' root key
         apply_params = p if 'params' in p else {'params': p}
@@ -210,7 +242,7 @@ bench_registry['Uncontrolled'] = {
 
 # --- 4. Simulation ---
 print(f"Generating Data & Running Simulations for {list(bench_registry.keys())}...")
-key = jax.random.PRNGKey(42)
+key = jax.random.PRNGKey(1234)
 u_init_batch = get_batch_initial_conditions(jax.random.split(key)[1], N_eval, N_grid, L_domain)
 xi_batch = jnp.tile(xi_single, (N_eval, 1))
 
@@ -238,6 +270,16 @@ for name in bench_registry:
     final_e = jnp.mean(bench_registry[name]['data'][:, -1]**2, axis=1)
     mean_val, std_val = jnp.mean(final_e), jnp.std(final_e)
     print(f"{name:<15} | {mean_val:.6f}      | ±{2*std_val:.6f}")
+
+if 'L0_Poly' in bench_registry:
+    l0_params = bench_registry['L0_Poly']['params']['params']['sparse_layer']['log_alpha']
+    gamma, zeta = -0.1, 1.1
+    s_stretched = jax.nn.sigmoid(l0_params) * (zeta - gamma) + gamma
+    gate = jnp.clip(s_stretched, 0.0, 1.0)
+    active_count = jnp.sum(gate > 0)
+    print("-" * 70)
+    print(f"L0 Model Active Parameters: {active_count} / {gate.size}")
+
 print("="*70)
 
 # --- 6. Plotting & PDF Export ---
