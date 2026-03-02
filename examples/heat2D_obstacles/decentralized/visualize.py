@@ -125,7 +125,7 @@ def main():
 
     # Initialize model and dynamics (no Tesseract)
     model = DecentralizedHeat2DControlNet(features=(16, 32))
-    dynamics = PDEDynamics(None, policy_apply_fn=model.apply, use_tesseract=False)
+    dynamics = PDEDynamics(policy_apply_fn=model.apply)
 
     try:
         params = load_params(model, 'decentralized_params_heat2d_obstacles.msgpack', n_grid, n_agents)

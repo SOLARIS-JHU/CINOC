@@ -130,8 +130,7 @@ def train_step(params, opt_state, z_init_batch, xi_init_batch, z_target_batch, d
     return params, opt_state, loss, aux
 
 # --- Training Loop ---
-dynamics = PDEDynamics(None, policy_apply_fn=model.apply,
-                       use_tesseract=False)
+dynamics = PDEDynamics(policy_apply_fn=model.apply)
 
 # Load or generate dataset
 print("Loading/Generating 2D dataset...")
