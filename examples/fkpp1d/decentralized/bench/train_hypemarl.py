@@ -196,6 +196,7 @@ def update_critics(c1_p, c2_p, ta_p, tc1_p, tc2_p, opt_c1, opt_c2, y, z, u, r, n
     vmap_actor = jax.vmap(actor.apply, in_axes=(None, 0, 0))
     vmap_critic = jax.vmap(critic.apply, in_axes=(None, 0, 0, 0))
     
+    
     next_u = jnp.clip(vmap_actor(ta_p, nz, ny) + noise, jnp.array([-U_MAX, -V_MAX]), jnp.array([U_MAX, V_MAX]))
     
     # Expand dims so shape is (batch, 1) to match `r` and `d`
