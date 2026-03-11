@@ -30,7 +30,7 @@ POLICY_DELAY = 2
 
 # KS2D Specific Control Timing
 MAX_ENV_STEPS = 50     # Control steps (T_steps)
-SUBSTEPS = 20          # Physics steps per control step
+SUBSTEPS = 10          # Physics steps per control step
 DT = 0.005             # Physics dt
 
 # Vectorization Configs

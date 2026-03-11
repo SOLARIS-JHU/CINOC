@@ -28,9 +28,12 @@ bench_models_dir.mkdir(parents=True, exist_ok=True)
 from examples.turbulence2d.decentralized.dynamics_dual import PDEDynamics2D 
 from models.policy_turb import DecentralizedTurbulenceNet
 from examples.turbulence2d.decentralized.data_utils import get_batch_initial_conditions
-from examples.turbulence2d.decentralized.bench.env_turb import extract_patches_turb_jit
+
+# MARL & RL Model Imports
+from examples.turbulence2d.decentralized.bench.env_turb2d import extract_patches_2d_jit
 from examples.turbulence2d.decentralized.bench.utils_hypemarl import get_sinusoidal_encoding
-from examples.turbulence2d.decentralized.bench.models_marl import MARLActor2DTurb
+from examples.turbulence2d.decentralized.bench.models_marl import MARLActor2D
+from examples.turbulence2d.decentralized.bench.models_rl import CentralizedActor
 
 # 2D Specific Configuration
 N_grid = 64
@@ -41,7 +44,7 @@ substeps = 5
 dt = 0.01
 viscosity = 5e-4
 N_eval = 20 # Evaluation batch size
-ENV_MU = jnp.array([L_domain, viscosity]) 
+ENV_MU = jnp.array([L_domain, dt, viscosity])
 
 def get_2d_sinusoidal_encoding(p_2d, d=1024, n=1000.0):
     pe_x = get_sinusoidal_encoding(p_2d[:, 0], d=d, n=n)
@@ -58,7 +61,7 @@ def load_params(filename, model, dummy_input):
     with open(filename, 'rb') as f: bytes_data = f.read()
     
     # Init expects (xi_fixed, obs) for TurbulenceNet 
-    # Or (dummy_input) for MARLActor
+    # Or (dummy_input) for Actor models
     if isinstance(model, DecentralizedTurbulenceNet):
         variables = model.init(jax.random.PRNGKey(0), dummy_input[0], dummy_input[1])
     else:
@@ -80,38 +83,51 @@ grid_dim = int(np.sqrt(n_agents))
 x_lin = np.linspace(0, L_domain, grid_dim, endpoint=False) + (L_domain/grid_dim)/2
 xv, yv = np.meshgrid(x_lin, x_lin)
 xi_init = jnp.stack([xv.flatten(), yv.flatten()], axis=-1).astype(np.float32)
+target_state = jnp.zeros((N_grid, N_grid))
 
 # 1. DPC (Centralized)
 dpc_model = DecentralizedTurbulenceNet(features=(32, 64), patch_size=16, domain_size=(L_domain, L_domain), u_max=40.0)
 dpc_p = load_params('turbulence_params.msgpack', dpc_model, (xi_init, jnp.zeros((1, N_grid, N_grid))))
 if dpc_p:
-    # We must wrap DPC apply since the wrapper expects a flat output per agent
     def dpc_apply_wrapped(p, xi_fixed, obs):
         return dpc_model.apply(p, xi_fixed, obs)
     bench_registry['DPC'] = {'apply': dpc_apply_wrapped, 'params': dpc_p, 'color': 'blue'}
 
 # 2. MARL (Decentralized Multi-Agent)
-marl_model = MARLActor2DTurb()
-# Dummy Input calculation: Patch 3 channels * 16x16 (768) + Mu (2) + PE (2048) = 2818
-marl_dummy_input = jnp.zeros((n_agents, 2818))
-marl_p = load_params(bench_models_dir / 'marl_turbulence_params.msgpack', marl_model, marl_dummy_input)
+marl_model = MARLActor2D()
+marl_dummy_input = jnp.zeros((n_agents, 2819))
+marl_p = load_params(bench_models_dir / 'marl_turb_params.msgpack', marl_model, marl_dummy_input)
 
 if marl_p:
     def marl_apply(p, xi_fixed, obs):
-        # Env provides physical obs (w_curr). Squeeze the batch channel (1, N, N) -> (N, N)
         w_phys = obs.squeeze()
-        # Window size / patch size = 16 for Turbulence
-        y = extract_patches_turb_jit(w_phys, xi_fixed/L_domain, patch_size=16, n_grid=N_grid)
+        xi_norm = xi_fixed / L_domain
+        
+        y = extract_patches_2d_jit(w_phys, target_state, xi_norm, 16, N_grid)
         mu_broadcast = jnp.tile(ENV_MU, (n_agents, 1))
-        pe = get_2d_sinusoidal_encoding(xi_fixed/L_domain, d=1024) 
+        pe = get_2d_sinusoidal_encoding(xi_norm, d=1024) 
         
         obs_cat = jnp.concatenate([y, mu_broadcast, pe], axis=-1)
         action = marl_model.apply(p, obs_cat)
-        return action[..., 0] # Return 1D forcing
+        
+        return action.squeeze(-1)
     
     bench_registry['MARL'] = {'apply': marl_apply, 'params': marl_p, 'color': 'orange'}
 
-# 3. Uncontrolled Baseline
+# 3. RL (Centralized God-View)
+rl_model = CentralizedActor(n_agents=n_agents)
+rl_dummy_input = jnp.zeros((1, N_grid, N_grid)) 
+rl_p = load_params(bench_models_dir / 'rl_turb_params.msgpack', rl_model, rl_dummy_input)
+
+if rl_p:
+    def rl_apply(p, xi_fixed, obs):
+        # obs from PDEDynamics2D is already shape (1, N_grid, N_grid)
+        action = rl_model.apply(p, obs)
+        return action.squeeze() 
+    
+    bench_registry['RL'] = {'apply': rl_apply, 'params': rl_p, 'color': 'green'}
+
+# 4. Uncontrolled Baseline
 bench_registry['Uncontrolled'] = {
     'apply': lambda p, xi_fixed, obs: jnp.zeros(n_agents), 
     'params': None, 'color': 'red'
@@ -132,15 +148,15 @@ else:
 
 xi_batch = jnp.tile(xi_init, (N_eval, 1, 1))
 
-@jax.jit(static_argnames=['name'])
 def run_sim(name, w_hat_init, xi_i):
-    dyn = PDEDynamics2D(policy_apply_fn=bench_registry[name]['apply'])
+    apply_fn = bench_registry[name]['apply']
+    params = bench_registry[name]['params']
+    dyn = PDEDynamics2D(policy_apply_fn=apply_fn)
     
-    # Turbulence wrapper returns Physical State Trajectories natively!
     w_phys_traj, u_ctrl_traj = dyn.unroll_controlled(
         w_hat_init=w_hat_init, 
         xi_fixed=xi_i, 
-        params=bench_registry[name]['params'], 
+        params=params, 
         t_steps=T_steps,
         substeps=substeps,
         N_grid=N_grid,
@@ -153,7 +169,12 @@ def run_sim(name, w_hat_init, xi_i):
 
 for name in bench_registry:
     print(f"Running {name} unrolls...")
-    w_phys_res = jax.vmap(lambda w, x: run_sim(name, w, x))(w_hat_pool, xi_batch)
+    
+    @jax.jit
+    def batched_sim(w_batch, x_batch):
+        return jax.vmap(lambda w, x: run_sim(name, w, x))(w_batch, x_batch)
+        
+    w_phys_res = batched_sim(w_hat_pool, xi_batch)
     bench_registry[name]['data'] = w_phys_res
 
 # --- 3. Metrics & Results Printing ---
@@ -162,7 +183,6 @@ print(f"{'Method':<15} | {'Final Enstrophy':<20} | {'2-Sigma':<20}")
 print("-" * 70)
 
 for name in bench_registry:
-    # Enstrophy is L2 norm of physical vorticity at final timestep
     final_err = jnp.mean(bench_registry[name]['data'][:, -1]**2, axis=(1, 2))
     mean_val, std_val = jnp.mean(final_err), jnp.std(final_err)
     print(f"{name:<15} | {mean_val:.6f}             | ±{2*std_val:.6f}")
@@ -173,19 +193,16 @@ print("Saving individual state plots to PDF...")
 for name in bench_registry:
     fig = plt.figure(figsize=(10, 5))
     
-    # Map the initial spectral state to physical for viz
     initial_state = jnp.fft.ifft2(w_hat_pool[0]).real
     final_state = bench_registry[name]['data'][0, -1]
     
     vmin, vmax = float(jnp.min(initial_state)), float(jnp.max(initial_state))
     
-    # Plot Initial
     ax1 = plt.subplot(1, 2, 1)
     im1 = ax1.imshow(initial_state, aspect='auto', origin='lower', extent=[0, L_domain, 0, L_domain], cmap='RdBu_r', vmin=vmin, vmax=vmax)
     plt.title('Initial Vorticity')
     plt.colorbar(im1, label='ω(x,y)')
     
-    # Plot Final
     ax2 = plt.subplot(1, 2, 2)
     im2 = ax2.imshow(final_state, aspect='auto', origin='lower', extent=[0, L_domain, 0, L_domain], cmap='RdBu_r', vmin=vmin, vmax=vmax)
     plt.title(f'Final Controlled State: {name}')
@@ -198,7 +215,6 @@ for name in bench_registry:
 # --- 5. Plotting Trendlines ---
 plt.figure(figsize=(18, 8))
 
-# 1. Boxplot of Final Enstrophy
 plt.subplot(1, 2, 1)
 data_boxplot = [jnp.mean((bench_registry[n]['data'][:, -1])**2, axis=(1, 2)) for n in bench_registry]
 plt.boxplot(data_boxplot, labels=list(bench_registry.keys()))
@@ -207,11 +223,9 @@ plt.title('Final System Enstrophy (Log Scale)')
 plt.ylabel('Mean L2 Vorticity')
 plt.grid(True, alpha=0.3)
 
-# 2. Enstrophy Evolution
 plt.subplot(1, 2, 2)
 time_axis = jnp.arange(T_steps) * substeps * dt
 for name in bench_registry:
-    # Compute mean enstrophy across spatial axes (2, 3) and batch axis (0)
     evol = jnp.mean(jnp.mean(bench_registry[name]['data']**2, axis=(2, 3)), axis=0)
     plt.plot(time_axis, evol, label=name, color=bench_registry[name]['color'], lw=2.5)
 

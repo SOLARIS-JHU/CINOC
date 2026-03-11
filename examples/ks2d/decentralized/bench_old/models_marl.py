@@ -1,12 +1,12 @@
 import jax.numpy as jnp
 import flax.linen as nn
 
-# Action scaling constraint 
-U_MAX = 75.0  
+# Action scaling constraint (Matches DecentralizedKS2DControlNet config)
+U_MAX = 5.0  
 
-class MARLActor2D(nn.Module):
+class MARLActor2DKS(nn.Module):
     """
-    Standard Decentralized Actor adapted for turbulence2D (Fixed Actuators).
+    Standard Decentralized Actor adapted for 2D KS (Fixed Actuators).
     Maps concatenated [y_local, mu, PE_2d(x, y)] directly to 1D action [u].
     """
     hidden_dim: int = 256
@@ -29,7 +29,7 @@ class MARLActor2D(nn.Module):
         # Shape: (..., 1) -> [u]
         return u_out
 
-class MARLCritic2D(nn.Module):
+class MARLCritic2DKS(nn.Module):
     """
     Critic network estimating Q-values for the 1D action space.
     """

@@ -34,9 +34,9 @@ CONFIG = {
     'dt': 0.005,
     
     # Action Repetition settings
-    'substeps': 20,        # Physics steps per Control step
+    'substeps': 10,        # Physics steps per Control step
     'T_steps': 50,         # Number of Control steps
-    # Total Physics Time = 50 * 20 * 0.005 = 5.0 seconds
+    # Total Physics Time = 50 * 10 * 0.005 = 2.5 seconds
     
     # Training
     'n_agents': 100,       
@@ -153,7 +153,7 @@ if __name__ == "__main__":
     
     # Optimizer
     lr_schedule = optax.warmup_cosine_decay_schedule(
-        init_value=5e-4, peak_value=1e-3, warmup_steps=50, # warmup was 50 !!!
+        init_value=5e-4, peak_value=1e-3, warmup_steps=50,
         decay_steps=CONFIG['epochs'], end_value=1e-5
     )
     optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(lr_schedule))

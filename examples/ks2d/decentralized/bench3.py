@@ -34,9 +34,9 @@ N_grid = 64
 L_domain = 32.0
 n_agents = 100
 T_steps = 50 
-substeps = 20
+substeps = 10
 dt = 0.005
-N_eval = 20 # Reduced evaluation batch size to save VRAM on 2D
+N_eval = 20
 ENV_MU = jnp.array([L_domain, dt]) 
 
 def get_2d_sinusoidal_encoding(p_2d, d=1024, n=1000.0):
