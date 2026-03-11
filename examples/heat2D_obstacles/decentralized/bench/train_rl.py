@@ -29,7 +29,7 @@ MAX_ENV_STEPS = 100
 
 # Vectorization Configs
 NUM_PARALLEL_ENVS = 128
-TOTAL_UPDATES = 5000 # 100000
+TOTAL_UPDATES = 100000
 WARMUP_UPDATES = 500
 
 # --- Obstacles Config ---

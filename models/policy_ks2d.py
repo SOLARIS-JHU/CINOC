@@ -210,3 +210,4 @@ class DecentralizedKS2DControlNet(nn.Module):
         u_raw = nn.Dense(1)(h).squeeze(-1)
 
         return self.u_max * jnp.tanh(u_raw)
+    

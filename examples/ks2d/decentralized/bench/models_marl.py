@@ -2,7 +2,7 @@ import jax.numpy as jnp
 import flax.linen as nn
 
 # Action scaling constraint (Matches DecentralizedKS2DControlNet config)
-U_MAX = 10.0  
+U_MAX = 5.0  
 
 class MARLActor2DKS(nn.Module):
     """

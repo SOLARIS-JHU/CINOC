@@ -35,8 +35,8 @@ DT = 0.005             # Physics dt
 
 # Vectorization Configs
 NUM_PARALLEL_ENVS = 64
-TOTAL_UPDATES = 5000 #100000 
-WARMUP_UPDATES = 50 # 500
+TOTAL_UPDATES = 50000 
+WARMUP_UPDATES = 500
 
 # --- Initialization ---
 key = jax.random.PRNGKey(42)

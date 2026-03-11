@@ -37,7 +37,7 @@ DT = 0.005             # Physics dt
 
 # Vectorization Configs
 NUM_PARALLEL_ENVS = 64
-TOTAL_UPDATES = 1000 #100000 
+TOTAL_UPDATES = 50000 
 WARMUP_UPDATES = 500
 
 def get_2d_sinusoidal_encoding(p_2d, d=1024, n=1000.0):

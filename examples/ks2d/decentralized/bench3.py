@@ -114,7 +114,7 @@ bench_registry['Uncontrolled'] = {
 
 # --- 2. Simulation ---
 print(f"Generating KS2D Initial Conditions and Running Simulations for {list(bench_registry.keys())}...")
-key = jax.random.PRNGKey(1234)
+key = jax.random.PRNGKey(123)
 u_init_batch = get_batch_initial_conditions(jax.random.split(key)[1], N_eval, N_grid, L_domain)
 xi_batch = jnp.tile(xi_init, (N_eval, 1, 1))
 u_target_batch = jnp.zeros_like(u_init_batch) 
