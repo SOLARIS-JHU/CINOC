@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
-import flax.linen as nn
 import flax.serialization
 from flax.serialization import msgpack_restore, from_state_dict
 import sys
@@ -11,136 +10,36 @@ from pathlib import Path
 from typing import Sequence
 from functools import partial
 
-# --- 1. Model Definitions (Flax) ---
-
-# Action scaling constraints
-U_MAX = 40.0
-V_MAX = 2.0
-
-class MARLActor(nn.Module):
-    """
-    Standard Decentralized Actor adapted for Dual Outputs.
-    Maps concatenated [y_i, mu, PE(p_i)] directly to action [u_i, v_i].
-    """
-    hidden_dim: int = 256
-
-    @nn.compact
-    def __call__(self, x):
-        x = nn.Dense(self.hidden_dim)(x)
-        x = nn.relu(x)
-        x = nn.Dense(self.hidden_dim)(x)
-        x = nn.relu(x)
-        
-        # DPC-style Normalization trick for stability
-        x = x / (jnp.linalg.norm(x, axis=-1, keepdims=True) + 1.0)
-        
-        # Dual Heads for Forcing (u) and Velocity (v)
-        u_raw = nn.Dense(1)(x)
-        v_raw = nn.Dense(1)(x)
-        
-        u_out = U_MAX * jnp.tanh(u_raw)
-        v_out = V_MAX * jnp.tanh(v_raw)
-        
-        # Shape: (..., 2)
-        return jnp.concatenate([u_out, v_out], axis=-1)
-
-class HyperActor(nn.Module):
-    """
-    Hypernetwork-based Actor for Heat Equation (Unbatched/1D).
-    Maps z = PE(xi_i) to the parameters of a local policy network.
-    The local policy maps local state y_i to a 2D action [u_i, v_i].
-    """
-    hidden_dim: int = 256
-    action_dim: int = 2
-    
-    @nn.compact
-    def __call__(self, z, y):
-        # Assumes inputs are strictly 1D vectors for a single agent/env combination
-        y_dim = y.shape[-1]
-        w1_size = y_dim * self.hidden_dim
-        b1_size = self.hidden_dim
-        w2_size = self.hidden_dim * self.action_dim
-        b2_size = self.action_dim
-        total_params = w1_size + b1_size + w2_size + b2_size
-        
-        # Hypernetwork forward pass (predicts primary network weights)
-        h_out = nn.Dense(total_params, kernel_init=nn.initializers.xavier_uniform())(z)
-        
-        # Unpack weights for the single instance (NO batch dimension slicing)
-        idx = 0
-        w1 = h_out[idx : idx+w1_size].reshape(y_dim, self.hidden_dim)
-        idx += w1_size
-        b1 = h_out[idx : idx+b1_size]
-        idx += b1_size
-        w2 = h_out[idx : idx+w2_size].reshape(self.hidden_dim, self.action_dim)
-        idx += w2_size
-        b2 = h_out[idx : idx+b2_size]
-        
-        # DPC Normalization trick for stable gradients
-        y_norm = y / (jnp.linalg.norm(y) + 1.0)
-        
-        # Primary local network forward pass 
-        hidden = nn.relu(jnp.matmul(y_norm, w1) + b1)
-        out = jnp.matmul(hidden, w2) + b2 
-        
-        # Bounded outputs based on actuator physical limits
-        u_out = U_MAX * jnp.tanh(out[0:1])
-        v_out = V_MAX * jnp.tanh(out[1:2])
-        
-        return jnp.concatenate([u_out, v_out], axis=-1)
-
-class CentralizedActor(nn.Module):
-    """Centralized baseline that observes the whole domain and outputs all actions."""
-    hidden_dim: int = 256
-    n_agents: int = 8 # Updated for Heat1D
-    
-    @nn.compact
-    def __call__(self, obs_flat):
-        x = nn.Dense(self.hidden_dim)(obs_flat)
-        x = nn.relu(x)
-        x = nn.Dense(self.hidden_dim)(x)
-        x = nn.relu(x)
-        u = U_MAX * jnp.tanh(nn.Dense(self.n_agents)(x))
-        v = V_MAX * jnp.tanh(nn.Dense(self.n_agents)(x))
-        return jnp.stack([u, v], axis=-1)
-
-def get_sinusoidal_encoding(p, d=2048, n=1000.0):
-    j_vals = jnp.arange(1, (d // 2) + 1)
-    omega_j = jnp.power(n, 2 * j_vals / d)
-    p_expanded = p[:, None]
-    omega_expanded = omega_j[None, :]
-    args = p_expanded / omega_expanded
-    sin_enc = jnp.sin(args)
-    cos_enc = jnp.cos(args)
-    pe = jnp.stack([sin_enc, cos_enc], axis=-1).reshape(p.shape[0], d)
-    return pe
-
-# --- 2. Configuration & Paths ---
+# --- 1. Configuration & Paths ---
 script_dir = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
-output_dir = Path("figures/bench_heat_new")
+output_dir = Path("figures/bench_heat")
 output_dir.mkdir(parents=True, exist_ok=True)
 
 bench_models_dir = Path("bench/models")
 bench_models_dir.mkdir(parents=True, exist_ok=True) 
 
-# Heat Equation Imports
+# Base Environment & Utils
 from examples.heat1d.decentralized.dynamics_dual import PDEDynamics 
-from models.policy import DecentralizedControlNet
 from examples.heat1d.decentralized.data_utils import generate_grf
+from examples.heat1d.decentralized.bench.utils_hypemarl import get_sinusoidal_encoding
 
-# Heat specific configuration
+# --- IMPORT MODELS DIRECTLY ---
+from models.policy import DecentralizedControlNet
+from examples.heat1d.decentralized.bench.models_marl import MARLActor
+from examples.heat1d.decentralized.bench.models_hypemarl import HyperActor
+from examples.heat1d.decentralized.bench.models_rl import CentralizedActor
+from examples.heat1d.decentralized.bench.models_ppo import PPOActor
+from examples.heat1d.decentralized.bench.models_mappo import MAPPOActor
+
 N_grid, L_domain, n_agents = 100, 1.0, 8
 T_steps, N_eval = 300, 50
-
-# PDE params to inject into local obs (Heat only uses diffusion 'nu')
 ENV_MU = jnp.array([0.01]) 
 
 # --- Shared Patch Extractor ---
 @partial(jax.jit, static_argnames=['window_size'])
 def extract_patches_jit(full_state, target_state, xi_norm, window_size):
-    """Uses constant padding (0.0) for Zero-Dirichlet Boundary Conditions."""
     error = full_state - target_state
     error_grad = jnp.gradient(error)
     half_window = window_size // 2
@@ -161,7 +60,7 @@ def extract_patches_jit(full_state, target_state, xi_norm, window_size):
 
 bench_registry = {}
 
-# --- 3. Loading Logic ---
+# --- 2. Loading Logic ---
 def load_params(filename, model, dummy_input):
     if not os.path.exists(filename):
         print(f"[-] {filename} not found.")
@@ -183,67 +82,94 @@ xi_init = jnp.linspace(0.2, 0.8, n_agents)
 
 # 1. DPC
 dpc_model = DecentralizedControlNet(features=(64, 64))
-# Loads from the SAME folder as this script or bench_models_dir
 dpc_p = load_params('decentralized_params.msgpack', dpc_model, (jnp.zeros(N_grid), jnp.zeros(N_grid), xi_init))
 if dpc_p:
     bench_registry['DPC'] = {'apply': dpc_model.apply, 'params': dpc_p, 'color': 'blue'}
 
-# 2. MARL 
+
+# 2. MARL (TD3)
 marl_model = MARLActor()
-# Dummy Input calculation: Patch (20+20=40) + Mu (1) + PE (2048) = 2089
-marl_dummy_input = jnp.zeros((n_agents, 2089))
-marl_p = load_params(bench_models_dir / 'marl_heat_params.msgpack', marl_model, (marl_dummy_input,))
+marl_dummy_input = (jnp.zeros((n_agents, 2089)),)
+marl_p = load_params(bench_models_dir / 'marl_heat_params.msgpack', marl_model, marl_dummy_input)
 
 if marl_p:
     def marl_apply(p, z, target, xi):
         y = extract_patches_jit(z, target, xi/L_domain, window_size=8)
-        mu_broadcast = jnp.tile(ENV_MU, (n_agents, 1))
         pe = get_sinusoidal_encoding(xi, d=2048)
-        
-        obs = jnp.concatenate([y, mu_broadcast, pe], axis=-1)
+        obs = jnp.concatenate([y, jnp.tile(ENV_MU, (n_agents, 1)), pe], axis=-1)
         action = marl_model.apply(p, obs)
         return action[:, 0], action[:, 1]
     
-    bench_registry['MARL'] = {'apply': marl_apply, 'params': marl_p, 'color': 'orange'}
+    bench_registry['MARL (TD3)'] = {'apply': marl_apply, 'params': marl_p, 'color': 'orange'}
 
-# 2.5 HypeMARL
-hypemarl_model = HyperActor()
-# Unbatched 1D dummy inputs for HyperActor initialization
-dummy_z = jnp.zeros((2048,))
-dummy_y = jnp.zeros((40,))
 
-hypemarl_p = load_params(bench_models_dir / 'hypemarl_heat_params.msgpack', hypemarl_model, (dummy_z, dummy_y))
+# 3. PPO (Centralized global state inputs: z, target, xi)
+ppo_model = PPOActor(n_agents=n_agents)
+ppo_dummy_input = (jnp.zeros(N_grid), jnp.zeros(N_grid), jnp.zeros(n_agents))
+ppo_p = load_params(bench_models_dir / 'ppo_heat_params.msgpack', ppo_model, ppo_dummy_input)
 
-if hypemarl_p:
-    def hypemarl_apply(p, z, target, xi):
+if ppo_p:
+    def ppo_apply(p, z, target, xi):
+        # Extract mean, ignore standard deviation for eval
+        mean, _ = ppo_model.apply(p, z, target, xi)
+        return mean[:, 0], mean[:, 1]
+        
+    bench_registry['PPO'] = {'apply': ppo_apply, 'params': ppo_p, 'color': 'magenta'}
+
+
+# 4. MAPPO (Decentralized patch inputs: obs)
+mappo_model = MAPPOActor(n_agents=n_agents)
+mappo_dummy_input = (jnp.zeros((n_agents, 2089)),)
+mappo_p = load_params(bench_models_dir / 'mappo_heat_params.msgpack', mappo_model, mappo_dummy_input)
+
+if mappo_p:
+    def mappo_apply(p, z, target, xi):
         y = extract_patches_jit(z, target, xi/L_domain, window_size=8)
         pe = get_sinusoidal_encoding(xi, d=2048)
+        obs = jnp.concatenate([y, jnp.tile(ENV_MU, (n_agents, 1)), pe], axis=-1)
         
-        # Vectorize the unbatched module over the n_agents dimension
-        vmap_actor = jax.vmap(hypemarl_model.apply, in_axes=(None, 0, 0))
-        action = vmap_actor(p, pe, y)
+        # Extract mean, ignore standard deviation for eval
+        mean, _ = mappo_model.apply(p, obs) 
+        return mean[:, 0], mean[:, 1]
         
-        return action[:, 0], action[:, 1]
-    
-    bench_registry['HypeMARL'] = {'apply': hypemarl_apply, 'params': hypemarl_p, 'color': 'green'}
+    bench_registry['MAPPO'] = {'apply': mappo_apply, 'params': mappo_p, 'color': 'cyan'}
 
-# 3. RL Centralized
+
+# # 5. HypeMARL
+# hypemarl_model = HyperActor()
+# hypemarl_dummy_input = (jnp.zeros((2048,)), jnp.zeros((40,)))
+# hypemarl_p = load_params(bench_models_dir / 'hypemarl_heat_params.msgpack', hypemarl_model, hypemarl_dummy_input)
+
+# if hypemarl_p:
+#     def hypemarl_apply(p, z, target, xi):
+#         y = extract_patches_jit(z, target, xi/L_domain, window_size=8)
+#         pe = get_sinusoidal_encoding(xi, d=2048)
+#         vmap_actor = jax.vmap(hypemarl_model.apply, in_axes=(None, 0, 0))
+#         action = vmap_actor(p, pe, y)
+#         return action[:, 0], action[:, 1]
+    
+#     bench_registry['HypeMARL'] = {'apply': hypemarl_apply, 'params': hypemarl_p, 'color': 'green'}
+
+
+# 6. RL Centralized (Centralized global state inputs: z, target, xi)
 rl_model = CentralizedActor(n_agents=n_agents)
-rl_p = load_params(bench_models_dir / 'rl_heat_params.msgpack', rl_model, (jnp.zeros(N_grid*2 + n_agents),))
+rl_dummy_input = (jnp.zeros(N_grid), jnp.zeros(N_grid), jnp.zeros(n_agents))
+rl_p = load_params(bench_models_dir / 'rl_heat_params.msgpack', rl_model, rl_dummy_input)
+
 if rl_p:
     def rl_apply(p, z, target, xi):
-        obs = jnp.concatenate([z, target, xi])
-        action = rl_model.apply(p, obs)
+        action = rl_model.apply(p, z, target, xi)
         return action[:, 0], action[:, 1]
-    bench_registry['RL'] = {'apply': rl_apply, 'params': rl_p, 'color': 'purple'}
+    bench_registry['Centralized RL'] = {'apply': rl_apply, 'params': rl_p, 'color': 'purple'}
 
-# 4. Uncontrolled Baseline
+
+# 7. Uncontrolled Baseline
 bench_registry['Uncontrolled'] = {
     'apply': lambda p, z, t, xi: (jnp.zeros(n_agents), jnp.zeros(n_agents)), 
     'params': None, 'color': 'red'
 }
 
-# --- 4. Simulation ---
+# --- 3. Simulation ---
 print(f"Running Simulations for {list(bench_registry.keys())}...")
 key = jax.random.PRNGKey(42)
 keys_init = jax.random.split(key, N_eval)
@@ -268,26 +194,22 @@ for name in bench_registry:
     bench_registry[name]['z_data'] = z_res
     bench_registry[name]['xi_data'] = xi_res
 
-# --- 5. Metrics & Results Printing ---
+# --- 4. Metrics & Results Printing ---
 print("\n" + "="*70)
 print(f"{'Method':<15} | {'Mean Track Error':<20} | {'2-Sigma':<20}")
 print("-" * 70)
 
 for name in bench_registry:
-    # Error is MSE between final state and target
     final_err = jnp.mean((bench_registry[name]['z_data'][:, -1] - z_target_batch)**2, axis=1)
     mean_val, std_val = jnp.mean(final_err), jnp.std(final_err)
     print(f"{name:<15} | {mean_val:.6f}             | ±{2*std_val:.6f}")
 print("="*70)
 
-# --- 6. Individual Field Plots (PDF Export) ---
+# --- 5. Individual Field Plots (PDF Export) ---
 print("Saving individual field plots to PDF...")
 for name in bench_registry:
     plt.figure(figsize=(8, 5))
-    
-    # Visualize the first sample [0] from the evaluation batch
     field_data = bench_registry[name]['z_data'][0]
-    
     plt.imshow(field_data.T, aspect='auto', origin='lower', 
                extent=[0, T_steps, 0, L_domain], 
                cmap='hot', vmin=float(jnp.min(z_target_batch)), vmax=float(jnp.max(z_target_batch)))
@@ -297,20 +219,23 @@ for name in bench_registry:
     plt.xlabel('Time Step')
     plt.ylabel('Space (x)')
     plt.tight_layout()
-    plt.savefig(output_dir / f"field_{name.lower()}.pdf")
+    
+    safe_name = name.replace(" ", "_").replace("(", "").replace(")", "").lower()
+    plt.savefig(output_dir / f"field_{safe_name}.pdf")
     plt.close()
 
-# --- 7. Plotting ---
+# --- 6. Plotting ---
 plt.figure(figsize=(18, 8))
 
 # 1. Boxplot of Tracking Error
 plt.subplot(1, 2, 1)
 data_boxplot = [jnp.mean((bench_registry[n]['z_data'][:, -1] - z_target_batch)**2, axis=1) for n in bench_registry]
-plt.boxplot(data_boxplot, labels=list(bench_registry.keys()))
+plt.boxplot(data_boxplot, labels=list(bench_registry.keys()), tick_labels=list(bench_registry.keys()))
 plt.yscale('log')
 plt.title('Final Tracking Error (MSE)')
 plt.ylabel('Mean Squared Error')
 plt.grid(True, alpha=0.3)
+plt.xticks(rotation=45)
 
 # 2. Error Evolution
 plt.subplot(1, 2, 2)

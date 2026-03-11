@@ -31,33 +31,29 @@ from models.policy_ns2d import NS2DControlNet
 
 
 # =============================================================================
-# Hyperparameters (can be imported by visualize.py)
+# Hyperparameters
 # =============================================================================
 
-# Grid/physics from config (loaded at runtime)
-# These are set as module constants for sharing with visualize.py
 N_AGENTS = 9         # 4x4 grid of stationary agents
 T_STEPS = 150         # Simulation horizon
-BATCH_SIZE = 4        # Reduced for memory
-EPOCHS = 1000
+BATCH_SIZE = 16
+EPOCHS = 250
 
-# Physics parameters (fan-only mode)
-BUOYANCY = 0.0        # NO buoyancy - smoke only moves when pushed by fans
-SIGMA_PUSH = 0.2      # Wide push influence
+# Physics parameters
+BUOYANCY = 0.0       
+SIGMA_PUSH = 0.2     
 
-# Control limits (fan-only: no injection, just push velocity)
-PUSH_MAX = 0.8        # Max push velocity
-FEATURES = (16, 32)   # CNN feature channels
+# Control limits
+PUSH_MAX = 0.8       
+FEATURES = (16, 32)  
 
-# Loss weights (tuned for blob transport)
-# Primary objective: reach target position with correct shape
-W_TRACK = 10.0        # Tracking loss - MAIN objective
-# Constraints: prevent bad behavior
-W_EFFORT = 0.001      # Effort regularization (keep controls reasonable)
-W_BOUND = 20.0        # Boundary penalty (agents stay in domain)
-W_COLL = 1000.0       # Collision avoidance - STRONG to prevent collapse
-W_ACCEL = 0.05        # Acceleration smoothness (smooth control signals)
-R_SAFE = 0.15         # Collision radius
+# Loss weights
+W_TRACK = 10.0       
+W_EFFORT = 0.001     
+W_BOUND = 20.0       
+W_COLL = 10.0        # Kept at 10 as requested
+W_ACCEL = 0.05       
+R_SAFE = 0.15        
 
 
 # =============================================================================
@@ -66,7 +62,7 @@ R_SAFE = 0.15         # Collision radius
 
 def main():
     print("="*60)
-    print("NS2D Shape Formation - Centralized Training")
+    print("NS2D Shape Formation - Centralized Training (Checkpointing)")
     print("="*60)
     
     # Load data
@@ -81,7 +77,6 @@ def main():
     Ny = int(config['Ny'])
     dt = float(config['dt'])
     
-    # Use module-level constants
     n_agents = N_AGENTS
     buoyancy = BUOYANCY
     sigma_push = SIGMA_PUSH
@@ -92,16 +87,15 @@ def main():
     pool_size = len(train_data['rho_init'])
     print(f"Training samples: {pool_size}")
     
-    # Use module-level hyperparameters
     T_steps = T_STEPS
     batch_size = BATCH_SIZE
     epochs = EPOCHS
     push_max = PUSH_MAX
     
-    # Model (Fan-only - agents push smoke, don't inject)
+    # Model
     model = NS2DControlNet(
         features=FEATURES,
-        v_max=push_max  # Only push velocity matters
+        v_max=push_max 
     )
     
     key = jax.random.PRNGKey(42)
@@ -111,22 +105,23 @@ def main():
     dummy_xi = jnp.zeros((n_agents, 2))
     params = model.init(init_key, dummy_smoke, dummy_smoke, dummy_xi)
     
-    n_params = sum(x.size for x in jax.tree_util.tree_leaves(params))
-    print(f"Model parameters: {n_params:,}")
-    
-    # Optimizer
-    lr_schedule = optax.exponential_decay(
-        init_value=1e-3,
-        transition_steps=2000,
-        decay_rate=0.5
+    # Optimizer (With warmup)
+    warmup_steps = 100
+    lr_schedule = optax.join_schedules(
+        schedules=[
+            optax.linear_schedule(init_value=0.0, end_value=1e-3, transition_steps=warmup_steps),
+            optax.exponential_decay(init_value=1e-3, transition_steps=2000, decay_rate=0.5)
+        ],
+        boundaries=[warmup_steps]
     )
+
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
         optax.adam(lr_schedule)
     )
     opt_state = optimizer.init(params)
     
-    # Loss function (fan-only velocity control)
+    # Base Loss Function
     def loss_fn(params, smoke_init, xi_init, rho_target):
         smoke_final, xi_final, l_track, l_effort, l_bound, l_coll, l_accel = unroll_with_full_loss(
             smoke_init, xi_init, rho_target, params, model.apply, T_steps,
@@ -139,24 +134,30 @@ def main():
         
         return total_loss, (l_track, l_effort, l_coll)
     
-    batched_loss_fn = jax.vmap(loss_fn, in_axes=(None, 0, 0, 0))
+    # --- GRADIENT CHECKPOINTING HERE ---
+    # jax.checkpoint trades compute for massive VRAM savings
+    checkpointed_loss_fn = jax.checkpoint(loss_fn)
+    
+    # Vectorize the checkpointed loss function
+    batched_loss_fn = jax.vmap(checkpointed_loss_fn, in_axes=(None, 0, 0, 0))
     
     @jax.jit
-    def train_step(params, opt_state, smoke_init, xi_init, rho_target):
+    def train_step(params, opt_state, smoke_batch, xi_batch, target_batch):
         def mean_loss(p):
-            losses, aux = batched_loss_fn(p, smoke_init, xi_init, rho_target)
+            losses, aux = batched_loss_fn(p, smoke_batch, xi_batch, target_batch)
             return jnp.mean(losses), jax.tree_util.tree_map(jnp.mean, aux)
         
         (loss, aux), grads = jax.value_and_grad(mean_loss, has_aux=True)(params)
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
+        
         return params, opt_state, loss, aux
     
-    # Initial agent positions (5x5 grid covering domain)
-    n_side = int(np.sqrt(n_agents))  # Should be 5 for 25 agents
+    # Initial agent positions
+    n_side = int(np.sqrt(n_agents))
     xi_template = jnp.stack(jnp.meshgrid(
-        jnp.linspace(0.15, 0.85, n_side),  # Cover x
-        jnp.linspace(0.15, 1.0, n_side)     # Cover y (full height)
+        jnp.linspace(0.15, 0.85, n_side),
+        jnp.linspace(0.15, 1.0, n_side)
     ), axis=-1).reshape(-1, 2)
     
     # Training loop
@@ -167,6 +168,8 @@ def main():
     
     for epoch in trange(epochs):
         key, subkey = jax.random.split(key)
+        
+        # Standard 1D batch sampling
         idx = jax.random.randint(subkey, (batch_size,), 0, pool_size)
         
         smoke_batch = jnp.array(train_data['rho_init'][idx])
@@ -179,23 +182,20 @@ def main():
         
         if epoch % 10 == 0:
             l_track, l_effort, l_coll = aux
-            metrics.append((epoch, float(loss), float(l_track), float(l_effort), 
-                          float(l_coll)))
+            metrics.append((epoch, float(loss), float(l_track), float(l_effort), float(l_coll)))
             
-            if epoch % 50 == 0:
+            if epoch % 20 == 0:
                 tqdm.write(f"Ep {epoch} | Loss: {loss:.4f} | Track: {l_track:.4f} | " +
-                          f"Effort: {l_effort:.4f} | Coll: {l_coll:.4f}")
+                           f"Effort: {l_effort:.4f} | Coll: {l_coll:.4f}")
     
     elapsed = time.time() - start_time
     print(f"\nTraining completed in {elapsed:.1f}s")
     
-    # Save
+    # Save parameters and plot
     save_path = Path(__file__).parent / 'ns2d_params.msgpack'
     with open(save_path, 'wb') as f:
         f.write(flax.serialization.to_bytes(params))
-    print(f"Saved: {save_path}")
     
-    # Plot training curves (3 panels)
     metrics = np.array(metrics)
     fig, axes = plt.subplots(3, 1, figsize=(10, 8))
     
@@ -217,10 +217,7 @@ def main():
     
     plt.tight_layout()
     plt.savefig(Path(__file__).parent / 'training_curves.png', dpi=150)
-    print("Saved: training_curves.png")
-    
     print("\nDone!")
-
 
 if __name__ == "__main__":
     main()

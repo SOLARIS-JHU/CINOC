@@ -13,3 +13,4 @@ seaborn
 cmcrameri
 gymnasium
 scikit-learn
+phiflow
