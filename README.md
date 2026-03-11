@@ -1,4 +1,5 @@
-# Multi-Agent Differentiable Predictive Control for Zero-Shot PDE Scalability
+# CINOC: Cardinality-Invariant Neural Operator Control
+
 > "You speak for the whole planet, do you? For the common consciousness of every dewdrop, of every pebble, of even the liquid central core of the planet?"
 > 
 > "I do, and so can any portion of the planet in which the intensity of the common consciousness is great enough."
