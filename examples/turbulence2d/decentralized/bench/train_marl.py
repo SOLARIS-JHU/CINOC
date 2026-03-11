@@ -9,6 +9,7 @@ import pickle
 from pathlib import Path
 import sys
 from functools import partial
+from tqdm import trange
 
 # Enable x64 for Spectral Stability (Crucial for Turbulence)
 jax.config.update("jax_enable_x64", True)
@@ -33,6 +34,7 @@ N_GRID = 64
 U_MAX = 75.0           # Action scaling for Turbulence
 
 ENV_BATCH_SIZE = 128 
+NN_BATCH_SIZE = 512    # Subsampled Neural Network Batch Size
 EVAL_INT = 10
 POLICY_DELAY = 2 
 
@@ -45,7 +47,7 @@ SIGMA = 0.05           # Actuator Gaussian spread
 
 # Vectorization Configs
 NUM_PARALLEL_ENVS = 64
-TOTAL_UPDATES = 150000 # 1000 episodes * 150 steps/episode 
+TOTAL_UPDATES = 100000 
 WARMUP_UPDATES = 500
 
 def get_2d_sinusoidal_encoding(p_2d, d=1024, n=1000.0):
@@ -57,7 +59,7 @@ def get_2d_sinusoidal_encoding(p_2d, d=1024, n=1000.0):
 # --- Initialization ---
 key = jax.random.PRNGKey(42)
 
-# ---> NEW: Precompute Spectral Grid & Forcing Profiles Globally <---
+# Precompute Spectral Grid & Forcing Profiles Globally
 kx, ky, k_sq, k_inv = solver.get_spectral_grid(N_GRID, L_DOMAIN)
 dt_phys = DT / SUBSTEPS
 
@@ -90,9 +92,11 @@ total_input_dim = stored_obs_dim + pe_dim
 # Extract static variables for JAX
 xi_fixed = jnp.array(env.agent_positions)
 xi_norm = jnp.array(env.xi_norm)
-mu_jax = jnp.array(env.mu)
-pe_jax = jnp.array(get_2d_sinusoidal_encoding(xi_norm, d=1024))
-target_state = jnp.zeros((N_GRID, N_GRID))
+
+# Explicitly cast static arrays to float32 to prevent 64-bit upcasting in NN
+mu_jax = jnp.array(env.mu, dtype=jnp.float32)
+pe_jax = jnp.array(get_2d_sinusoidal_encoding(xi_norm, d=1024), dtype=jnp.float32)
+target_state = jnp.zeros((N_GRID, N_GRID), dtype=jnp.float32)
 
 actor = MARLActor2D()
 critic = MARLCritic2D()
@@ -127,7 +131,6 @@ class DeviceReplayBuffer:
     @classmethod
     def create(cls, max_size, s_dim, a_dim):
         return cls(
-            # Switch these from float64 to float32
             s=jnp.zeros((max_size, N_AGENTS, s_dim), dtype=jnp.float32),
             a=jnp.zeros((max_size, N_AGENTS, a_dim), dtype=jnp.float32),
             r=jnp.zeros((max_size, N_AGENTS, 1), dtype=jnp.float32),
@@ -221,7 +224,6 @@ def parallel_marl_physics_step(w_init_batch, actions):
     acts_flat = actions.squeeze(-1) 
     
     def single_physics_step(w_single, act_single):
-        # ---> Convert to spectral and run RK4 <---
         w_hat = jnp.fft.fft2(w_single)
         def rk4_loop(i, w):
             return solver.rk4_step(
@@ -310,7 +312,7 @@ start_time = time.time()
 actor_loss_val = 0.0
 critic_loss_val = 0.0
 
-for update_step in range(TOTAL_UPDATES):
+for update_step in trange(TOTAL_UPDATES):
     
     if update_step % EVAL_INT == 0:
         eval_w = state_bank[0] 
@@ -358,19 +360,30 @@ for update_step in range(TOTAL_UPDATES):
         bx, bu, br, bnx, bd = sample_buffer(buffer, ENV_BATCH_SIZE, subkey) 
         key, subkey = jax.random.split(key)
         
+        # Flatten the 128 x 64 arrays
         bx_flat = bx.reshape(-1, stored_obs_dim)
         bu_flat = bu.reshape(-1, 1)
         br_flat = br.reshape(-1, 1)
         bnx_flat = bnx.reshape(-1, stored_obs_dim)
         bd_flat = bd.reshape(-1, 1)
         
-        pe_tiled = jnp.tile(pe_jax, (ENV_BATCH_SIZE, 1))
+        # Agent Subsampling 
+        idx = jax.random.randint(subkey, shape=(NN_BATCH_SIZE,), minval=0, maxval=bx_flat.shape[0])
         
-        bx_full = jnp.concatenate([bx_flat, pe_tiled], axis=-1)
-        bnx_full = jnp.concatenate([bnx_flat, pe_tiled], axis=-1)
+        # Get the specific agent index (0-63) for each chosen sample to fetch the right PE
+        agent_indices = idx % N_AGENTS
+        pe_sub = pe_jax[agent_indices] 
+        
+        # Build the final small batch of 512 samples
+        bx_full = jnp.concatenate([bx_flat[idx], pe_sub], axis=-1)
+        bnx_full = jnp.concatenate([bnx_flat[idx], pe_sub], axis=-1)
+        bu_sub = bu_flat[idx]
+        br_sub = br_flat[idx]
+        bd_sub = bd_flat[idx]
         
         critic_params, opt_critic, critic_loss_val = update_critic(
-            critic_params, target_actor_params, target_critic_params, opt_critic, bx_full, bu_flat, br_flat, bnx_full, bd_flat, subkey
+            critic_params, target_actor_params, target_critic_params, opt_critic, 
+            bx_full, bu_sub, br_sub, bnx_full, bd_sub, subkey
         )
         
         if update_step % POLICY_DELAY == 0:

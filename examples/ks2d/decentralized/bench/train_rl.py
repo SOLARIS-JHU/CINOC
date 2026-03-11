@@ -9,6 +9,7 @@ import pickle
 from pathlib import Path
 import sys
 from functools import partial
+from tqdm import trange
 
 # Add project root to sys.path
 script_dir = Path(__file__).resolve().parent.parent.parent.parent.parent
@@ -35,7 +36,7 @@ DT = 0.005             # Physics dt
 
 # Vectorization Configs
 NUM_PARALLEL_ENVS = 64
-TOTAL_UPDATES = 50000 
+TOTAL_UPDATES = 100000 
 WARMUP_UPDATES = 500
 
 # --- Initialization ---
@@ -239,7 +240,7 @@ python_buffer_size = 0
 print("Starting Massively Parallel Centralized RL Training (2D KS)...")
 start_time = time.time()
 
-for update_step in range(TOTAL_UPDATES):
+for update_step in trange(TOTAL_UPDATES):
     
     if update_step % EVAL_INT == 0:
         eval_u = state_bank[0] 
