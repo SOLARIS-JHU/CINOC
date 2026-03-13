@@ -184,20 +184,31 @@ def parallel_marl_physics_step(z_batch, xi_batch, target_batch, actions, key):
     u_batch = actions[..., 0]
     v_batch = actions[..., 1]
     
-    # NEW: Global Tracking Reward (Shared across all agents)
-    global_mse = jnp.mean(jnp.square(safe_z - target_batch), axis=-1, keepdims=True)
-    r_track = -global_mse # Shape (Batch, 1)
+    # Map continuous positions [0, 1] to discrete spatial grid indices [0, N_GRID-1]
+    agent_indices = jnp.clip((safe_xi * (N_GRID - 1)).astype(jnp.int32), 0, N_GRID - 1)
+    batch_indices = jnp.arange(safe_z.shape[0])[:, None]
+    
+    # Gather the specific PDE state and target exactly where each agent is located
+    local_z = safe_z[batch_indices, agent_indices]
+    local_target = target_batch[batch_indices, agent_indices]
+    
+    # Compute the local MSE (Shape: BATCH, N_AGENTS)
+    local_mse = jnp.square(local_z - local_target)
+    
+    # Apply a scaling factor
+    r_track_local = -20.0 * local_mse 
 
     r_effort = -0.001 * (jnp.square(u_batch) + 0.1 * jnp.square(v_batch))
     margin = 0.02
     r_bound = -100.0 * (jnp.maximum(0.0, margin - safe_xi)**2 + jnp.maximum(0.0, safe_xi - (1.0 - margin))**2)
+    
     R_safe = 0.05
     dists = jnp.abs(safe_xi[:, :, None] - safe_xi[:, None, :])
     mask = jnp.eye(N_AGENTS)[None, :, :]
     r_coll = -1.0 * jnp.sum(jnp.maximum(0.0, R_safe - (dists + mask * 1.0)) ** 2, axis=2)
     
-    # Broadcast addition will apply the shared r_track to all agents properly
-    rewards_batch = r_track + r_effort + r_bound + r_coll
+    # Combine the local tracking reward with local penalties
+    rewards_batch = r_track_local + r_effort + r_bound + r_coll
     rewards_batch = jnp.where(dones_batch[:, None], -100.0, rewards_batch)
     
     return safe_z, safe_xi, next_obs_batch_no_pe, rewards_batch, dones_batch
