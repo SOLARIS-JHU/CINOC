@@ -14,14 +14,15 @@ from tqdm import trange
 script_dir = Path(__file__).resolve().parent.parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
-from env_he import HeatHypeMARLEnv 
+# Updated Imports for FKPP
+from env_fkpp import FKPPHypeMARLEnv 
 from utils_hypemarl import get_sinusoidal_encoding
-from examples.heat1d.decentralized.data_utils import generate_grf
-from examples.heat1d.decentralized.dynamics_dual import PDEDynamics 
+from examples.fkpp1d.decentralized.data_utils import generate_grf
+from examples.fkpp1d.decentralized.dynamics_dual import PDEDynamics 
 from models_mappo import MAPPOActor, MAPPOCritic, V_MAX, U_MAX
 
 # --- PPO Configurations ---
-N_AGENTS = 8 
+N_AGENTS = 20 
 L_DOMAIN = 1.0
 N_GRID = 100
 
@@ -30,6 +31,10 @@ ROLLOUT_STEPS = 300      # Match episode length
 PPO_EPOCHS = 4
 MINIBATCH_SIZE = 1024
 TOTAL_TIMESTEPS = 50_000_000
+
+# FKPP Constants
+NU = 0.005
+RHO = 3.0
 
 # PPO Hyperparameters
 GAMMA = 0.99
@@ -48,7 +53,7 @@ def direct_control_policy(action_params, u_obs, u_target, xi_fixed):
     return u, v
 
 dynamics = PDEDynamics(policy_apply_fn=direct_control_policy)
-env = HeatHypeMARLEnv(dynamics, n_agents=N_AGENTS, N_grid=N_GRID, L=L_DOMAIN, max_steps=ROLLOUT_STEPS)
+env = FKPPHypeMARLEnv(dynamics, n_agents=N_AGENTS, N_grid=N_GRID, L=L_DOMAIN, max_steps=ROLLOUT_STEPS)
 
 pe_dim = 128
 stored_obs_dim = env.local_y_dim + env.n_mu 
@@ -167,7 +172,8 @@ def parallel_marl_physics_step(z_batch, xi_batch, target_batch, actions, key):
     
     def single_physics_step(z_s, xi_s, target_s, act_s, k_s):
         traj = dynamics.unroll_controlled(
-            z_init=z_s, xi_init=xi_s, z_target=target_s, params=act_s, t_steps=1
+            z_init=z_s, xi_init=xi_s, z_target=target_s, params=act_s, 
+            t_steps=1, key=k_s, nu=NU, rho=RHO
         )
         return traj[0][-1], traj[1][-1]
     
@@ -184,19 +190,20 @@ def parallel_marl_physics_step(z_batch, xi_batch, target_batch, actions, key):
     u_batch = actions[..., 0]
     v_batch = actions[..., 1]
     
-    # NEW: Global Tracking Reward (Shared across all agents)
+    # Aggressive Tracking Reward (to counter lack of curriculum)
     global_mse = jnp.mean(jnp.square(safe_z - target_batch), axis=-1, keepdims=True)
-    r_track = -global_mse # Shape (Batch, 1)
+    r_track = -20.0 * global_mse 
 
     r_effort = -0.001 * (jnp.square(u_batch) + 0.1 * jnp.square(v_batch))
     margin = 0.02
     r_bound = -100.0 * (jnp.maximum(0.0, margin - safe_xi)**2 + jnp.maximum(0.0, safe_xi - (1.0 - margin))**2)
-    R_safe = 0.05
+    
+    # Collision Penalty adjusted for 20 Agents
+    R_safe = 0.02
     dists = jnp.abs(safe_xi[:, :, None] - safe_xi[:, None, :])
     mask = jnp.eye(N_AGENTS)[None, :, :]
     r_coll = -1.0 * jnp.sum(jnp.maximum(0.0, R_safe - (dists + mask * 1.0)) ** 2, axis=2)
     
-    # Broadcast addition will apply the shared r_track to all agents properly
     rewards_batch = r_track + r_effort + r_bound + r_coll
     rewards_batch = jnp.where(dones_batch[:, None], -100.0, rewards_batch)
     
@@ -316,24 +323,26 @@ def get_eval_action(actor_params, obs_no_pe, xi_batch):
     return mean
 
 @partial(jax.jit, static_argnames=['max_steps'])
-def fast_eval_episode(actor_params, init_z, init_xi, target_z, max_steps):
+def fast_eval_episode(actor_params, init_z, init_xi, target_z, max_steps, key):
     def step_fn(state_tuple, _):
-        z_curr, xi_curr = state_tuple
+        z_curr, xi_curr, k = state_tuple
+        k, subk = jax.random.split(k)
         obs_no_pe = build_marl_obs_batch(z_curr[None, ...], target_z[None, ...], xi_curr[None, ...]) 
         
         act = get_eval_action(actor_params, obs_no_pe, xi_curr[None, ...])
         act_flat = act.squeeze(0)
         
         traj = dynamics.unroll_controlled(
-            z_init=z_curr, xi_init=xi_curr, z_target=target_z, params=act_flat, t_steps=1
+            z_init=z_curr, xi_init=xi_curr, z_target=target_z, params=act_flat, 
+            t_steps=1, key=subk, nu=NU, rho=RHO
         )
         next_z, next_xi = traj[0][-1], traj[1][-1]
         
         mse = jnp.mean((next_z - target_z)**2)
         crashed = jnp.isnan(next_z).any() | jnp.isinf(next_z).any()
-        return (next_z, next_xi), (mse, crashed)
+        return (next_z, next_xi, k), (mse, crashed)
 
-    _, (mses, crashes) = jax.lax.scan(step_fn, (init_z, init_xi), None, length=max_steps)
+    _, (mses, crashes) = jax.lax.scan(step_fn, (init_z, init_xi, key), None, length=max_steps)
     return jnp.mean(mses), jnp.any(crashes)
 
 
@@ -379,7 +388,7 @@ initial_runner_state = (
     jnp.zeros(NUM_PARALLEL_ENVS), key
 )
 
-print(f"Starting Pure JAX MAPPO Training for {num_updates} Updates...")
+print(f"Starting Pure JAX MAPPO Training (Static FKPP) for {num_updates} Updates...")
 start_time = time.time()
 
 runner_state = initial_runner_state
@@ -387,7 +396,10 @@ runner_state = initial_runner_state
 for update in trange(num_updates):
     if update % 10 == 0:
         eval_z, eval_target, eval_xi = z_init_bank[0], z_target_bank[0], xi_init_single
-        eval_mse, crashed = fast_eval_episode(runner_state[0].params, eval_z, eval_xi, eval_target, ROLLOUT_STEPS)
+        
+        # Ensure we pass an RNG key explicitly to fast_eval_episode for FKPP physics steps
+        key, eval_key = jax.random.split(key)
+        eval_mse, crashed = fast_eval_episode(runner_state[0].params, eval_z, eval_xi, eval_target, ROLLOUT_STEPS, eval_key)
         
         status = "[CRASHED]" if crashed else f"{eval_mse:.6f}"
         print(f"\nUpdate {update:04d} | Eval MSE: {status} | Time: {time.time()-start_time:.1f}s")
@@ -398,6 +410,6 @@ for update in trange(num_updates):
 
 # Save output
 actor_state_final, critic_state_final = runner_state[0], runner_state[1]
-with open('models/mappo_heat_params.msgpack', 'wb') as f:
+with open('models/mappo_fkpp_params.msgpack', 'wb') as f:
     f.write(flax.serialization.to_bytes({'actor': actor_state_final.params, 'critic': critic_state_final.params}))
 print(f"Training finished in {time.time()-start_time:.1f}s. Weights saved.")

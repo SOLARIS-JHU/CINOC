@@ -119,13 +119,13 @@ if ppo_p:
 
 # 4. MAPPO (Decentralized patch inputs: obs)
 mappo_model = MAPPOActor(n_agents=n_agents)
-mappo_dummy_input = (jnp.zeros((n_agents, 2089)),)
+mappo_dummy_input = (jnp.zeros((n_agents, 128 + 41)),)
 mappo_p = load_params(bench_models_dir / 'mappo_heat_params.msgpack', mappo_model, mappo_dummy_input)
 
 if mappo_p:
     def mappo_apply(p, z, target, xi):
         y = extract_patches_jit(z, target, xi/L_domain, window_size=8)
-        pe = get_sinusoidal_encoding(xi, d=2048)
+        pe = get_sinusoidal_encoding(xi, d=128)
         obs = jnp.concatenate([y, jnp.tile(ENV_MU, (n_agents, 1)), pe], axis=-1)
         
         # Extract mean, ignore standard deviation for eval

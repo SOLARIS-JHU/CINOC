@@ -29,8 +29,9 @@ MINIBATCH_SIZE = 1024
 TOTAL_UPDATES = 651
 EVAL_INT = 10 
 
-# Static FKPP Configs
-NU = 0.005 
+# FKPP Curriculum Configs
+NU_START = 0.005    # Start linear (like Heat Eq)
+NU_END = 0.005    # End at full non-linear FKPP
 RHO = 3.0
 
 key = jax.random.PRNGKey(42)
@@ -84,13 +85,13 @@ def compute_gae_jax(rewards, values, dones, next_value, gamma=0.99, lam=0.95):
     return advantages, returns
 
 # --- Parallel Physics Step ---
-def parallel_physics_step(z_batch, xi_batch, target_batch, actions, phys_key):
+def parallel_physics_step(z_batch, xi_batch, target_batch, actions, phys_key, current_nu):
     keys = jax.random.split(phys_key, z_batch.shape[0])
     
     def single_physics_step(z_s, xi_s, target_s, act_s, k_s):
         traj = dynamics.unroll_controlled(
             z_init=z_s, xi_init=xi_s, z_target=target_s, params=act_s, t_steps=1,
-            key=k_s, nu=NU, rho=RHO
+            key=k_s, nu=current_nu, rho=RHO
         )
         return traj[0][-1], traj[1][-1]
     
@@ -152,7 +153,7 @@ def update_ppo_minibatch(a_params, c_params, opt_a, opt_c, b_z, b_zt, b_xi, b_a,
     return optax.apply_updates(a_params, up_a), optax.apply_updates(c_params, up_c), opt_a, opt_c, metrics
 
 # --- THE PURE JAX PPO TRAIN STEP ---
-def train_step(runner_state):
+def train_step(runner_state, current_nu):
     """Executes a full rollout AND all optimization epochs."""
     a_params, c_params, opt_a, opt_c, z_batch, target_batch, xi_batch, env_counts, rng = runner_state
     
@@ -165,7 +166,7 @@ def train_step(runner_state):
         actions, log_probs = get_logprob_and_action(mean, log_std, key=act_k)
         values = critic.apply(c_params, z, zt, xi).squeeze(-1)
         
-        next_z, next_xi, rewards, dones = parallel_physics_step(z, xi, zt, actions, phys_k)
+        next_z, next_xi, rewards, dones = parallel_physics_step(z, xi, zt, actions, phys_k, current_nu)
         
         counts += 1
         truncs = counts >= MAX_ENV_STEPS
@@ -241,17 +242,17 @@ def train_step(runner_state):
 
 # --- NEW: SCAN-COMPILED TRAINING CHUNK ---
 @jax.jit
-def train_chunk(runner_state):
+def train_chunk(runner_state, current_nu):
     """Loops the train_step EVAL_INT times sequentially on the GPU."""
     def scan_step(carry, _):
-        new_state, metrics = train_step(carry)
+        new_state, metrics = train_step(carry, current_nu)
         return new_state, metrics
     
     return jax.lax.scan(scan_step, runner_state, None, length=EVAL_INT)
 
 # --- Fast Evaluation ---
 @partial(jax.jit, static_argnames=['max_steps'])
-def fast_eval_episode(a_params, init_z, init_xi, target_z, max_steps, key):
+def fast_eval_episode(a_params, init_z, init_xi, target_z, max_steps, current_nu, key):
     def step_fn(state, _):
         z_curr, xi_curr, k = state
         k, subk = jax.random.split(k)
@@ -261,7 +262,7 @@ def fast_eval_episode(a_params, init_z, init_xi, target_z, max_steps, key):
         
         traj = dynamics.unroll_controlled(
             z_init=z_curr, xi_init=xi_curr, z_target=target_z, params=act_flat, t_steps=1,
-            key=subk, nu=NU, rho=RHO
+            key=subk, nu=current_nu, rho=RHO
         )
         next_z, next_xi = traj[0][-1], traj[1][-1]
         
@@ -291,18 +292,22 @@ num_chunks = TOTAL_UPDATES // EVAL_INT
 for chunk in trange(num_chunks):
     current_update = chunk * EVAL_INT
     
+    # Curriculum Schedule: Ramp from 0.0 to 0.005 over the first 50% of updates
+    progress = min(1.0, current_update / (TOTAL_UPDATES * 0.5))
+    current_nu = NU_START + progress * (NU_END - NU_START)
+    
     # Evaluate at the start of the chunk
     eval_z, eval_target, eval_xi = z_init_bank[0], z_target_bank[0], xi_init_single
     
     # Split key for evaluation noise step inside fast_eval_episode
     key, eval_key = jax.random.split(key)
-    eval_mse, crashed = fast_eval_episode(runner_state[0], eval_z, eval_xi, eval_target, MAX_ENV_STEPS, eval_key)
+    eval_mse, crashed = fast_eval_episode(runner_state[0], eval_z, eval_xi, eval_target, MAX_ENV_STEPS, current_nu, eval_key)
     
     status = "[CRASHED]" if crashed else f"{eval_mse:.6f}"
-    print(f"Update {current_update:04d} | Eval MSE: {status} | Time: {time.time()-start_time:.1f}s")
+    print(f"Update {current_update:04d} | nu: {current_nu:.5f} | Eval MSE: {status} | Time: {time.time()-start_time:.1f}s")
 
     # Run the compiled chunk
-    runner_state, batch_metrics = train_chunk(runner_state)
+    runner_state, batch_metrics = train_chunk(runner_state, current_nu)
 
 # Save output
 actor_params_final = runner_state[0]
