@@ -26,7 +26,7 @@ NUM_PARALLEL_ENVS = 256
 ROLLOUT_STEPS = 128
 PPO_EPOCHS = 4
 MINIBATCH_SIZE = 1024
-TOTAL_UPDATES = 25000
+TOTAL_UPDATES = 651
 EVAL_INT = 10 
 
 key = jax.random.PRNGKey(42)
@@ -54,7 +54,6 @@ opt_actor = tx_actor.init(actor_params)
 opt_critic = tx_critic.init(critic_params)
 
 # --- Pre-generate Starting State Banks ---
-# We do this globally so the JIT compiled function can access them for resets
 print("Pre-generating starting state & target banks...")
 bank_keys = jax.random.split(key, 1000)
 _, z_init_bank = jax.vmap(partial(generate_grf, n_points=N_GRID, length_scale=0.2))(bank_keys)
@@ -62,7 +61,6 @@ _, z_target_bank = jax.vmap(partial(generate_grf, n_points=N_GRID, length_scale=
 xi_init_single = jnp.linspace(0.2, 0.8, N_AGENTS, dtype=jnp.float32)
 
 # --- JAX-Native GAE ---
-# Using lax.scan instead of reversed Python loops prevents massive trace times
 @jax.jit
 def compute_gae_jax(rewards, values, dones, next_value, gamma=0.99, lam=0.95):
     def scan_fn(carry, transition):
@@ -141,9 +139,8 @@ def update_ppo_minibatch(a_params, c_params, opt_a, opt_c, b_z, b_zt, b_xi, b_a,
     return optax.apply_updates(a_params, up_a), optax.apply_updates(c_params, up_c), opt_a, opt_c, metrics
 
 # --- THE PURE JAX PPO TRAIN STEP ---
-@jax.jit
 def train_step(runner_state):
-    """Executes a full rollout AND all optimization epochs entirely on the GPU."""
+    """Executes a full rollout AND all optimization epochs."""
     a_params, c_params, opt_a, opt_c, z_batch, target_batch, xi_batch, env_counts, rng = runner_state
     
     # 1. Rollout Phase (Compiled loop)
@@ -221,7 +218,6 @@ def train_step(runner_state):
 
     new_runner_state = (a_params, c_params, opt_a, opt_c, next_z_batch, next_target_batch, next_xi_batch, next_env_counts, rng)
     
-    # Return metrics (taking the mean over minibatches and epochs)
     metrics = {
         "mean_return": t_r.sum(axis=0).mean(),
         "actor_loss": ppo_metrics[0].mean(),
@@ -229,6 +225,16 @@ def train_step(runner_state):
     }
     
     return new_runner_state, metrics
+
+# --- NEW: SCAN-COMPILED TRAINING CHUNK ---
+@jax.jit
+def train_chunk(runner_state):
+    """Loops the train_step EVAL_INT times sequentially on the GPU."""
+    def scan_step(carry, _):
+        new_state, metrics = train_step(carry)
+        return new_state, metrics
+    
+    return jax.lax.scan(scan_step, runner_state, None, length=EVAL_INT)
 
 # --- Fast Evaluation ---
 @partial(jax.jit, static_argnames=['max_steps'])
@@ -261,23 +267,24 @@ initial_runner_state = (
     jnp.zeros(NUM_PARALLEL_ENVS), key
 )
 
-print("Starting Massively Parallel Pure JAX PPO Training...")
+print("Starting Massively Parallel Pure JAX PPO Training (Chunked)...")
 start_time = time.time()
 
 runner_state = initial_runner_state
+num_chunks = TOTAL_UPDATES // EVAL_INT
 
-# This python loop now purely exists to print telemetry; the heavy lifting is completely internal
-for update in trange(TOTAL_UPDATES):
+for chunk in trange(num_chunks):
+    current_update = chunk * EVAL_INT
     
-    if update % EVAL_INT == 0:
-        eval_z, eval_target, eval_xi = z_init_bank[0], z_target_bank[0], xi_init_single
-        eval_mse, crashed = fast_eval_episode(runner_state[0], eval_z, eval_xi, eval_target, MAX_ENV_STEPS)
-        
-        status = "[CRASHED]" if crashed else f"{eval_mse:.6f}"
-        print(f"Update {update:04d} | Eval Tracking MSE: {status} | Time: {time.time()-start_time:.1f}s")
+    # Evaluate at the start of the chunk
+    eval_z, eval_target, eval_xi = z_init_bank[0], z_target_bank[0], xi_init_single
+    eval_mse, crashed = fast_eval_episode(runner_state[0], eval_z, eval_xi, eval_target, MAX_ENV_STEPS)
+    
+    status = "[CRASHED]" if crashed else f"{eval_mse:.6f}"
+    print(f"Update {current_update:04d} | Eval Tracking MSE: {status} | Time: {time.time()-start_time:.1f}s")
 
-    # One line executes the entire rollout + GAE + 4 epochs + 32 minibatches!
-    runner_state, metrics = train_step(runner_state)
+    # Run the compiled chunk (executes EVAL_INT updates entirely on GPU)
+    runner_state, batch_metrics = train_chunk(runner_state)
 
 # Save output
 actor_params_final = runner_state[0]

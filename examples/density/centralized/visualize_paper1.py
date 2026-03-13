@@ -373,7 +373,7 @@ if __name__ == "__main__":
         
         # 6. Generate Figure
         print("▶ Generating paper figure...")
-        save_name = f"density_centralized_paper_figure_sample_{sample_idx + 1}.pdf"
+        save_name = f"density_centralized_paper_figure_sample_{sample_idx + 1}_nuovo.pdf"
         create_paper_figure(
             smoke_traj_ctrl, smoke_traj_unctrl, xi_traj_ctrl, vel_traj_ctrl,
             rho_target, wasserstein_ctrl, wasserstein_unctrl, 

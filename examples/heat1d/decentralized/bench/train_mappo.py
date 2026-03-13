@@ -18,7 +18,7 @@ from env_he import HeatHypeMARLEnv
 from utils_hypemarl import get_sinusoidal_encoding
 from examples.heat1d.decentralized.data_utils import generate_grf
 from examples.heat1d.decentralized.dynamics_dual import PDEDynamics 
-from models_mappo import MAPPOActor, MAPPOCritic 
+from models_mappo import MAPPOActor, MAPPOCritic, V_MAX, U_MAX
 
 # --- PPO Configurations ---
 N_AGENTS = 8 
@@ -59,14 +59,12 @@ window_size = env.window_size
 # --- Helper: On-The-Fly Positional Encoding ---
 @jax.jit
 def attach_pe_batch(obs_no_pe, xi_batch):
-    """Generates the 2048-dim PE on the fly to save VRAM."""
     def single_env_pe(obs_env, xi_env):
         pe = get_sinusoidal_encoding(xi_env, d=pe_dim)
         return jnp.concatenate([obs_env, pe], axis=-1)
     return jax.vmap(single_env_pe)(obs_no_pe, xi_batch)
 
 # --- PPO Core Functions ---
-@jax.jit
 def get_action_and_value(actor_params, critic_params, obs_no_pe, z, target, xi, key):
     full_obs = attach_pe_batch(obs_no_pe, xi)
     
@@ -77,38 +75,34 @@ def get_action_and_value(actor_params, critic_params, obs_no_pe, z, target, xi, 
     log_prob = -0.5 * jnp.sum(jnp.square((action - mean) / std) + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
     
     val = critic.apply(critic_params, z, target, xi)
-    
     return action, log_prob, val
 
-@jax.jit
 def get_value(critic_params, z, target, xi):
     return critic.apply(critic_params, z, target, xi)
 
-@jax.jit
-def compute_gae(rewards, values, dones, next_value, gamma, lam):
-    advantages = jnp.zeros_like(rewards)
-    lastgaelam = 0
-    
-    for t in reversed(range(ROLLOUT_STEPS)):
-        if t == ROLLOUT_STEPS - 1:
-            nextnonterminal = 1.0 - dones[t]
-            nextvalues = next_value
-        else:
-            nextnonterminal = 1.0 - dones[t]
-            nextvalues = values[t + 1]
-            
-        delta = rewards[t] + gamma * nextvalues * nextnonterminal[:, None] - values[t]
-        advantages = advantages.at[t].set(delta + gamma * lam * nextnonterminal[:, None] * lastgaelam)
-        lastgaelam = advantages[t]
+def compute_gae_jax(rewards, values, dones, next_value, gamma=0.99, lam=0.95):
+    def scan_fn(carry, transition):
+        r, v, d = transition
         
+        # Changes shape from (256,) to (256, 1)
+        d = d[:, None] 
+        
+        gae, next_v = carry
+        delta = r + gamma * next_v * (1.0 - d) - v
+        gae = delta + gamma * lam * (1.0 - d) * gae
+        return (gae, v), gae
+    
+    _, advantages = jax.lax.scan(
+        scan_fn, 
+        (jnp.zeros_like(next_value), next_value), 
+        (rewards, values, dones), 
+        reverse=True
+    )
     returns = advantages + values
     return advantages, returns
 
-# --- PPO Update Step ---
-@jax.jit
 def ppo_update_epoch(actor_state, critic_state, batch):
     obs_no_pe, z, target, xi, actions, old_log_probs, advantages, returns = batch
-    
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
     
     def actor_loss_fn(params):
@@ -161,7 +155,6 @@ def extract_patches_jax(full_state, target_st, xi_n, window_size):
 
     return jax.vmap(get_local_obs)(xi_n)
 
-@jax.jit
 def build_marl_obs_batch(z_batch, target_batch, xi_batch):
     def single_env_obs(state, target, xi):
         y_local = extract_patches_jax(state, target, xi, window_size)
@@ -169,32 +162,32 @@ def build_marl_obs_batch(z_batch, target_batch, xi_batch):
         return jnp.concatenate([y_local, mu_broadcast], axis=-1)
     return jax.vmap(single_env_obs)(z_batch, target_batch, xi_batch)
 
-@jax.jit
 def parallel_marl_physics_step(z_batch, xi_batch, target_batch, actions, key):
     keys = jax.random.split(key, z_batch.shape[0])
     
     def single_physics_step(z_s, xi_s, target_s, act_s, k_s):
         traj = dynamics.unroll_controlled(
-            z_init=z_s, xi_init=xi_s, z_target=target_s, params=act_s, 
-            t_steps=1,
+            z_init=z_s, xi_init=xi_s, z_target=target_s, params=act_s, t_steps=1
         )
         return traj[0][-1], traj[1][-1]
     
     next_z_batch, next_xi_batch = jax.vmap(single_physics_step)(z_batch, xi_batch, target_batch, actions, keys)
     
     is_invalid = jnp.logical_not(jnp.isfinite(next_z_batch).all(axis=-1, keepdims=True))
-    dones_batch = is_invalid
+    dones_batch = is_invalid.squeeze(-1)
     
-    safe_z = jnp.where(dones_batch, jnp.zeros_like(next_z_batch), next_z_batch)
-    safe_xi = jnp.where(dones_batch, xi_batch, next_xi_batch)
+    safe_z = jnp.where(is_invalid, jnp.zeros_like(next_z_batch), next_z_batch)
+    safe_xi = jnp.where(is_invalid, xi_batch, next_xi_batch)
     
     next_obs_batch_no_pe = build_marl_obs_batch(safe_z, target_batch, safe_xi)
     
     u_batch = actions[..., 0]
     v_batch = actions[..., 1]
     
-    center_errors = next_obs_batch_no_pe[:, :, 10]
-    r_track = -5.0 * jnp.square(center_errors)
+    # NEW: Global Tracking Reward (Shared across all agents)
+    global_mse = jnp.mean(jnp.square(safe_z - target_batch), axis=-1, keepdims=True)
+    r_track = -global_mse # Shape (Batch, 1)
+
     r_effort = -0.001 * (jnp.square(u_batch) + 0.1 * jnp.square(v_batch))
     margin = 0.02
     r_bound = -100.0 * (jnp.maximum(0.0, margin - safe_xi)**2 + jnp.maximum(0.0, safe_xi - (1.0 - margin))**2)
@@ -203,85 +196,148 @@ def parallel_marl_physics_step(z_batch, xi_batch, target_batch, actions, key):
     mask = jnp.eye(N_AGENTS)[None, :, :]
     r_coll = -1.0 * jnp.sum(jnp.maximum(0.0, R_safe - (dists + mask * 1.0)) ** 2, axis=2)
     
+    # Broadcast addition will apply the shared r_track to all agents properly
     rewards_batch = r_track + r_effort + r_bound + r_coll
-    rewards_batch = jnp.where(dones_batch, -100.0, rewards_batch)
+    rewards_batch = jnp.where(dones_batch[:, None], -100.0, rewards_batch)
     
-    return safe_z, safe_xi, next_obs_batch_no_pe, rewards_batch, dones_batch.squeeze(-1)
+    return safe_z, safe_xi, next_obs_batch_no_pe, rewards_batch, dones_batch
 
-# --- Fast JIT-Compiled Rollout Loop ---
-@partial(jax.jit, static_argnames=['rollout_steps'])
-def collect_rollout(actor_params, critic_params, init_z, init_xi, init_target, init_obs, key, rollout_steps, z_bank, target_bank, xi_single):
-    def step_fn(state, _):
-        z, xi, target, obs_no_pe, rng = state
-        rng, act_rng, phys_rng, reset_rng = jax.random.split(rng, 4)
+# --- THE PURE JAX MAPPO TRAIN STEP ---
+@jax.jit
+def train_step(runner_state):
+    """Executes a full rollout AND all optimization epochs entirely on the GPU."""
+    actor_state, critic_state, z_batch, target_batch, xi_batch, obs_batch, env_counts, rng = runner_state
+    
+    # 1. Rollout Phase (Compiled loop)
+    def _env_step(carry, _):
+        z, zt, xi, obs, counts, k = carry
+        k, act_k, phys_k, reset_k = jax.random.split(k, 4)
+        
+        action, log_prob, val = get_action_and_value(actor_state.params, critic_state.params, obs, z, zt, xi, act_k)
 
-        action, log_prob, val = get_action_and_value(actor_params, critic_params, obs_no_pe, z, target, xi, act_rng)
-        next_z, next_xi, next_obs_no_pe, reward, done = parallel_marl_physics_step(z, xi, target, action, phys_rng)
-
-        idx_reset = jax.random.randint(reset_rng, (NUM_PARALLEL_ENVS,), 0, 1000)
-        fresh_z = z_bank[idx_reset]
-        fresh_target = target_bank[idx_reset]
-        fresh_xi = jnp.tile(xi_single, (NUM_PARALLEL_ENVS, 1))
-
-        z_new = jnp.where(done[:, None], fresh_z, next_z)
-        target_new = jnp.where(done[:, None], fresh_target, target)
-        xi_new = jnp.where(done[:, None], fresh_xi, next_xi)
-
+        env_action_u = jnp.clip(action[..., 0], -U_MAX, U_MAX)
+        env_action_v = jnp.clip(action[..., 1], -V_MAX, V_MAX)
+        env_action = jnp.stack([env_action_u, env_action_v], axis=-1)
+        
+        next_z, next_xi, next_obs_no_pe, rewards, crashes = parallel_marl_physics_step(
+            z, xi, zt, env_action, phys_k
+        )
+        
+        counts += 1
+        truncs = counts >= ROLLOUT_STEPS
+        needs_reset = jnp.logical_or(crashes, truncs)
+        
+        idx_reset = jax.random.randint(reset_k, (NUM_PARALLEL_ENVS,), 0, 1000)
+        fresh_z = z_init_bank[idx_reset]
+        fresh_target = z_target_bank[idx_reset]
+        fresh_xi = jnp.tile(xi_init_single, (NUM_PARALLEL_ENVS, 1))
+        
+        next_z = jnp.where(needs_reset[:, None], fresh_z, next_z)
+        next_zt = jnp.where(needs_reset[:, None], fresh_target, zt)
+        next_xi = jnp.where(needs_reset[:, None], fresh_xi, next_xi)
+        next_counts = jnp.where(needs_reset, 0, counts)
+        
+        # Build new obs if the environment was reset
         obs_new = jnp.where(
-            done[:, None, None], 
-            build_marl_obs_batch(z_new, target_new, xi_new), 
+            needs_reset[:, None, None], 
+            build_marl_obs_batch(next_z, next_zt, next_xi), 
             next_obs_no_pe
         )
+        
+        transition = (obs, z, zt, xi, action, log_prob, rewards, val, crashes)
+        return (next_z, next_zt, next_xi, obs_new, next_counts, k), transition
 
-        transition = (obs_no_pe, z, target, xi, action, log_prob, reward, val, done)
-        return (z_new, xi_new, target_new, obs_new, rng), transition
+    carry = (z_batch, target_batch, xi_batch, obs_batch, env_counts, rng)
+    carry, transitions = jax.lax.scan(_env_step, carry, None, length=ROLLOUT_STEPS)
+    (next_z_batch, next_target_batch, next_xi_batch, next_obs_batch, next_env_counts, rng) = carry
+    t_obs, t_z, t_zt, t_xi, t_a, t_logp, t_r, t_v, t_d = transitions
+    
+    # 2. GAE Phase
+    next_value = get_value(critic_state.params, next_z_batch, next_target_batch, next_xi_batch)
+    adv, ret = compute_gae_jax(t_r, t_v, t_d, next_value, GAMMA, GAE_LAMBDA)
+    
+    # Flatten across time and envs
+    f_obs = t_obs.reshape(-1, N_AGENTS, stored_obs_dim)  
+    f_z = t_z.reshape(-1, N_GRID)
+    f_zt = t_zt.reshape(-1, N_GRID)
+    f_xi = t_xi.reshape(-1, N_AGENTS)
+    f_a = t_a.reshape(-1, N_AGENTS, 2)
+    f_logp = t_logp.reshape(-1, N_AGENTS)
+    f_ret = ret.reshape(-1, N_AGENTS)
+    f_adv = adv.reshape(-1, N_AGENTS)
 
-    final_state, transitions = jax.lax.scan(
-        step_fn, 
-        (init_z, init_xi, init_target, init_obs, key), 
-        None, 
-        length=rollout_steps
-    )
-    return final_state, transitions
+    # Global normalization of adv
+    f_adv = (f_adv - f_adv.mean(axis=0)) / (f_adv.std(axis=0) + 1e-8)
+    
+    dataset_size = f_z.shape[0]
 
-# --- FAST EVALUATION LOGIC ---
+    # 3. Optimization Phase (Compiled nested loops)
+    def _update_epoch(epoch_carry, _):
+        a_state, c_state, k = epoch_carry
+        k, subk = jax.random.split(k)
+        indices = jax.random.permutation(subk, dataset_size)
+        
+        def _update_minibatch(mb_carry, start_idx):
+            a_state_, c_state_ = mb_carry
+            batch_idx = jax.lax.dynamic_slice(indices, (start_idx,), (MINIBATCH_SIZE,))
+            
+            mb_batch = (
+                f_obs[batch_idx], f_z[batch_idx], f_zt[batch_idx], f_xi[batch_idx],
+                f_a[batch_idx], f_logp[batch_idx], f_adv[batch_idx], f_ret[batch_idx]
+            )
+            
+            a_state_n, c_state_n, al, vl, ent = ppo_update_epoch(a_state_, c_state_, mb_batch)
+            return (a_state_n, c_state_n), jnp.stack([al, vl, ent])
+            
+        mb_starts = jnp.arange(0, dataset_size, MINIBATCH_SIZE)
+        (a_state, c_state), epoch_metrics = jax.lax.scan(_update_minibatch, (a_state, c_state), mb_starts)
+        return (a_state, c_state, k), epoch_metrics
+
+    epoch_carry = (actor_state, critic_state, rng)
+    epoch_carry, ppo_metrics = jax.lax.scan(_update_epoch, epoch_carry, None, length=PPO_EPOCHS)
+    (actor_state, critic_state, rng) = epoch_carry
+
+    new_runner_state = (actor_state, critic_state, next_z_batch, next_target_batch, next_xi_batch, next_obs_batch, next_env_counts, rng)
+    
+    metrics = {
+        "mean_return": t_r.sum(axis=0).mean(),
+        "actor_loss": ppo_metrics[..., 0].mean(),
+        "critic_loss": ppo_metrics[..., 1].mean(),
+        "entropy": ppo_metrics[..., 2].mean()
+    }
+    
+    return new_runner_state, metrics
+
+# --- Fast Evaluation ---
 @jax.jit
 def get_eval_action(actor_params, obs_no_pe, xi_batch):
-    """Deterministic action for evaluation (uses mean, no sampling)."""
     full_obs = attach_pe_batch(obs_no_pe, xi_batch)
     mean, _ = actor.apply(actor_params, full_obs)
     return mean
 
 @partial(jax.jit, static_argnames=['max_steps'])
 def fast_eval_episode(actor_params, init_z, init_xi, target_z, max_steps):
-    """Evaluates the actor deterministically for a full episode."""
     def step_fn(state_tuple, _):
         z_curr, xi_curr = state_tuple
-        
-        # Add batch dimension for the observation builder
         obs_no_pe = build_marl_obs_batch(z_curr[None, ...], target_z[None, ...], xi_curr[None, ...]) 
         
-        # Get deterministic action
         act = get_eval_action(actor_params, obs_no_pe, xi_curr[None, ...])
         act_flat = act.squeeze(0)
         
-        # Step physics
         traj = dynamics.unroll_controlled(
-            z_init=z_curr, xi_init=xi_curr, z_target=target_z, params=act_flat, 
-            t_steps=1
+            z_init=z_curr, xi_init=xi_curr, z_target=target_z, params=act_flat, t_steps=1
         )
         next_z, next_xi = traj[0][-1], traj[1][-1]
         
-        # Compute tracking MSE
         mse = jnp.mean((next_z - target_z)**2)
         crashed = jnp.isnan(next_z).any() | jnp.isinf(next_z).any()
-        
         return (next_z, next_xi), (mse, crashed)
 
     _, (mses, crashes) = jax.lax.scan(step_fn, (init_z, init_xi), None, length=max_steps)
     return jnp.mean(mses), jnp.any(crashes)
 
-# --- Initialize States & Networks ---
+
+# --- Setup & Training Loop ---
 actor = MAPPOActor(n_agents=N_AGENTS)
 critic = MAPPOCritic(n_agents=N_AGENTS)
 
@@ -304,7 +360,7 @@ critic_state = TrainState.create(
     tx=optax.chain(optax.clip_by_global_norm(0.5), optax.adam(LR, eps=1e-5))
 )
 
-# --- Data Generation ---
+# --- Pre-generate Starting State Banks globally for JIT access ---
 print("Pre-generating starting state & target banks...")
 bank_keys = jax.random.split(key, 1000)
 _, z_init_bank = jax.vmap(partial(generate_grf, n_points=N_GRID, length_scale=0.2))(bank_keys)
@@ -313,74 +369,35 @@ xi_init_single = jnp.linspace(0.2, 0.8, N_AGENTS, dtype=jnp.float32)
 
 num_updates = TOTAL_TIMESTEPS // (NUM_PARALLEL_ENVS * ROLLOUT_STEPS)
 
-# Setup initial rollout state
 key, subkey = jax.random.split(key)
 idx = jax.random.randint(subkey, (NUM_PARALLEL_ENVS,), 0, 1000)
-z_batch = z_init_bank[idx]
-target_batch = z_target_bank[idx]
-xi_batch = jnp.tile(xi_init_single, (NUM_PARALLEL_ENVS, 1))
-obs_batch = build_marl_obs_batch(z_batch, target_batch, xi_batch)
 
-print(f"Starting MAPPO Training for {num_updates} Rollout Generations...")
+initial_runner_state = (
+    actor_state, critic_state, 
+    z_init_bank[idx], z_target_bank[idx], jnp.tile(xi_init_single, (NUM_PARALLEL_ENVS, 1)), 
+    build_marl_obs_batch(z_init_bank[idx], z_target_bank[idx], jnp.tile(xi_init_single, (NUM_PARALLEL_ENVS, 1))),
+    jnp.zeros(NUM_PARALLEL_ENVS), key
+)
+
+print(f"Starting Pure JAX MAPPO Training for {num_updates} Updates...")
 start_time = time.time()
 
+runner_state = initial_runner_state
+
 for update in trange(num_updates):
-    # --- PHASE 1: JIT-Compiled Trajectory Collection ---
-    final_state, transitions = collect_rollout(
-        actor_state.params, critic_state.params, 
-        z_batch, xi_batch, target_batch, obs_batch, key, 
-        ROLLOUT_STEPS, z_init_bank, z_target_bank, xi_init_single
-    )
-    
-    b_obs, b_z, b_target, b_xi, b_acts, b_logprobs, b_rewards, b_values, b_dones = transitions
-    z_batch, xi_batch, target_batch, obs_batch, key = final_state
-
-    # --- PHASE 2: Advantage Calculation ---
-    next_val = get_value(critic_state.params, z_batch, target_batch, xi_batch)
-    advantages, returns = compute_gae(b_rewards, b_values, b_dones, next_val, GAMMA, GAE_LAMBDA)
-    
-    flat_obs = b_obs.reshape(-1, N_AGENTS, stored_obs_dim)  
-    flat_z = b_z.reshape(-1, N_GRID)
-    flat_target = b_target.reshape(-1, N_GRID)
-    flat_xi = b_xi.reshape(-1, N_AGENTS)
-    
-    flat_acts = b_acts.reshape(-1, N_AGENTS, 2)
-    flat_logprobs = b_logprobs.reshape(-1, N_AGENTS)
-    flat_advs = advantages.reshape(-1, N_AGENTS)
-    flat_rets = returns.reshape(-1, N_AGENTS)
-    
-    # --- PHASE 3: PPO Epoch Optimization ---
-    dataset_size = flat_obs.shape[0]  
-    indices = np.arange(dataset_size)
-    
-    for epoch in range(PPO_EPOCHS):
-        np.random.shuffle(indices)
-        
-        for start in range(0, dataset_size, MINIBATCH_SIZE):
-            end = start + MINIBATCH_SIZE
-            mb_idx = indices[start:end]
-            
-            mb_batch = (
-                flat_obs[mb_idx], flat_z[mb_idx], flat_target[mb_idx], flat_xi[mb_idx],
-                flat_acts[mb_idx], flat_logprobs[mb_idx], flat_advs[mb_idx], flat_rets[mb_idx]
-            )
-            
-            actor_state, critic_state, al, vl, ent = ppo_update_epoch(actor_state, critic_state, mb_batch)
-
-    # --- EVALUATION AND LOGGING ---
     if update % 10 == 0:
-        eval_z = z_init_bank[0] 
-        eval_target = z_target_bank[0]
-        eval_xi = xi_init_single
+        eval_z, eval_target, eval_xi = z_init_bank[0], z_target_bank[0], xi_init_single
+        eval_mse, crashed = fast_eval_episode(runner_state[0].params, eval_z, eval_xi, eval_target, ROLLOUT_STEPS)
         
-        eval_e, crashed = fast_eval_episode(actor_state.params, eval_z, eval_xi, eval_target, ROLLOUT_STEPS)
-        
-        avg_reward = b_rewards.sum(axis=0).mean()
-        status = "[CRASHED]" if crashed else f"{eval_e:.6f}"
-        
-        print(f"Update {update:04d} | Ret: {avg_reward:7.2f} | Eval MSE: {status} | Val L: {vl:.4f} | Act L: {al:.4f} | Ent: {ent:.4f}")
+        status = "[CRASHED]" if crashed else f"{eval_mse:.6f}"
+        print(f"\nUpdate {update:04d} | Eval MSE: {status} | Time: {time.time()-start_time:.1f}s")
+        if update > 0:
+            print(f"Metrics -> Ret: {metrics['mean_return']:.2f} | Val L: {metrics['critic_loss']:.4f} | Act L: {metrics['actor_loss']:.4f} | Ent: {metrics['entropy']:.4f}")
+
+    runner_state, metrics = train_step(runner_state)
 
 # Save output
+actor_state_final, critic_state_final = runner_state[0], runner_state[1]
 with open('models/mappo_heat_params.msgpack', 'wb') as f:
-    f.write(flax.serialization.to_bytes({'actor': actor_state.params, 'critic': critic_state.params}))
+    f.write(flax.serialization.to_bytes({'actor': actor_state_final.params, 'critic': critic_state_final.params}))
 print(f"Training finished in {time.time()-start_time:.1f}s. Weights saved.")

@@ -95,7 +95,7 @@ marl_p = load_params(bench_models_dir / 'marl_heat_params.msgpack', marl_model, 
 if marl_p:
     def marl_apply(p, z, target, xi):
         y = extract_patches_jit(z, target, xi/L_domain, window_size=8)
-        pe = get_sinusoidal_encoding(xi, d=2048)
+        pe = get_sinusoidal_encoding(xi, d=128)
         obs = jnp.concatenate([y, jnp.tile(ENV_MU, (n_agents, 1)), pe], axis=-1)
         action = marl_model.apply(p, obs)
         return action[:, 0], action[:, 1]
