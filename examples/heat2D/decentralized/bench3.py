@@ -27,6 +27,9 @@ from examples.heat2D.decentralized.data_utils import get_training_data
 from examples.heat2D.decentralized.bench.env_heat2d import extract_patches_heat2d_jit
 from examples.heat2D.decentralized.bench.utils_hypemarl import get_sinusoidal_encoding
 from examples.heat2D.decentralized.bench.models_marl import MARLActor2D, U_MAX, V_MAX
+from examples.heat2D.decentralized.bench.models_ppo import PPOActor2D
+from examples.heat2D.decentralized.bench.models_mappo import MAPPOActor2D
+from examples.heat2D.decentralized.bench.models_rl import CentralizedActor2D
 
 # 2D Specific Configuration
 N_grid = 32
@@ -36,52 +39,11 @@ T_steps = 100 # Match test evaluation steps
 N_eval = 50
 ENV_MU = jnp.array([0.01]) 
 
-def get_2d_sinusoidal_encoding(p_2d, d=1024, n=1000.0):
+# CHANGED: Default d=128 to match training
+def get_2d_sinusoidal_encoding(p_2d, d=128, n=1000.0):
     pe_x = get_sinusoidal_encoding(p_2d[:, 0], d=d, n=n)
     pe_y = get_sinusoidal_encoding(p_2d[:, 1], d=d, n=n)
     return jnp.concatenate([pe_x, pe_y], axis=-1)
-
-# --- 1. Baseline Model Definitions (Flax) ---
-
-class CentralizedActor(nn.Module):
-    """Centralized baseline observing flattened 2D domain."""
-    hidden_dim: int = 256
-    n_agents: int = 16 
-    
-    @nn.compact
-    def __call__(self, obs_flat):
-        x = nn.Dense(self.hidden_dim)(obs_flat)
-        x = nn.relu(x)
-        x = nn.Dense(self.hidden_dim)(x)
-        x = nn.relu(x)
-        u = U_MAX * jnp.tanh(nn.Dense(self.n_agents)(x))
-        vx = V_MAX * jnp.tanh(nn.Dense(self.n_agents)(x))
-        vy = V_MAX * jnp.tanh(nn.Dense(self.n_agents)(x))
-        return jnp.stack([u, vx, vy], axis=-1)
-
-class SparsePolynomialLayer(nn.Module):
-    out_features: int = 1
-    gamma: float = -0.1
-    zeta: float = 1.1
-    @nn.compact
-    def __call__(self, x):
-        weights = self.param('weights', nn.initializers.glorot_uniform(), (x.shape[-1], self.out_features))
-        log_alpha = self.param('log_alpha', nn.initializers.constant(0.0), (x.shape[-1], self.out_features))
-        s = jax.nn.sigmoid(log_alpha)
-        s_stretched = s * (self.zeta - self.gamma) + self.gamma
-        gate = jnp.clip(s_stretched, 0.0, 1.0) 
-        return jnp.dot(x, weights * gate)
-
-class MARLPolynomialActor(nn.Module):
-    n_agents: int = 16
-    @nn.compact
-    def __call__(self, poly_features):
-        # 3 actions per agent (u, vx, vy)
-        x = SparsePolynomialLayer(out_features=self.n_agents * 3, name="sparse_layer")(poly_features)
-        x = x.reshape(-1, self.n_agents, 3)
-        u = U_MAX * jnp.tanh(x[..., 0])
-        v = V_MAX * jnp.tanh(x[..., 1:3])
-        return jnp.concatenate([u[..., None], v], axis=-1)
 
 @jax.jit
 def get_poly_features_jax(x):
@@ -98,7 +60,7 @@ def get_poly_features_jax(x):
 
 bench_registry = {}
 
-# --- 2. Loading Logic ---
+# --- Loading Logic ---
 def load_params(filename, model, dummy_input):
     if not os.path.exists(filename):
         print(f"[-] {filename} not found.")
@@ -128,38 +90,73 @@ dpc_p = load_params('decentralized_params_heat2d.msgpack', dpc_model, (jnp.zeros
 if dpc_p:
     bench_registry['DPC'] = {'apply': dpc_model.apply, 'params': dpc_p, 'color': 'blue'}
 
-# 2. MARL (Decentralized Multi-Agent)
+# 2. MARL (Decentralized Multi-Agent DDPG/TD3)
 marl_model = MARLActor2D()
-# Dummy Input calculation: Patch 3 channels * 10x10 (300) + Mu (1) + PE (2048) = 2349
-marl_dummy_input = jnp.zeros((n_agents, 2349))
+marl_dummy_input = jnp.zeros((n_agents, 557))
 marl_p = load_params(bench_models_dir / 'marl_heat2d_params.msgpack', marl_model, (marl_dummy_input,))
 
 if marl_p:
     def marl_apply(p, z, target, xi):
-        # Using the same window size (6) and resized dim (10) as your env
         y = extract_patches_heat2d_jit(z, target, xi/L_domain, window_size=6, resized_dim=10)
         mu_broadcast = jnp.tile(ENV_MU, (n_agents, 1))
-        pe = get_2d_sinusoidal_encoding(xi/L_domain, d=1024) 
+        pe = get_2d_sinusoidal_encoding(xi/L_domain, d=128) 
         
         obs = jnp.concatenate([y, mu_broadcast, pe], axis=-1)
         action = marl_model.apply(p, obs)
-        # Returns u (scalar) and v (2D vector)
         return action[:, 0], action[:, 1:3]
     
     bench_registry['MARL'] = {'apply': marl_apply, 'params': marl_p, 'color': 'orange'}
 
-# 3. RL Centralized
-rl_model = CentralizedActor(n_agents=n_agents)
-rl_input_dim = N_grid * N_grid * 2 + n_agents * 2
-rl_p = load_params(bench_models_dir / 'rl_heat2d_params.msgpack', rl_model, (jnp.zeros(rl_input_dim),))
+# 3. RL Centralized (DDPG/TD3)
+rl_model = CentralizedActor2D(n_agents=n_agents)
+
+# Create separate dummy inputs for z, z_target, and xi
+rl_dummy_z = jnp.zeros((N_grid, N_grid))
+rl_dummy_xi = jnp.zeros((n_agents, 2))
+
+# Pass all three as a tuple to match __call__(self, z, z_target, xi)
+rl_p = load_params(bench_models_dir / 'rl_heat2d_params.msgpack', rl_model, (rl_dummy_z, rl_dummy_z, rl_dummy_xi))
+
 if rl_p:
     def rl_apply(p, z, target, xi):
-        obs = jnp.concatenate([z.flatten(), target.flatten(), xi.flatten()])
-        action = rl_model.apply(p, obs)
+        # Pass the unflattened arguments directly to the model
+        action = rl_model.apply(p, z, target, xi)
         return action[:, 0], action[:, 1:3]
     bench_registry['RL'] = {'apply': rl_apply, 'params': rl_p, 'color': 'purple'}
 
-# 4. Uncontrolled Baseline
+# 4. PPO (Centralized)
+ppo_model = PPOActor2D(n_agents=n_agents)
+ppo_dummy_z = jnp.zeros((1, N_grid, N_grid))
+ppo_dummy_xi = jnp.zeros((1, n_agents, 2))
+ppo_p = load_params(bench_models_dir / 'ppo_heat2d_params.msgpack', ppo_model, (ppo_dummy_z, ppo_dummy_z, ppo_dummy_xi))
+if ppo_p:
+    def ppo_apply(p, z, target, xi):
+        # PPO model expects batch dimensions [None, ...]
+        mean, _ = ppo_model.apply(p, z[None, ...], target[None, ...], xi[None, ...])
+        action = mean[0] # remove batch dim
+        return action[:, 0], action[:, 1:3]
+    bench_registry['PPO'] = {'apply': ppo_apply, 'params': ppo_p, 'color': 'green'}
+
+# 5. MAPPO (Decentralized Multi-Agent PPO)
+mappo_model = MAPPOActor2D(n_agents=n_agents)
+mappo_dummy_input = jnp.zeros((1, n_agents, 557))
+mappo_p = load_params(bench_models_dir / 'mappo_heat2d_params.msgpack', mappo_model, (mappo_dummy_input,))
+
+if mappo_p:
+    def mappo_apply(p, z, target, xi):
+        y = extract_patches_heat2d_jit(z, target, xi/L_domain, window_size=6, resized_dim=10)
+        mu_broadcast = jnp.tile(ENV_MU, (n_agents, 1))
+        pe = get_2d_sinusoidal_encoding(xi/L_domain, d=128) 
+        
+        obs = jnp.concatenate([y, mu_broadcast, pe], axis=-1)
+        # MAPPO model expects batch dimension [None, ...]
+        mean, _ = mappo_model.apply(p, obs[None, ...])
+        action = mean[0] # remove batch dim
+        return action[:, 0], action[:, 1:3]
+    
+    bench_registry['MAPPO'] = {'apply': mappo_apply, 'params': mappo_p, 'color': 'cyan'}
+
+# 6. Uncontrolled Baseline
 bench_registry['Uncontrolled'] = {
     'apply': lambda p, z, t, xi: (jnp.zeros(n_agents), jnp.zeros((n_agents, 2))), 
     'params': None, 'color': 'red'
@@ -167,7 +164,6 @@ bench_registry['Uncontrolled'] = {
 
 # --- 3. Simulation ---
 print(f"Loading 2D dataset and Running Simulations for {list(bench_registry.keys())}...")
-# Re-using the same pregenerated data mechanism
 z_init_all, z_target_all, _ = get_training_data(n_samples=N_eval, n_grid=N_grid, dataset_dir='../data')
 z_init_batch = jnp.array(z_init_all[:N_eval])
 z_target_batch = jnp.array(z_target_all[:N_eval])
@@ -176,7 +172,6 @@ xi_batch = jnp.tile(xi_init, (N_eval, 1, 1))
 @jax.jit(static_argnames=['name'])
 def run_sim(name, z_i, target_i, xi_i):
     dyn = PDEDynamics(policy_apply_fn=bench_registry[name]['apply'])
-    # Exclude nu here if your native 2D solver handles it internally like in the training script
     z_traj, xi_traj, u_traj, v_traj = dyn.unroll_controlled(
         z_init=z_i, xi_init=xi_i, z_target=target_i, 
         params=bench_registry[name]['params'], t_steps=T_steps
@@ -195,7 +190,6 @@ print(f"{'Method':<15} | {'Mean Track Error':<20} | {'2-Sigma':<20}")
 print("-" * 70)
 
 for name in bench_registry:
-    # Error is MSE between final state and target over 2D grid
     final_err = jnp.mean((bench_registry[name]['z_data'][:, -1] - z_target_batch)**2, axis=(1, 2))
     mean_val, std_val = jnp.mean(final_err), jnp.std(final_err)
     print(f"{name:<15} | {mean_val:.6f}             | ±{2*std_val:.6f}")
@@ -206,8 +200,6 @@ print("Saving individual field plots to PDF...")
 for name in bench_registry:
     plt.figure(figsize=(15, 5))
     
-    # Visualize the first sample [0] from the evaluation batch
-    # Final controlled state is the last timestep [-1]
     final_state = bench_registry[name]['z_data'][0, -1]
     target_state = z_target_batch[0]
     initial_state = z_init_batch[0]
@@ -215,19 +207,16 @@ for name in bench_registry:
     vmin = float(jnp.min(z_target_batch))
     vmax = float(jnp.max(z_target_batch))
     
-    # Plot Initial
     plt.subplot(1, 3, 1)
     plt.imshow(initial_state, aspect='auto', origin='lower', cmap='hot', vmin=vmin, vmax=vmax)
     plt.title('Initial State')
     plt.colorbar(label='Temperature')
     
-    # Plot Target
     plt.subplot(1, 3, 2)
     plt.imshow(target_state, aspect='auto', origin='lower', cmap='hot', vmin=vmin, vmax=vmax)
     plt.title('Target State')
     plt.colorbar(label='Temperature')
 
-    # Plot Final
     plt.subplot(1, 3, 3)
     plt.imshow(final_state, aspect='auto', origin='lower', cmap='hot', vmin=vmin, vmax=vmax)
     plt.title(f'Final Controlled State: {name}')
@@ -240,7 +229,6 @@ for name in bench_registry:
 # --- 6. Plotting Trendlines ---
 plt.figure(figsize=(18, 8))
 
-# 1. Boxplot of Tracking Error
 plt.subplot(1, 2, 1)
 data_boxplot = [jnp.mean((bench_registry[n]['z_data'][:, -1] - z_target_batch)**2, axis=(1, 2)) for n in bench_registry]
 plt.boxplot(data_boxplot, labels=list(bench_registry.keys()))
@@ -249,11 +237,9 @@ plt.title('Final Tracking Error (MSE)')
 plt.ylabel('Mean Squared Error')
 plt.grid(True, alpha=0.3)
 
-# 2. Error Evolution
 plt.subplot(1, 2, 2)
 time_axis = jnp.arange(T_steps)
 for name in bench_registry:
-    # Compute MSE across spatial axes (2, 3) and batch axis (0), leaving evolution over time (1)
     evol = jnp.mean(jnp.mean((bench_registry[name]['z_data'] - z_target_batch[:, None, :, :])**2, axis=(2, 3)), axis=0)
     plt.plot(time_axis, evol, label=name, color=bench_registry[name]['color'], lw=2.5)
 

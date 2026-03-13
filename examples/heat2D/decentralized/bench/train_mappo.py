@@ -402,6 +402,6 @@ for update in trange(num_updates):
 
 # Save output
 actor_state_final, critic_state_final = runner_state[0], runner_state[1]
-with open('models/marl_heat2d_params.msgpack', 'wb') as f:
+with open('models/mappo_heat2d_params.msgpack', 'wb') as f:
     f.write(flax.serialization.to_bytes({'actor': actor_state_final.params, 'critic': critic_state_final.params}))
 print(f"Training finished in {time.time()-start_time:.1f}s. Weights saved.")

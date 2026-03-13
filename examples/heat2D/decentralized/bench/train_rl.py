@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 import sys
 from functools import partial
+from tqdm import trange
 
 # Add project root to sys.path
 script_dir = Path(__file__).resolve().parent.parent.parent.parent.parent
@@ -178,7 +179,7 @@ def parallel_physics_step(z_batch, xi_batch, target_batch, actions, prev_v_batch
     next_z_batch, next_xi_batch = jax.vmap(single_physics_step)(z_batch, xi_batch, target_batch, actions, keys)
     
     is_invalid = jnp.logical_not(jnp.isfinite(next_z_batch).all(axis=(1, 2)))
-    dones_batch = is_invalid[:, None] # Keep dims for where operations
+    dones_batch = is_invalid[:, None] 
     
     safe_z = jnp.where(dones_batch[:, :, None], jnp.zeros_like(next_z_batch), next_z_batch)
     safe_xi = jnp.where(dones_batch[:, :, None], xi_batch, next_xi_batch)
@@ -186,9 +187,7 @@ def parallel_physics_step(z_batch, xi_batch, target_batch, actions, prev_v_batch
     u_batch = actions[..., 0]
     v_batch = actions[..., 1:3]
     
-    # --- Formulate Global Reward (MSE + Mean Penalties) safely shaped as (BATCH, 1) ---
-    
-    # 1. MSE: Reduce axes 1 and 2, then expand to (BATCH, 1)
+    # 1. MSE
     mse = jnp.mean((safe_z - target_batch)**2, axis=(1, 2))[:, None]
     
     # 2. Effort Penalty
@@ -211,11 +210,11 @@ def parallel_physics_step(z_batch, xi_batch, target_batch, actions, prev_v_batch
     # 5. Acceleration Penalty
     mean_accel_penalty = jnp.mean(0.1 * jnp.sum(jnp.square(v_batch - prev_v_batch), axis=-1), axis=-1)[:, None]
     
-    # All shaped exactly (128, 1) now.
     rewards_batch = -mse - effort - mean_oob_penalty - mean_coll_penalty - mean_accel_penalty
     
     return safe_z, safe_xi, rewards_batch, dones_batch, v_batch
-# --- 2. FAST JIT-COMPILED EVALUATION ---
+
+# --- FAST JIT-COMPILED EVALUATION ---
 @partial(jax.jit, static_argnames=['max_steps'])
 def fast_eval_episode(actor_params, init_z, init_xi, target_z, max_steps, key):
     def step_fn(state_tuple, _):
@@ -239,7 +238,79 @@ def fast_eval_episode(actor_params, init_z, init_xi, target_z, max_steps, key):
     _, (mses, crashes) = jax.lax.scan(step_fn, (init_z, init_xi, key), None, length=max_steps)
     return jnp.mean(mses), jnp.any(crashes)
 
-# --- Vectorized Training Loop ---
+# --- THE SCAN-COMPILED TRAINING CHUNK ---
+@jax.jit
+def train_chunk(carry, step_indices, z_init_bank, z_target_bank, xi_init_template):
+    """Executes a chunk of TD3 updates entirely on the GPU."""
+    def scan_step(carry, step_idx):
+        buf, a_p, c_p, ta_p, tc_p, o_a, o_c, z, target, xi, prev_v, steps, rng = carry
+        rng, act_k, phys_k, res_k, samp_k, net_k = jax.random.split(rng, 6)
+        
+        # 1. Action Selection
+        def warmup_actions(_):
+            return jax.random.uniform(act_k, (NUM_PARALLEL_ENVS, N_AGENTS, 3), 
+                                      minval=jnp.array([-U_MAX, -V_MAX, -V_MAX]), 
+                                      maxval=jnp.array([U_MAX, V_MAX, V_MAX]))
+        def policy_actions(_):
+            return get_batch_actions(a_p, z, target, xi, act_k, add_noise=True)
+            
+        actions = jax.lax.cond(step_idx < WARMUP_UPDATES, warmup_actions, policy_actions, None)
+        
+        # 2. Physics Step
+        nz, nxi, rew, dones, n_prev_v = parallel_physics_step(z, xi, target, actions, prev_v, phys_k)
+        steps += 1
+        truncs = steps >= MAX_ENV_STEPS
+        needs_reset = jnp.logical_or(dones.flatten(), truncs)
+        
+        # 3. Update Buffer
+        safe_rew = jnp.where(dones, -100.0, rew)
+        new_buf = add_batch_to_buffer(buf, z, target, xi, actions, safe_rew, nz, nxi, dones)
+        
+        # 4. Handle Resets
+        idx_reset = jax.random.randint(res_k, (NUM_PARALLEL_ENVS,), 0, len(z_init_bank))
+        fresh_z = z_init_bank[idx_reset]
+        fresh_target = z_target_bank[idx_reset]
+        fresh_xi = jnp.tile(xi_init_template, (NUM_PARALLEL_ENVS, 1, 1))
+        fresh_v = jnp.zeros((NUM_PARALLEL_ENVS, N_AGENTS, 2))
+        
+        z_next = jnp.where(needs_reset[:, None, None], fresh_z, nz)
+        target_next = jnp.where(needs_reset[:, None, None], fresh_target, target)
+        xi_next = jnp.where(needs_reset[:, None, None], fresh_xi, nxi)
+        prev_v_next = jnp.where(needs_reset[:, None, None], fresh_v, n_prev_v)
+        steps_next = jnp.where(needs_reset, 0, steps)
+
+        # 5. Network Updates (Conditional on Buffer Size)
+        def do_network_updates(net_state):
+            c_p, a_p, ta_p, tc_p, o_c, o_a = net_state
+            bz, bzt, bxi, ba, br, bnz, bnxi, bd = sample_buffer(new_buf, BATCH_SIZE, samp_k)
+            
+            new_c_p, new_o_c = update_critic(c_p, ta_p, tc_p, o_c, bz, bzt, bxi, ba, br, bnz, bnxi, bd, net_k)
+            
+            def do_actor_update(_):
+                return update_actor_and_targets(a_p, new_c_p, ta_p, tc_p, o_a, bz, bzt, bxi)
+            def skip_actor_update(_):
+                return a_p, ta_p, tc_p, o_a
+                
+            new_a_p, new_ta_p, new_tc_p, new_o_a = jax.lax.cond(
+                step_idx % POLICY_DELAY == 0, do_actor_update, skip_actor_update, None
+            )
+            
+            return new_c_p, new_a_p, new_ta_p, new_tc_p, new_o_c, new_o_a
+
+        def skip_network_updates(net_state):
+            return net_state
+
+        net_state = (c_p, a_p, ta_p, tc_p, o_c, o_a)
+        c_p, a_p, ta_p, tc_p, o_c, o_a = jax.lax.cond(
+            new_buf.size >= BATCH_SIZE, do_network_updates, skip_network_updates, net_state
+        )
+
+        new_carry = (new_buf, a_p, c_p, ta_p, tc_p, o_a, o_c, z_next, target_next, xi_next, prev_v_next, steps_next, rng)
+        return new_carry, None
+
+    return jax.lax.scan(scan_step, carry, step_indices)
+
+# --- Main Execution Loop ---
 print("Loading 2D starting state & target banks from dataset...")
 z_init_all, z_target_all, _ = get_training_data(n_samples=5000, n_grid=N_GRID, dataset_dir='../../data')
 z_init_bank = jnp.array(z_init_all)
@@ -253,88 +324,54 @@ xi_init_single = jnp.stack([X.flatten(), Y.flatten()], axis=-1).astype(np.float3
 
 key, subkey = jax.random.split(key)
 idx = jax.random.randint(subkey, (NUM_PARALLEL_ENVS,), 0, len(z_init_bank))
-z_batch = z_init_bank[idx]
-target_batch = z_target_bank[idx]
-xi_batch = jnp.tile(xi_init_single, (NUM_PARALLEL_ENVS, 1, 1))
-prev_v_batch = jnp.zeros((NUM_PARALLEL_ENVS, N_AGENTS, 2))
 
-env_step_counts = jnp.zeros(NUM_PARALLEL_ENVS)
-python_buffer_size = 0
+# Initial Batches
+z_init = z_init_bank[idx]
+target_init = z_target_bank[idx]
+xi_init = jnp.tile(xi_init_single, (NUM_PARALLEL_ENVS, 1, 1))
+prev_v_init = jnp.zeros((NUM_PARALLEL_ENVS, N_AGENTS, 2))
+steps_init = jnp.zeros(NUM_PARALLEL_ENVS)
 
-print("Starting Massively Parallel Centralized RL Training (2D Heat Equation)...")
+buffer = DeviceReplayBuffer.create(125_000, N_GRID, N_AGENTS, 3)
+
+# Pack everything into the initial carry state
+carry = (
+    buffer, actor_params, critic_params, target_actor_params, target_critic_params,
+    opt_actor, opt_critic, z_init, target_init, xi_init, prev_v_init, steps_init, key
+)
+
+print(f"Starting Massively Parallel Centralized RL Training (Chunked & JITed 2D Heat Equation)...")
 start_time = time.time()
 
-for update_step in range(TOTAL_UPDATES):
-    
-    if update_step % EVAL_INT == 0:
-        eval_z, eval_target = z_init_bank[0], z_target_bank[0]
-        eval_xi = xi_init_single
-        key, eval_key = jax.random.split(key)
-        
-        eval_e, crashed = fast_eval_episode(actor_params, eval_z, eval_xi, eval_target, MAX_ENV_STEPS, eval_key)
-        episode_num = update_step // MAX_ENV_STEPS
-        
-        if crashed:
-            print(f"Update {update_step:06d} | Episode {episode_num} | Eval Tracking MSE: [CRASHED] | Time: {time.time()-start_time:.1f}s")
-        else:
-            print(f"Update {update_step:06d} | Episode {episode_num} | Eval Tracking MSE: {eval_e:.6f} | Time: {time.time()-start_time:.1f}s")
+num_chunks = TOTAL_UPDATES // EVAL_INT
 
-    # 2. Parallel Data Collection 
-    key, act_key, physics_key, reset_key = jax.random.split(key, 4)
+for chunk_idx in trange(num_chunks):
+    start_step = chunk_idx * EVAL_INT
+    step_indices = jnp.arange(start_step, start_step + EVAL_INT)
     
-    if update_step < WARMUP_UPDATES:
-        actions = jax.random.uniform(act_key, (NUM_PARALLEL_ENVS, N_AGENTS, 3), 
-                                     minval=jnp.array([-U_MAX, -V_MAX, -V_MAX]), 
-                                     maxval=jnp.array([U_MAX, V_MAX, V_MAX]))
+    # Run the compiled chunk
+    carry, _ = train_chunk(carry, step_indices, z_init_bank, z_target_bank, xi_init_single)
+    
+    # Unpack the current actor for evaluation
+    current_actor_params = carry[1] 
+    
+    # Evaluation Logic
+    eval_z = z_init_bank[0] 
+    eval_target = z_target_bank[0]
+    key, eval_key = jax.random.split(key)
+    
+    eval_e, crashed = fast_eval_episode(current_actor_params, eval_z, xi_init_single, eval_target, MAX_ENV_STEPS, eval_key)
+    
+    current_total_step = start_step + EVAL_INT
+    episode_num = current_total_step // MAX_ENV_STEPS
+    
+    if crashed:
+        print(f"Update {current_total_step:06d} | Episode {episode_num} | Eval Tracking MSE: [CRASHED] | Time: {time.time()-start_time:.1f}s")
     else:
-        actions = get_batch_actions(actor_params, z_batch, target_batch, xi_batch, act_key, add_noise=True)
-        
-    next_z_batch, next_xi_batch, rewards_batch, dones_batch, prev_v_batch = parallel_physics_step(
-        z_batch, xi_batch, target_batch, actions, prev_v_batch, physics_key
-    )
-    
-    env_step_counts += 1
-    truncations_batch = env_step_counts >= MAX_ENV_STEPS
-    
-    safe_next_z = jnp.where(dones_batch[:, :, None], jnp.zeros_like(next_z_batch), next_z_batch)
-    safe_next_xi = jnp.where(dones_batch[:, :, None], xi_batch, next_xi_batch)
-    safe_rewards = jnp.where(dones_batch, -100.0, rewards_batch)
+        print(f"Update {current_total_step:06d} | Episode {episode_num} | Eval Tracking MSE: {eval_e:.6f} | Time: {time.time()-start_time:.1f}s")
 
-    buffer = add_batch_to_buffer(buffer, z_batch, target_batch, xi_batch, actions, safe_rewards, safe_next_z, safe_next_xi, dones_batch)
-    
-    # 4. Handle Resets 
-    needs_reset = jnp.logical_or(dones_batch.flatten(), truncations_batch)
-    idx_reset = jax.random.randint(reset_key, (NUM_PARALLEL_ENVS,), 0, len(z_init_bank))
-    
-    fresh_z = z_init_bank[idx_reset]
-    fresh_target = z_target_bank[idx_reset]
-    fresh_xi = jnp.tile(xi_init_single, (NUM_PARALLEL_ENVS, 1, 1))
-    fresh_v = jnp.zeros((NUM_PARALLEL_ENVS, N_AGENTS, 2))
-    
-    z_batch = jnp.where(needs_reset[:, None, None], fresh_z, safe_next_z)
-    target_batch = jnp.where(needs_reset[:, None, None], fresh_target, target_batch)
-    xi_batch = jnp.where(needs_reset[:, None, None], fresh_xi, safe_next_xi)
-    prev_v_batch = jnp.where(needs_reset[:, None, None], fresh_v, prev_v_batch)
-    
-    env_step_counts = jnp.where(needs_reset, 0, env_step_counts)
-        
-    # 5. TD3 Updates
-    python_buffer_size = min(python_buffer_size + NUM_PARALLEL_ENVS, 125_000)
-    
-    if python_buffer_size > BATCH_SIZE:
-        bz, bzt, bxi, ba, br, bnz, bnxi, bd = sample_buffer(buffer, BATCH_SIZE, subkey) 
-        key, subkey = jax.random.split(key)
-        
-        critic_params, opt_critic = update_critic(
-            critic_params, target_actor_params, target_critic_params, opt_critic, bz, bzt, bxi, ba, br, bnz, bnxi, bd, subkey
-        )
-        
-        if update_step % POLICY_DELAY == 0:
-            actor_params, target_actor_params, target_critic_params, opt_actor = update_actor_and_targets(
-                actor_params, critic_params, target_actor_params, target_critic_params, opt_actor, bz, bzt, bxi
-            )
-
-# Save
+# Extract final weights and save
+final_actor_params = carry[1]
 with open('models/rl_heat2d_params.msgpack', 'wb') as f:
-    f.write(flax.serialization.to_bytes({'actor': actor_params}))
+    f.write(flax.serialization.to_bytes({'actor': final_actor_params}))
 print(f"Training finished in {time.time()-start_time:.1f}s. Weights saved.")

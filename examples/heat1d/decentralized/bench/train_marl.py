@@ -229,8 +229,11 @@ def parallel_marl_physics_step(z_batch, xi_batch, target_batch, actions, key):
     u_batch = actions[..., 0]
     v_batch = actions[..., 1]
     
-    center_errors = next_obs_batch_no_pe[:, :, 10]
-    r_track = -5.0 * jnp.square(center_errors)
+    # --- GLOBAL REWARD UPDATE ---
+    global_mse = jnp.mean(jnp.square(safe_z - target_batch), axis=-1, keepdims=True)
+    r_track = -20.0 * global_mse 
+    # ----------------------------
+    
     r_effort = -0.001 * (jnp.square(u_batch) + 0.1 * jnp.square(v_batch))
     
     margin = 0.02
