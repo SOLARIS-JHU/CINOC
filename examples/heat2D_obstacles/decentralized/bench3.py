@@ -25,9 +25,14 @@ bench_models_dir.mkdir(parents=True, exist_ok=True)
 from examples.heat2D.decentralized.dynamics_dual import PDEDynamics 
 from models.policy import DecentralizedHeat2DControlNet
 from examples.heat2D.decentralized.data_utils import get_training_data
-from examples.heat2D.decentralized.bench.env_heat2d import extract_patches_heat2d_jit
-from examples.heat2D.decentralized.bench.utils_hypemarl import get_sinusoidal_encoding
-from examples.heat2D.decentralized.bench.models_marl import MARLActor2D, U_MAX, V_MAX
+from examples.heat2D_obstacles.decentralized.bench.env_heat2d import extract_patches_heat2d_jit
+from examples.heat2D_obstacles.decentralized.bench.utils_hypemarl import get_sinusoidal_encoding
+
+# Model Imports
+from examples.heat2D_obstacles.decentralized.bench.models_marl import MARLActor2D, U_MAX, V_MAX
+from examples.heat2D_obstacles.decentralized.bench.models_rl import CentralizedActor2D
+from examples.heat2D_obstacles.decentralized.bench.models_mappo import MAPPOActor2D
+from examples.heat2D_obstacles.decentralized.bench.models_ppo import PPOActor2D
 
 # 2D Specific Configuration
 N_grid = 32
@@ -37,70 +42,17 @@ T_steps = 100
 N_eval = 50
 ENV_MU = jnp.array([0.01]) 
 
-# --- NEW: Obstacle Definitions for Visualization ---
+# --- Obstacle Definitions for Visualization ---
 OBSTACLES = np.array([
     [0.30, 0.30, 0.06],   # [x_center, y_center, radius]
     [0.50, 0.50, 0.06],   
     [0.70, 0.70, 0.06],   
 ])
 
-def get_2d_sinusoidal_encoding(p_2d, d=1024, n=1000.0):
+def get_2d_sinusoidal_encoding(p_2d, d, n=1000.0):
     pe_x = get_sinusoidal_encoding(p_2d[:, 0], d=d, n=n)
     pe_y = get_sinusoidal_encoding(p_2d[:, 1], d=d, n=n)
     return jnp.concatenate([pe_x, pe_y], axis=-1)
-
-# --- 1. Baseline Model Definitions (Flax) ---
-
-class CentralizedActor(nn.Module):
-    hidden_dim: int = 256
-    n_agents: int = 16 
-    
-    @nn.compact
-    def __call__(self, obs_flat):
-        x = nn.Dense(self.hidden_dim)(obs_flat)
-        x = nn.relu(x)
-        x = nn.Dense(self.hidden_dim)(x)
-        x = nn.relu(x)
-        u = U_MAX * jnp.tanh(nn.Dense(self.n_agents)(x))
-        vx = V_MAX * jnp.tanh(nn.Dense(self.n_agents)(x))
-        vy = V_MAX * jnp.tanh(nn.Dense(self.n_agents)(x))
-        return jnp.stack([u, vx, vy], axis=-1)
-
-class SparsePolynomialLayer(nn.Module):
-    out_features: int = 1
-    gamma: float = -0.1
-    zeta: float = 1.1
-    @nn.compact
-    def __call__(self, x):
-        weights = self.param('weights', nn.initializers.glorot_uniform(), (x.shape[-1], self.out_features))
-        log_alpha = self.param('log_alpha', nn.initializers.constant(0.0), (x.shape[-1], self.out_features))
-        s = jax.nn.sigmoid(log_alpha)
-        s_stretched = s * (self.zeta - self.gamma) + self.gamma
-        gate = jnp.clip(s_stretched, 0.0, 1.0) 
-        return jnp.dot(x, weights * gate)
-
-class MARLPolynomialActor(nn.Module):
-    n_agents: int = 16
-    @nn.compact
-    def __call__(self, poly_features):
-        x = SparsePolynomialLayer(out_features=self.n_agents * 3, name="sparse_layer")(poly_features)
-        x = x.reshape(-1, self.n_agents, 3)
-        u = U_MAX * jnp.tanh(x[..., 0])
-        v = V_MAX * jnp.tanh(x[..., 1:3])
-        return jnp.concatenate([u[..., None], v], axis=-1)
-
-@jax.jit
-def get_poly_features_jax(x):
-    is_1d = x.ndim == 1
-    x_2d = jnp.atleast_2d(x)
-    n_feat = x_2d.shape[-1]
-    _r, _c = np.triu_indices(n_feat)
-    def poly_single(feat):
-        bias = jnp.ones((1,))
-        quad = jnp.outer(feat, feat)[_r, _c] 
-        return jnp.concatenate([bias, feat, quad])
-    res = jax.vmap(poly_single)(x_2d)
-    return res[0] if is_1d else res
 
 bench_registry = {}
 
@@ -133,32 +85,64 @@ dpc_p = load_params('decentralized_params_heat2d_obstacles.msgpack', dpc_model, 
 if dpc_p:
     bench_registry['DPC'] = {'apply': dpc_model.apply, 'params': dpc_p, 'color': 'blue'}
 
-# 2. MARL
+# 2. MARL (TD3) - PE_D = 64 -> 128 PE + 101 Obs = 229
 marl_model = MARLActor2D()
-marl_dummy_input = jnp.zeros((n_agents, 2349))
+marl_dummy_input = jnp.zeros((n_agents, 229))
 marl_p = load_params(bench_models_dir / 'marl_heat2d_params.msgpack', marl_model, (marl_dummy_input,))
 if marl_p:
     def marl_apply(p, z, target, xi):
         y = extract_patches_heat2d_jit(z, target, xi/L_domain, window_size=6, resized_dim=10)
         mu_broadcast = jnp.tile(ENV_MU, (n_agents, 1))
-        pe = get_2d_sinusoidal_encoding(xi/L_domain, d=1024) 
+        pe = get_2d_sinusoidal_encoding(xi/L_domain, d=64) 
         obs = jnp.concatenate([y, mu_broadcast, pe], axis=-1)
         action = marl_model.apply(p, obs)
         return action[:, 0], action[:, 1:3]
     bench_registry['MARL'] = {'apply': marl_apply, 'params': marl_p, 'color': 'orange'}
 
-# 3. RL Centralized (Loaded with _obstacles suffix)
-rl_model = CentralizedActor(n_agents=n_agents)
-rl_input_dim = N_grid * N_grid * 2 + n_agents * 2
-rl_p = load_params(bench_models_dir / 'rl_heat2d_params.msgpack', rl_model, (jnp.zeros(rl_input_dim),))
+# 5. RL Centralized
+rl_model = CentralizedActor2D(n_agents=n_agents)
+
+rl_dummy_z = jnp.zeros((N_grid, N_grid))
+rl_dummy_xi = jnp.zeros((n_agents, 2))
+rl_p = load_params(bench_models_dir / 'rl_heat2d_params.msgpack', rl_model, (rl_dummy_z, rl_dummy_z, rl_dummy_xi))
+
 if rl_p:
     def rl_apply(p, z, target, xi):
-        obs = jnp.concatenate([z.flatten(), target.flatten(), xi.flatten()])
-        action = rl_model.apply(p, obs)
+        # Pass the unflattened arguments directly to the model
+        action = rl_model.apply(p, z, target, xi)
         return action[:, 0], action[:, 1:3]
     bench_registry['RL'] = {'apply': rl_apply, 'params': rl_p, 'color': 'purple'}
 
-# 4. Uncontrolled Baseline
+# 4. PPO (Global State)
+ppo_model = PPOActor2D(n_agents=n_agents)
+dummy_z = jnp.zeros((1, N_grid, N_grid))
+dummy_target = jnp.zeros((1, N_grid, N_grid))
+dummy_xi = jnp.zeros((1, n_agents, 2))
+ppo_p = load_params(bench_models_dir / 'ppo_heat2d_params.msgpack', ppo_model, (dummy_z, dummy_target, dummy_xi))
+if ppo_p:
+    def ppo_apply(p, z, target, xi):
+        mean, _ = ppo_model.apply(p, z[None, ...], target[None, ...], xi[None, ...])
+        action = mean[0]
+        return action[:, 0], action[:, 1:3]
+    bench_registry['PPO'] = {'apply': ppo_apply, 'params': ppo_p, 'color': 'green'}
+
+
+# 3. MAPPO - PE_D = 128 -> 256 PE + 101 Obs = 357
+mappo_model = MAPPOActor2D(n_agents=n_agents)
+mappo_dummy_input = jnp.zeros((1, n_agents, 357))
+mappo_p = load_params(bench_models_dir / 'mappo_heat2d_params.msgpack', mappo_model, (mappo_dummy_input,))
+if mappo_p:
+    def mappo_apply(p, z, target, xi):
+        y = extract_patches_heat2d_jit(z, target, xi/L_domain, window_size=6, resized_dim=10)
+        mu_broadcast = jnp.tile(ENV_MU, (n_agents, 1))
+        pe = get_2d_sinusoidal_encoding(xi/L_domain, d=128)
+        obs = jnp.concatenate([y, mu_broadcast, pe], axis=-1)
+        mean, _ = mappo_model.apply(p, obs[None, ...])
+        action = mean[0]
+        return action[:, 0], action[:, 1:3]
+    bench_registry['MAPPO'] = {'apply': mappo_apply, 'params': mappo_p, 'color': 'brown'}
+
+# 6. Uncontrolled Baseline
 bench_registry['Uncontrolled'] = {
     'apply': lambda p, z, t, xi: (jnp.zeros(n_agents), jnp.zeros((n_agents, 2))), 
     'params': None, 'color': 'red'

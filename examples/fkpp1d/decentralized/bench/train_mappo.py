@@ -85,29 +85,31 @@ def get_action_and_value(actor_params, critic_params, obs_no_pe, z, target, xi, 
 def get_value(critic_params, z, target, xi):
     return critic.apply(critic_params, z, target, xi)
 
-def compute_gae_jax(rewards, values, dones, next_value, gamma=0.99, lam=0.95):
+# --- Updated: True Next Value GAE Calculation ---
+def compute_gae_jax(rewards, values, dones, true_next_values, last_val, gamma=0.99, lam=0.95):
     def scan_fn(carry, transition):
-        r, v, d = transition
+        r, v, d, true_next_v = transition
         
-        # Changes shape from (256,) to (256, 1)
+        # Changes shape from (256,) to (256, 1) to broadcast across agents
         d = d[:, None] 
         
-        gae, next_v = carry
-        delta = r + gamma * next_v * (1.0 - d) - v
+        gae, _ = carry
+        delta = r + gamma * true_next_v * (1.0 - d) - v
         gae = delta + gamma * lam * (1.0 - d) * gae
         return (gae, v), gae
     
     _, advantages = jax.lax.scan(
         scan_fn, 
-        (jnp.zeros_like(next_value), next_value), 
-        (rewards, values, dones), 
+        (jnp.zeros_like(last_val), last_val), 
+        (rewards, values, dones, true_next_values), 
         reverse=True
     )
     returns = advantages + values
     return advantages, returns
 
+# --- Updated: Value Clipping included ---
 def ppo_update_epoch(actor_state, critic_state, batch):
-    obs_no_pe, z, target, xi, actions, old_log_probs, advantages, returns = batch
+    obs_no_pe, z, target, xi, actions, old_log_probs, advantages, returns, old_values = batch
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
     
     def actor_loss_fn(params):
@@ -128,7 +130,13 @@ def ppo_update_epoch(actor_state, critic_state, batch):
         
     def value_loss_fn(params):
         v = critic.apply(params, z, target, xi)
-        return jnp.mean(jnp.square(v - returns))
+        
+        # Value clipping limits how much the value function can change per epoch
+        v_clipped = old_values + jnp.clip(v - old_values, -CLIP_EPS, CLIP_EPS)
+        v_loss_unclipped = jnp.square(v - returns)
+        v_loss_clipped = jnp.square(v_clipped - returns)
+        
+        return 0.5 * jnp.maximum(v_loss_unclipped, v_loss_clipped).mean()
         
     (a_loss, aux), a_grads = jax.value_and_grad(actor_loss_fn, has_aux=True)(actor_state.params)
     v_loss, v_grads = jax.value_and_grad(value_loss_fn)(critic_state.params)
@@ -190,21 +198,35 @@ def parallel_marl_physics_step(z_batch, xi_batch, target_batch, actions, key):
     u_batch = actions[..., 0]
     v_batch = actions[..., 1]
     
-    # Aggressive Tracking Reward (to counter lack of curriculum)
-    global_mse = jnp.mean(jnp.square(safe_z - target_batch), axis=-1, keepdims=True)
-    r_track = -20.0 * global_mse 
+    # 1. Combined Local + Global Tracking Reward
+    agent_indices = jnp.clip((safe_xi * (N_GRID - 1)).astype(jnp.int32), 0, N_GRID - 1)
+    batch_indices = jnp.arange(safe_z.shape[0])[:, None]
+    
+    local_z = safe_z[batch_indices, agent_indices]
+    local_target = target_batch[batch_indices, agent_indices]
+    
+    local_mse = jnp.square(local_z - local_target)
+    global_mse = jnp.mean(jnp.square(safe_z - target_batch), axis=1)[:, None]
+    
+    r_track_combined = -10.0 * local_mse - 10.0 * global_mse 
 
+    # 2. Effort Penalty
     r_effort = -0.001 * (jnp.square(u_batch) + 0.1 * jnp.square(v_batch))
+    
+    # 3. Boundary Margin Penalty
     margin = 0.02
     r_bound = -100.0 * (jnp.maximum(0.0, margin - safe_xi)**2 + jnp.maximum(0.0, safe_xi - (1.0 - margin))**2)
     
-    # Collision Penalty adjusted for 20 Agents
-    R_safe = 0.02
+    # 4. Collision Penalty
+    R_safe = 0.02 
     dists = jnp.abs(safe_xi[:, :, None] - safe_xi[:, None, :])
     mask = jnp.eye(N_AGENTS)[None, :, :]
     r_coll = -1.0 * jnp.sum(jnp.maximum(0.0, R_safe - (dists + mask * 1.0)) ** 2, axis=2)
     
-    rewards_batch = r_track + r_effort + r_bound + r_coll
+    # Combine the local tracking reward with local penalties
+    rewards_batch = r_track_combined + r_effort + r_bound + r_coll
+    
+    # Apply massive penalty for crashing
     rewards_batch = jnp.where(dones_batch[:, None], -100.0, rewards_batch)
     
     return safe_z, safe_xi, next_obs_batch_no_pe, rewards_batch, dones_batch
@@ -251,17 +273,20 @@ def train_step(runner_state):
             next_obs_no_pe
         )
         
-        transition = (obs, z, zt, xi, action, log_prob, rewards, val, crashes)
+        # Grab true next value BEFORE the next state gets overwritten
+        true_next_v = get_value(critic_state.params, next_z, zt, next_xi)
+        
+        transition = (obs, z, zt, xi, action, log_prob, rewards, val, crashes, true_next_v)
         return (next_z, next_zt, next_xi, obs_new, next_counts, k), transition
 
     carry = (z_batch, target_batch, xi_batch, obs_batch, env_counts, rng)
     carry, transitions = jax.lax.scan(_env_step, carry, None, length=ROLLOUT_STEPS)
     (next_z_batch, next_target_batch, next_xi_batch, next_obs_batch, next_env_counts, rng) = carry
-    t_obs, t_z, t_zt, t_xi, t_a, t_logp, t_r, t_v, t_d = transitions
+    t_obs, t_z, t_zt, t_xi, t_a, t_logp, t_r, t_v, t_d, t_true_next_v = transitions
     
     # 2. GAE Phase
-    next_value = get_value(critic_state.params, next_z_batch, next_target_batch, next_xi_batch)
-    adv, ret = compute_gae_jax(t_r, t_v, t_d, next_value, GAMMA, GAE_LAMBDA)
+    last_val = get_value(critic_state.params, next_z_batch, next_target_batch, next_xi_batch)
+    adv, ret = compute_gae_jax(t_r, t_v, t_d, t_true_next_v, last_val, GAMMA, GAE_LAMBDA)
     
     # Flatten across time and envs
     f_obs = t_obs.reshape(-1, N_AGENTS, stored_obs_dim)  
@@ -272,6 +297,7 @@ def train_step(runner_state):
     f_logp = t_logp.reshape(-1, N_AGENTS)
     f_ret = ret.reshape(-1, N_AGENTS)
     f_adv = adv.reshape(-1, N_AGENTS)
+    f_v = t_v.reshape(-1, N_AGENTS)  # Flatten old values for clipping
 
     # Global normalization of adv
     f_adv = (f_adv - f_adv.mean(axis=0)) / (f_adv.std(axis=0) + 1e-8)
@@ -290,7 +316,7 @@ def train_step(runner_state):
             
             mb_batch = (
                 f_obs[batch_idx], f_z[batch_idx], f_zt[batch_idx], f_xi[batch_idx],
-                f_a[batch_idx], f_logp[batch_idx], f_adv[batch_idx], f_ret[batch_idx]
+                f_a[batch_idx], f_logp[batch_idx], f_adv[batch_idx], f_ret[batch_idx], f_v[batch_idx]
             )
             
             a_state_n, c_state_n, al, vl, ent = ppo_update_epoch(a_state_, c_state_, mb_batch)
@@ -357,16 +383,24 @@ dummy_z = jnp.zeros((1, N_GRID))
 dummy_target = jnp.zeros((1, N_GRID))
 dummy_xi = jnp.zeros((1, N_AGENTS))
 
+# --- Updated: Linear Learning Rate Schedule ---
+total_rollout_steps = NUM_PARALLEL_ENVS * ROLLOUT_STEPS
+num_updates = TOTAL_TIMESTEPS // total_rollout_steps
+optax_steps_per_update = (total_rollout_steps // MINIBATCH_SIZE) * PPO_EPOCHS
+total_optax_steps = num_updates * optax_steps_per_update
+
+lr_schedule = optax.linear_schedule(init_value=LR, end_value=0.0, transition_steps=total_optax_steps)
+
 actor_state = TrainState.create(
     apply_fn=actor.apply,
     params=actor.init(act_k, dummy_obs_full),
-    tx=optax.chain(optax.clip_by_global_norm(0.5), optax.adam(LR, eps=1e-5))
+    tx=optax.chain(optax.clip_by_global_norm(0.5), optax.adam(lr_schedule, eps=1e-5))
 )
 
 critic_state = TrainState.create(
     apply_fn=critic.apply,
     params=critic.init(val_k, dummy_z, dummy_target, dummy_xi),
-    tx=optax.chain(optax.clip_by_global_norm(0.5), optax.adam(LR, eps=1e-5))
+    tx=optax.chain(optax.clip_by_global_norm(0.5), optax.adam(lr_schedule, eps=1e-5))
 )
 
 # --- Pre-generate Starting State Banks globally for JIT access ---
@@ -375,8 +409,6 @@ bank_keys = jax.random.split(key, 1000)
 _, z_init_bank = jax.vmap(partial(generate_grf, n_points=N_GRID, length_scale=0.2))(bank_keys)
 _, z_target_bank = jax.vmap(partial(generate_grf, n_points=N_GRID, length_scale=0.4))(bank_keys)
 xi_init_single = jnp.linspace(0.2, 0.8, N_AGENTS, dtype=jnp.float32)
-
-num_updates = TOTAL_TIMESTEPS // (NUM_PARALLEL_ENVS * ROLLOUT_STEPS)
 
 key, subkey = jax.random.split(key)
 idx = jax.random.randint(subkey, (NUM_PARALLEL_ENVS,), 0, 1000)

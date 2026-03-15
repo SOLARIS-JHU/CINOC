@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import optax
 import flax.serialization
-from flax.training.train_state import TrainState
+from flax import struct
 import numpy as np
 import time
 from pathlib import Path
@@ -18,32 +18,26 @@ from env_heat2d import Heat2DHypeMARLEnv, extract_patches_heat2d_jit
 from utils_hypemarl import get_sinusoidal_encoding
 from examples.heat2D.decentralized.data_utils import get_training_data
 from examples.heat2D.decentralized.dynamics_dual import PDEDynamics 
-from models_mappo import MAPPOActor2D, MAPPOCritic2D, V_MAX, U_MAX
-from ppo_utils import get_logprob_and_action, compute_gae
 
-# --- PPO Configurations ---
+# Import updated models
+from models_marl import MARLActor2D, MATD3Critic2D, U_MAX, V_MAX
+
+# --- Configurations ---
 N_AGENTS = 16 
 L_DOMAIN = 1.0
 N_GRID = 32
 
+ENV_BATCH_SIZE = 256 
+EVAL_INT = 500
+POLICY_DELAY = 2 
+MAX_ENV_STEPS = 100 
+
 NUM_PARALLEL_ENVS = 128
-ROLLOUT_STEPS = 100      # Match 2D episode length
-PPO_EPOCHS = 4
-MINIBATCH_SIZE = 1024
-TOTAL_TIMESTEPS = 50_000_000
+TOTAL_UPDATES = 100000 
+WARMUP_UPDATES = 500
 
-# PPO Hyperparameters
-GAMMA = 0.99
-GAE_LAMBDA = 0.95
-CLIP_EPS = 0.2
-ENTROPY_COEF = 0.01
-VF_COEF = 0.5
-LR = 3e-4
-
-# --- Positional Encoding Fix ---
-PE_D = 128  # 128 features per axis -> 256 total PE features
-
-def get_2d_sinusoidal_encoding(p_2d, d=PE_D, n=1000.0):
+def get_2d_sinusoidal_encoding(p_2d, d=64, n=1000.0):
+    """Combines two 1D positional encodings for 2D coordinates."""
     pe_x = get_sinusoidal_encoding(p_2d[:, 0], d=d, n=n)
     pe_y = get_sinusoidal_encoding(p_2d[:, 1], d=d, n=n)
     return jnp.concatenate([pe_x, pe_y], axis=-1)
@@ -57,24 +51,98 @@ def direct_control_policy(action_params, u_obs, u_target, xi_fixed):
     return u, v
 
 dynamics = PDEDynamics(policy_apply_fn=direct_control_policy)
-env = Heat2DHypeMARLEnv(dynamics, n_agents=N_AGENTS, N_grid=N_GRID, L=L_DOMAIN, max_steps=ROLLOUT_STEPS)
+env = Heat2DHypeMARLEnv(dynamics, n_agents=N_AGENTS, N_grid=N_GRID, L=L_DOMAIN, max_steps=MAX_ENV_STEPS)
 
-# Dynamically link the pe_dim so JAX never gets a shape mismatch again
-pe_dim = PE_D * 2 
-stored_obs_dim = env.local_y_dim + env.n_mu 
+local_y_dim = env.local_y_dim
+n_mu = env.n_mu
+pe_dim = 128 # 64 * 2 (for X and Y)
+
+stored_obs_dim = local_y_dim + n_mu 
 total_input_dim = stored_obs_dim + pe_dim
+
 mu_jax = jnp.array(env.mu)
 window_size = env.window_size
 resized_dim = env.resized_dim
 
-# --- Helper: On-The-Fly Positional Encoding ---
-@jax.jit
-def attach_pe_batch(obs_no_pe, xi_batch):
-    def single_env_pe(obs_env, xi_env):
-        pe = get_2d_sinusoidal_encoding(xi_env)
-        return jnp.concatenate([obs_env, pe], axis=-1)
-    return jax.vmap(single_env_pe)(obs_no_pe, xi_batch)
+# Instantiate the proper MATD3 architecture
+actor = MARLActor2D()
+critic = MATD3Critic2D(n_agents=N_AGENTS)
 
+key, *subkeys = jax.random.split(key, 4)
+
+# Dummies keep the Agent dimension explicitly
+dummy_input = jnp.zeros((ENV_BATCH_SIZE, N_AGENTS, total_input_dim))
+dummy_act = jnp.zeros((ENV_BATCH_SIZE, N_AGENTS, 3)) 
+
+# Critic dummies must be joint (flattened across agents)
+dummy_joint_input = dummy_input.reshape((ENV_BATCH_SIZE, -1))
+dummy_joint_act = dummy_act.reshape((ENV_BATCH_SIZE, -1))
+
+actor_params = actor.init(subkeys[0], dummy_input)
+critic_params = critic.init(subkeys[1], dummy_joint_input, dummy_joint_act)
+
+target_actor_params = actor_params
+target_critic_params = critic_params
+
+tx_actor = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-4)) 
+tx_critic = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(5e-4))
+opt_actor = tx_actor.init(actor_params)
+opt_critic = tx_critic.init(critic_params)
+
+# --- 1. DYNAMIC REPLAY BUFFER ---
+@struct.dataclass
+class DeviceReplayBuffer:
+    s: jnp.ndarray
+    xi: jnp.ndarray
+    a: jnp.ndarray
+    r: jnp.ndarray
+    ns: jnp.ndarray
+    nxi: jnp.ndarray
+    d: jnp.ndarray
+    ptr: jnp.int32
+    size: jnp.int32
+    max_size: int = struct.field(pytree_node=False)
+
+    @classmethod
+    def create(cls, max_size, s_dim, a_dim):
+        return cls(
+            s=jnp.zeros((max_size, N_AGENTS, s_dim), dtype=jnp.float32),
+            xi=jnp.zeros((max_size, N_AGENTS, 2), dtype=jnp.float32), 
+            a=jnp.zeros((max_size, N_AGENTS, a_dim), dtype=jnp.float32),
+            r=jnp.zeros((max_size, N_AGENTS, 1), dtype=jnp.float32),
+            ns=jnp.zeros((max_size, N_AGENTS, s_dim), dtype=jnp.float32),
+            nxi=jnp.zeros((max_size, N_AGENTS, 2), dtype=jnp.float32),
+            d=jnp.zeros((max_size, N_AGENTS, 1), dtype=jnp.float32),
+            ptr=jnp.int32(0),
+            size=jnp.int32(0),
+            max_size=max_size
+        )
+
+@jax.jit
+def add_batch_to_buffer(buffer, s_b, xi_b, a_b, r_b, ns_b, nxi_b, d_b):
+    batch_size = s_b.shape[0]
+    indices = (buffer.ptr + jnp.arange(batch_size)) % buffer.max_size
+    
+    new_s = buffer.s.at[indices].set(s_b)
+    new_xi = buffer.xi.at[indices].set(xi_b)
+    new_a = buffer.a.at[indices].set(a_b)
+    new_r = buffer.r.at[indices].set(r_b)
+    new_ns = buffer.ns.at[indices].set(ns_b)
+    new_nxi = buffer.nxi.at[indices].set(nxi_b)
+    new_d = buffer.d.at[indices].set(d_b)
+    
+    new_ptr = (buffer.ptr + batch_size) % buffer.max_size
+    new_size = jnp.minimum(buffer.size + batch_size, buffer.max_size)
+    
+    return buffer.replace(s=new_s, xi=new_xi, a=new_a, r=new_r, ns=new_ns, nxi=new_nxi, d=new_d, ptr=new_ptr, size=new_size)
+
+@partial(jax.jit, static_argnames=['batch_size'])
+def sample_buffer(buffer, batch_size, key):
+    valid_range = jnp.minimum(buffer.size, buffer.max_size)
+    indices = jax.random.randint(key, shape=(batch_size,), minval=0, maxval=valid_range)
+    return buffer.s[indices], buffer.xi[indices], buffer.a[indices], buffer.r[indices], buffer.ns[indices], buffer.nxi[indices], buffer.d[indices]
+
+# --- 2. JAX OBSERVATION BUILDER ---
 @jax.jit
 def build_marl_obs_batch(z_batch, target_batch, xi_batch):
     def single_env_obs(state, target, xi):
@@ -83,56 +151,83 @@ def build_marl_obs_batch(z_batch, target_batch, xi_batch):
         return jnp.concatenate([y_local, mu_broadcast], axis=-1)
     return jax.vmap(single_env_obs)(z_batch, target_batch, xi_batch)
 
-# --- PPO Core Functions ---
-def get_action_and_value(actor_params, critic_params, obs_no_pe, z, target, xi, key):
-    full_obs = attach_pe_batch(obs_no_pe, xi)
-    mean, log_std = actor.apply(actor_params, full_obs)
-    
-    # Manually compute action and log_prob strictly per-agent (summing only over axis=-1)
-    std = jnp.exp(log_std)
-    action = mean + std * jax.random.normal(key, mean.shape)
-    log_prob = -0.5 * jnp.sum(jnp.square((action - mean) / std) + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
-    
-    val = critic.apply(critic_params, z, target, xi)
-    return action, log_prob, val
+# --- 3. MATD3 JIT TRAINING COMPONENTS ---
+@jax.jit
+def update_critic(c_p, ta_p, tc_p, opt_c, x, u, r, nx, d, key):
+    # Dimensions: x, nx are (BATCH, N_AGENTS, OBS_DIM). u is (BATCH, N_AGENTS, 3). 
+    # r, d are (BATCH, N_AGENTS, 1)
+    batch_size = x.shape[0]
 
-def get_value(critic_params, z, target, xi):
-    return critic.apply(critic_params, z, target, xi)
+    key, noise_key = jax.random.split(key)
+    noise_scale = jnp.array([U_MAX, V_MAX, V_MAX]) * 0.1
+    noise = jnp.clip(jax.random.normal(noise_key, u.shape) * noise_scale, -0.5 * noise_scale, 0.5 * noise_scale)
+    
+    # Decentralized target actions
+    raw_next_u = actor.apply(ta_p, nx) + noise
+    next_u = jnp.clip(raw_next_u, jnp.array([-U_MAX, -V_MAX, -V_MAX]), jnp.array([U_MAX, V_MAX, V_MAX]))
+    
+    # Flatten across agents to form Joint State/Action for the Centralized Critic
+    joint_x = x.reshape(batch_size, -1)
+    joint_u = u.reshape(batch_size, -1)
+    joint_nx = nx.reshape(batch_size, -1)
+    joint_next_u = next_u.reshape(batch_size, -1)
+    
+    # Critic estimates individual Q values, so t_q1/t_q2 are (BATCH, N_AGENTS, 1)
+    t_q1, t_q2 = critic.apply(tc_p, joint_nx, joint_next_u)
+    
+    # Proper MATD3 Credit Assignment: Keep agent rewards separate
+    target_q = r + 0.99 * (1.0 - d) * jnp.minimum(t_q1, t_q2)
+    
+    def c_loss_fn(p):
+        q1, q2 = critic.apply(p, joint_x, joint_u)
+        # q1 and q2 are (BATCH, N_AGENTS, 1) natively
+        return jnp.mean((q1 - target_q)**2 + (q2 - target_q)**2)
+    
+    l_c, grads_c = jax.value_and_grad(c_loss_fn)(c_p)
+    up_c, opt_c = tx_critic.update(grads_c, opt_c)
+    return optax.apply_updates(c_p, up_c), opt_c
 
-def ppo_update_epoch(actor_state, critic_state, batch):
-    obs_no_pe, z, target, xi, actions, old_log_probs, advantages, returns = batch
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-    
-    def actor_loss_fn(params):
-        full_obs = attach_pe_batch(obs_no_pe, xi)
-        mean, log_std = actor.apply(params, full_obs)
-        std = jnp.exp(log_std)
-        
-        log_probs = -0.5 * jnp.sum(jnp.square((actions - mean) / std) + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
-        entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
-        ratio = jnp.exp(log_probs - old_log_probs)
-        
-        pg_loss1 = -advantages * ratio
-        pg_loss2 = -advantages * jnp.clip(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS)
-        pg_loss = jnp.maximum(pg_loss1, pg_loss2).mean()
-        
-        entropy_loss = entropy.mean()
-        return pg_loss - ENTROPY_COEF * entropy_loss, (pg_loss, entropy_loss)
-        
-    def value_loss_fn(params):
-        v = critic.apply(params, z, target, xi)
-        return jnp.mean(jnp.square(v - returns))
-        
-    (a_loss, aux), a_grads = jax.value_and_grad(actor_loss_fn, has_aux=True)(actor_state.params)
-    v_loss, v_grads = jax.value_and_grad(value_loss_fn)(critic_state.params)
-    
-    actor_state = actor_state.apply_gradients(grads=a_grads)
-    critic_state = critic_state.apply_gradients(grads=v_grads)
-    
-    return actor_state, critic_state, a_loss, v_loss, aux[1]
+@jax.jit
+def update_actor_and_targets(a_p, c_p, ta_p, tc_p, opt_a, x):
+    batch_size = x.shape[0]
+    joint_x = x.reshape(batch_size, -1)
 
-# --- Environment Handlers ---
-def parallel_marl_physics_step(z_batch, xi_batch, target_batch, actions, prev_v_batch, key):
+    def a_loss_fn(p):
+        curr_u = actor.apply(p, x)
+        
+        # Flatten inputs for the Critic
+        joint_curr_u = curr_u.reshape(batch_size, -1)
+        
+        # Optimize decentralized actor to maximize individual Q-values
+        # q_vals is shape (BATCH, N_AGENTS, 1)
+        q_vals, _ = critic.apply(c_p, joint_x, joint_curr_u)
+        return -jnp.mean(q_vals)
+    
+    l_a, grads_a = jax.value_and_grad(a_loss_fn)(a_p)
+    up_a, opt_a = tx_actor.update(grads_a, opt_a)
+    a_p = optax.apply_updates(a_p, up_a)
+    
+    tau = 0.005
+    new_ta = jax.tree_util.tree_map(lambda new, old: tau*new + (1-tau)*old, a_p, ta_p)
+    new_tc = jax.tree_util.tree_map(lambda new, old: tau*new + (1-tau)*old, c_p, tc_p)
+    return a_p, new_ta, new_tc, opt_a
+
+@partial(jax.jit, static_argnames=['add_noise'])
+def get_batch_actions(a_p, obs_batch_no_pe, xi_batch, key, add_noise=True):
+    pe_batch = jax.vmap(lambda xi: get_2d_sinusoidal_encoding(xi))(xi_batch)
+    full_obs = jnp.concatenate([obs_batch_no_pe, pe_batch], axis=-1)
+    
+    # Note: Assuming MARLActor2D processes (BATCH, N_AGENTS, OBS_DIM) natively
+    actions = actor.apply(a_p, full_obs)
+    
+    if add_noise:
+        noise_scale = jnp.array([U_MAX, V_MAX, V_MAX]) * 0.1
+        noise = jax.random.normal(key, actions.shape) * noise_scale
+        actions = jnp.clip(actions + noise, jnp.array([-U_MAX, -V_MAX, -V_MAX]), jnp.array([U_MAX, V_MAX, V_MAX]))
+    return actions
+
+@jax.jit
+def parallel_marl_physics_step(z_batch, xi_batch, target_batch, actions, key):
     keys = jax.random.split(key, z_batch.shape[0])
     
     def single_physics_step(z_s, xi_s, target_s, act_s, k_s):
@@ -144,20 +239,34 @@ def parallel_marl_physics_step(z_batch, xi_batch, target_batch, actions, prev_v_
     next_z_batch, next_xi_batch = jax.vmap(single_physics_step)(z_batch, xi_batch, target_batch, actions, keys)
     
     is_invalid = jnp.logical_not(jnp.isfinite(next_z_batch).all(axis=(1, 2)))
-    dones_batch = is_invalid
+    dones_batch = is_invalid[:, None] # Shape: (BATCH, 1)
     
-    safe_z = jnp.where(is_invalid[:, None, None], jnp.zeros_like(next_z_batch), next_z_batch)
-    safe_xi = jnp.where(is_invalid[:, None, None], xi_batch, next_xi_batch)
+    safe_z = jnp.where(dones_batch[:, :, None], jnp.zeros_like(next_z_batch), next_z_batch)
+    safe_xi = jnp.where(dones_batch[:, :, None], xi_batch, next_xi_batch)
     
     next_obs_batch_no_pe = build_marl_obs_batch(safe_z, target_batch, safe_xi)
     
     u_batch = actions[..., 0]
     v_batch = actions[..., 1:3]
     
-    # 1. Global Tracking Reward
+    # --- COMBINED LOCAL + GLOBAL TRACKING REWARD ---
+    # Map continuous [0, 1] positions to discrete spatial 2D grid indices
+    x_idx = jnp.clip((safe_xi[..., 0] * (N_GRID - 1)).astype(jnp.int32), 0, N_GRID - 1)
+    y_idx = jnp.clip((safe_xi[..., 1] * (N_GRID - 1)).astype(jnp.int32), 0, N_GRID - 1)
+    batch_indices = jnp.arange(safe_z.shape[0])[:, None]
+    
+    # Gather specific segment of the 2D PDE the agent is currently sitting on (BATCH, N_AGENTS)
+    local_z = safe_z[batch_indices, x_idx, y_idx]
+    local_target = target_batch[batch_indices, x_idx, y_idx]
+    local_mse = jnp.square(local_z - local_target)
+    
+    # Global tracking across the whole PDE domain (BATCH, 1)
     global_mse = jnp.mean(jnp.square(safe_z - target_batch), axis=(1, 2))[:, None]
-    r_track = -global_mse 
-
+    
+    # Mixed responsibility: Cure the "lazy agent"
+    r_track_combined = -10.0 * local_mse - 10.0 * global_mse
+    # -----------------------------------------------
+    
     # 2. Effort Penalty
     r_effort = -0.001 * (jnp.square(u_batch) + 0.1 * jnp.sum(jnp.square(v_batch), axis=-1))
     
@@ -174,234 +283,176 @@ def parallel_marl_physics_step(z_batch, xi_batch, target_batch, actions, prev_v_
     mask = jnp.eye(N_AGENTS)[None, :, :]
     r_coll = -20.0 * jnp.sum(jnp.maximum(0.0, R_safe - (dists + mask * 10.0)) ** 2, axis=2)
     
-    # 5. Acceleration Penalty
-    r_accel = -0.1 * jnp.sum(jnp.square(v_batch - prev_v_batch), axis=-1)
+    # Broadcasting handles aligning the rewards into shape (BATCH, N_AGENTS, 1)
+    rewards_batch = (r_track_combined + r_effort + r_bound + r_coll)[..., None]
     
-    rewards_batch = r_track + r_effort + r_bound + r_coll + r_accel
-    rewards_batch = jnp.where(dones_batch[:, None], -100.0, rewards_batch)
-    
-    return safe_z, safe_xi, next_obs_batch_no_pe, rewards_batch, dones_batch, v_batch
+    return safe_z, safe_xi, next_obs_batch_no_pe, rewards_batch, dones_batch
 
-# --- THE PURE JAX MAPPO TRAIN STEP ---
-@jax.jit
-def train_step(runner_state):
-    actor_state, critic_state, z_batch, target_batch, xi_batch, obs_batch, prev_v_batch, env_counts, rng = runner_state
-    
-    # 1. Rollout Phase (Compiled loop)
-    def _env_step(carry, _):
-        z, zt, xi, obs, pv, counts, k = carry
-        k, act_k, phys_k, reset_k = jax.random.split(k, 4)
-        
-        action, log_prob, val = get_action_and_value(actor_state.params, critic_state.params, obs, z, zt, xi, act_k)
-
-        env_action_u = jnp.clip(action[..., 0], -U_MAX, U_MAX)
-        env_action_vx = jnp.clip(action[..., 1], -V_MAX, V_MAX)
-        env_action_vy = jnp.clip(action[..., 2], -V_MAX, V_MAX)
-        env_action = jnp.stack([env_action_u, env_action_vx, env_action_vy], axis=-1)
-        
-        next_z, next_xi, next_obs_no_pe, rewards, crashes, next_pv = parallel_marl_physics_step(
-            z, xi, zt, env_action, pv, phys_k
-        )
-        
-        counts += 1
-        truncs = counts >= ROLLOUT_STEPS
-        needs_reset = jnp.logical_or(crashes, truncs)
-        
-        idx_reset = jax.random.randint(reset_k, (NUM_PARALLEL_ENVS,), 0, len(z_init_bank))
-        fresh_z = z_init_bank[idx_reset]
-        fresh_target = z_target_bank[idx_reset]
-        fresh_xi = jnp.tile(xi_init_single, (NUM_PARALLEL_ENVS, 1, 1))
-        fresh_pv = jnp.zeros((NUM_PARALLEL_ENVS, N_AGENTS, 2))
-        
-        next_z = jnp.where(needs_reset[:, None, None], fresh_z, next_z)
-        next_zt = jnp.where(needs_reset[:, None, None], fresh_target, zt)
-        next_xi = jnp.where(needs_reset[:, None, None], fresh_xi, next_xi)
-        next_pv = jnp.where(needs_reset[:, None, None], fresh_pv, next_pv)
-        next_counts = jnp.where(needs_reset, 0, counts)
-        
-        obs_new = jnp.where(
-            needs_reset[:, None, None], 
-            build_marl_obs_batch(next_z, next_zt, next_xi), 
-            next_obs_no_pe
-        )
-        
-        transition = (obs, z, zt, xi, action, log_prob, rewards, val, crashes)
-        return (next_z, next_zt, next_xi, obs_new, next_pv, next_counts, k), transition
-
-    carry = (z_batch, target_batch, xi_batch, obs_batch, prev_v_batch, env_counts, rng)
-    carry, transitions = jax.lax.scan(_env_step, carry, None, length=ROLLOUT_STEPS)
-    (next_z_batch, next_target_batch, next_xi_batch, next_obs_batch, next_pv_batch, next_env_counts, rng) = carry
-    t_obs, t_z, t_zt, t_xi, t_a, t_logp, t_r, t_v, t_d = transitions
-    
-    # 2. GAE Phase (Python loop via unrolled JIT)
-    next_value = get_value(critic_state.params, next_z_batch, next_target_batch, next_xi_batch)
-    
-    # Shape rewards/dones for agent-specific computation
-    dones_expanded = jnp.tile(t_d[:, :, None], (1, 1, N_AGENTS))
-    
-    # Standard GAE computation matching step bounds
-    adv = jnp.zeros_like(t_r)
-    lastgaelam = jnp.zeros((NUM_PARALLEL_ENVS, N_AGENTS))
-    
-    for t in reversed(range(ROLLOUT_STEPS)):
-        if t == ROLLOUT_STEPS - 1:
-            nextnonterminal = 1.0 - dones_expanded[t]
-            nextvalues = next_value
-        else:
-            nextnonterminal = 1.0 - dones_expanded[t]
-            nextvalues = t_v[t+1]
-            
-        delta = t_r[t] + GAMMA * nextvalues * nextnonterminal - t_v[t]
-        lastgaelam = delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
-        adv = adv.at[t].set(lastgaelam)
-        
-    ret = adv + t_v
-    
-    # Flatten across time and envs
-    f_obs = t_obs.reshape(-1, N_AGENTS, stored_obs_dim)  
-    f_z = t_z.reshape(-1, N_GRID, N_GRID)
-    f_zt = t_zt.reshape(-1, N_GRID, N_GRID)
-    f_xi = t_xi.reshape(-1, N_AGENTS, 2)
-    f_a = t_a.reshape(-1, N_AGENTS, 3)
-    f_logp = t_logp.reshape(-1, N_AGENTS)
-    f_ret = ret.reshape(-1, N_AGENTS)
-    f_adv = adv.reshape(-1, N_AGENTS)
-
-    # Global normalization of adv
-    f_adv = (f_adv - f_adv.mean(axis=0)) / (f_adv.std(axis=0) + 1e-8)
-    
-    dataset_size = f_z.shape[0]
-
-    # 3. Optimization Phase
-    def _update_epoch(epoch_carry, _):
-        a_state, c_state, k = epoch_carry
-        k, subk = jax.random.split(k)
-        indices = jax.random.permutation(subk, dataset_size)
-        
-        def _update_minibatch(mb_carry, start_idx):
-            a_state_, c_state_ = mb_carry
-            batch_idx = jax.lax.dynamic_slice(indices, (start_idx,), (MINIBATCH_SIZE,))
-            
-            mb_batch = (
-                f_obs[batch_idx], f_z[batch_idx], f_zt[batch_idx], f_xi[batch_idx],
-                f_a[batch_idx], f_logp[batch_idx], f_adv[batch_idx], f_ret[batch_idx]
-            )
-            
-            a_state_n, c_state_n, al, vl, ent = ppo_update_epoch(a_state_, c_state_, mb_batch)
-            return (a_state_n, c_state_n), jnp.stack([al, vl, ent])
-            
-        mb_starts = jnp.arange(0, dataset_size, MINIBATCH_SIZE)
-        (a_state, c_state), epoch_metrics = jax.lax.scan(_update_minibatch, (a_state, c_state), mb_starts)
-        return (a_state, c_state, k), epoch_metrics
-
-    epoch_carry = (actor_state, critic_state, rng)
-    epoch_carry, ppo_metrics = jax.lax.scan(_update_epoch, epoch_carry, None, length=PPO_EPOCHS)
-    (actor_state, critic_state, rng) = epoch_carry
-
-    new_runner_state = (actor_state, critic_state, next_z_batch, next_target_batch, next_xi_batch, next_obs_batch, next_pv_batch, next_env_counts, rng)
-    
-    metrics = {
-        "mean_return": t_r.sum(axis=0).mean(),
-        "actor_loss": ppo_metrics[..., 0].mean(),
-        "critic_loss": ppo_metrics[..., 1].mean(),
-        "entropy": ppo_metrics[..., 2].mean()
-    }
-    
-    return new_runner_state, metrics
-
-# --- Fast Evaluation ---
-@jax.jit
-def get_eval_action(actor_params, obs_no_pe, xi_batch):
-    full_obs = attach_pe_batch(obs_no_pe, xi_batch)
-    mean, _ = actor.apply(actor_params, full_obs)
-    return mean
-
+# --- 4. FAST JIT-COMPILED EVALUATION ---
 @partial(jax.jit, static_argnames=['max_steps'])
-def fast_eval_episode(actor_params, init_z, init_xi, target_z, max_steps):
+def fast_eval_episode(actor_params, init_z, init_xi, target_z, max_steps, key):
     def step_fn(state_tuple, _):
-        z_curr, xi_curr = state_tuple
-        obs_no_pe = build_marl_obs_batch(z_curr[None, ...], target_z[None, ...], xi_curr[None, ...]) 
+        z_curr, xi_curr, k = state_tuple
+        k, subk = jax.random.split(k)
         
-        act = get_eval_action(actor_params, obs_no_pe, xi_curr[None, ...])
+        obs_no_pe = build_marl_obs_batch(z_curr[None, ...], target_z[None, ...], xi_curr[None, ...]) 
+        act = get_batch_actions(actor_params, obs_no_pe, xi_curr[None, ...], None, add_noise=False)
         act_flat = act.squeeze(0)
         
         traj = dynamics.unroll_controlled(
-            z_init=z_curr, xi_init=xi_curr, z_target=target_z, params=act_flat, t_steps=1
+            z_init=z_curr, xi_init=xi_curr, z_target=target_z, params=act_flat, 
+            t_steps=1,
         )
         next_z, next_xi = traj[0][-1], traj[1][-1]
         
         mse = jnp.mean((next_z - target_z)**2)
         crashed = jnp.isnan(next_z).any() | jnp.isinf(next_z).any()
-        return (next_z, next_xi), (mse, crashed)
+        
+        return (next_z, next_xi, k), (mse, crashed)
 
-    _, (mses, crashes) = jax.lax.scan(step_fn, (init_z, init_xi), None, length=max_steps)
+    _, (mses, crashes) = jax.lax.scan(step_fn, (init_z, init_xi, key), None, length=max_steps)
     return jnp.mean(mses), jnp.any(crashes)
 
 
-# --- Setup & Training Loop ---
-actor = MAPPOActor2D(n_agents=N_AGENTS)
-critic = MAPPOCritic2D(n_agents=N_AGENTS)
+# --- 5. THE SCAN-COMPILED TRAINING CHUNK ---
+@jax.jit
+def train_chunk(carry, step_indices, z_init_bank, z_target_bank, xi_init_single):
+    """Executes a chunk of training steps entirely on the GPU."""
+    def scan_step(loop_carry, step_idx):
+        buf, a_p, c_p, ta_p, tc_p, o_a, o_c, z, target, xi, obs, steps, rng = loop_carry
+        rng, act_k, phys_k, res_k, samp_k, net_k = jax.random.split(rng, 6)
+        
+        # 1. Action Selection (Warmup vs Policy)
+        def warmup_actions(_):
+            return jax.random.uniform(act_k, (NUM_PARALLEL_ENVS, N_AGENTS, 3), 
+                                      minval=jnp.array([-U_MAX, -V_MAX, -V_MAX]), 
+                                      maxval=jnp.array([U_MAX, V_MAX, V_MAX]))
+        def policy_actions(_):
+            return get_batch_actions(a_p, obs, xi, act_k, add_noise=True)
+            
+        actions = jax.lax.cond(step_idx < WARMUP_UPDATES, warmup_actions, policy_actions, None)
+        
+        # 2. Physics Step
+        nz, nxi, nobs, rew, dones = parallel_marl_physics_step(z, xi, target, actions, phys_k)
+        steps += 1
+        truncs = steps >= MAX_ENV_STEPS
+        needs_reset = jnp.logical_or(dones.flatten(), truncs)
+        
+        # 3. Update Buffer
+        safe_rew = jnp.where(dones[:, None], -100.0, rew)
+        dones_exp = jnp.tile(dones[:, None, :], (1, N_AGENTS, 1))
+        new_buf = add_batch_to_buffer(buf, obs, xi, actions, safe_rew, nobs, nxi, dones_exp)
+        
+        # 4. Handle Resets
+        idx_reset = jax.random.randint(res_k, (NUM_PARALLEL_ENVS,), 0, len(z_init_bank))
+        fresh_z = z_init_bank[idx_reset]
+        fresh_target = z_target_bank[idx_reset]
+        fresh_xi = jnp.tile(xi_init_single, (NUM_PARALLEL_ENVS, 1, 1))
+        
+        z_next = jnp.where(needs_reset[:, None, None], fresh_z, nz)
+        target_next = jnp.where(needs_reset[:, None, None], fresh_target, target)
+        xi_next = jnp.where(needs_reset[:, None, None], fresh_xi, nxi)
+        
+        obs_next = jnp.where(needs_reset[:, None, None], build_marl_obs_batch(z_next, target_next, xi_next), nobs)
+        steps_next = jnp.where(needs_reset, 0, steps)
 
-key, act_k, val_k = jax.random.split(key, 3)
+        # 5. Network Updates (Conditional on Buffer Size)
+        def do_network_updates(net_state):
+            c_p_, a_p_, ta_p_, tc_p_, o_c_, o_a_ = net_state
+            
+            bx, bxi, bu, br, bnx, bnxi, bd = sample_buffer(new_buf, ENV_BATCH_SIZE, samp_k)
+            
+            bpe = jax.vmap(lambda x_i: get_2d_sinusoidal_encoding(x_i))(bxi)
+            bnpe = jax.vmap(lambda x_i: get_2d_sinusoidal_encoding(x_i))(bnxi)
+            
+            bx_full = jnp.concatenate([bx, bpe], axis=-1)
+            bnx_full = jnp.concatenate([bnx, bnpe], axis=-1)
+            
+            # MATD3 Critic Update
+            new_c_p, new_o_c = update_critic(c_p_, ta_p_, tc_p_, o_c_, bx_full, bu, br, bnx_full, bd, net_k)
+            
+            # Policy Delayed Actor Update
+            def do_actor_update(_):
+                return update_actor_and_targets(a_p_, new_c_p, ta_p_, tc_p_, o_a_, bx_full)
+            def skip_actor_update(_):
+                return a_p_, ta_p_, tc_p_, o_a_
+                
+            new_a_p, new_ta_p, new_tc_p, new_o_a = jax.lax.cond(
+                step_idx % POLICY_DELAY == 0, do_actor_update, skip_actor_update, None
+            )
+            
+            return new_c_p, new_a_p, new_ta_p, new_tc_p, new_o_c, new_o_a
 
-dummy_obs_full = jnp.zeros((1, N_AGENTS, total_input_dim))
-dummy_z = jnp.zeros((1, N_GRID, N_GRID))
-dummy_target = jnp.zeros((1, N_GRID, N_GRID))
-dummy_xi = jnp.zeros((1, N_AGENTS, 2))
+        def skip_network_updates(net_state):
+            return net_state
 
-actor_state = TrainState.create(
-    apply_fn=actor.apply,
-    params=actor.init(act_k, dummy_obs_full),
-    tx=optax.chain(optax.clip_by_global_norm(0.5), optax.adam(LR, eps=1e-5))
-)
+        net_state = (c_p, a_p, ta_p, tc_p, o_c, o_a)
+        c_p, a_p, ta_p, tc_p, o_c, o_a = jax.lax.cond(
+            new_buf.size >= ENV_BATCH_SIZE, do_network_updates, skip_network_updates, net_state
+        )
 
-critic_state = TrainState.create(
-    apply_fn=critic.apply,
-    params=critic.init(val_k, dummy_z, dummy_target, dummy_xi),
-    tx=optax.chain(optax.clip_by_global_norm(0.5), optax.adam(LR, eps=1e-5))
-)
+        new_carry = (new_buf, a_p, c_p, ta_p, tc_p, o_a, o_c, z_next, target_next, xi_next, obs_next, steps_next, rng)
+        return new_carry, None
 
+    return jax.lax.scan(scan_step, carry, step_indices)
+
+# --- Vectorized Training Loop ---
 print("Loading 2D starting state & target banks from dataset...")
 z_init_all, z_target_all, _ = get_training_data(n_samples=5000, n_grid=N_GRID, dataset_dir='../../data')
 z_init_bank = jnp.array(z_init_all)
 z_target_bank = jnp.array(z_target_all)
 
+# 4x4 Agent Template
 n_side = int(np.sqrt(N_AGENTS))
-pos_1d = jnp.linspace(0.2, 0.8, n_side)
-X, Y = jnp.meshgrid(pos_1d, pos_1d)
-xi_init_single = jnp.stack([X.flatten(), Y.flatten()], axis=-1)
-
-num_updates = TOTAL_TIMESTEPS // (NUM_PARALLEL_ENVS * ROLLOUT_STEPS)
+pos_1d = np.linspace(0.2, 0.8, n_side)
+X, Y = np.meshgrid(pos_1d, pos_1d)
+xi_init_single = jnp.stack([X.flatten(), Y.flatten()], axis=-1).astype(np.float32)
 
 key, subkey = jax.random.split(key)
 idx = jax.random.randint(subkey, (NUM_PARALLEL_ENVS,), 0, len(z_init_bank))
+z_batch = z_init_bank[idx]
+target_batch = z_target_bank[idx]
+xi_batch = jnp.tile(xi_init_single, (NUM_PARALLEL_ENVS, 1, 1))
 
-initial_runner_state = (
-    actor_state, critic_state, 
-    z_init_bank[idx], z_target_bank[idx], jnp.tile(xi_init_single, (NUM_PARALLEL_ENVS, 1, 1)), 
-    build_marl_obs_batch(z_init_bank[idx], z_target_bank[idx], jnp.tile(xi_init_single, (NUM_PARALLEL_ENVS, 1, 1))),
-    jnp.zeros((NUM_PARALLEL_ENVS, N_AGENTS, 2)), jnp.zeros(NUM_PARALLEL_ENVS), key
+obs_batch = build_marl_obs_batch(z_batch, target_batch, xi_batch)
+env_step_counts = jnp.zeros(NUM_PARALLEL_ENVS)
+
+buffer = DeviceReplayBuffer.create(125_000, stored_obs_dim, 3) 
+
+# Pack everything into the initial carry state
+carry = (
+    buffer, actor_params, critic_params, target_actor_params, target_critic_params,
+    opt_actor, opt_critic, z_batch, target_batch, xi_batch, obs_batch, env_step_counts, key
 )
 
-print(f"Starting Pure JAX MAPPO 2D Training for {num_updates} Updates...")
+print("Starting Massively Parallel MATD3 Training (Chunked & JITed 2D Heat Equation)...")
 start_time = time.time()
 
-runner_state = initial_runner_state
+num_chunks = TOTAL_UPDATES // EVAL_INT
 
-for update in trange(num_updates):
-    if update % 10 == 0:
-        eval_z, eval_target, eval_xi = z_init_bank[0], z_target_bank[0], xi_init_single
-        eval_mse, crashed = fast_eval_episode(runner_state[0].params, eval_z, eval_xi, eval_target, ROLLOUT_STEPS)
-        
-        status = "[CRASHED]" if crashed else f"{eval_mse:.6f}"
-        print(f"\nUpdate {update:04d} | Eval MSE: {status} | Time: {time.time()-start_time:.1f}s")
-        if update > 0:
-            print(f"Metrics -> Ret: {metrics['mean_return']:.2f} | Val L: {metrics['critic_loss']:.4f} | Act L: {metrics['actor_loss']:.4f} | Ent: {metrics['entropy']:.4f}")
+for chunk_idx in trange(num_chunks):
+    start_step = chunk_idx * EVAL_INT
+    step_indices = jnp.arange(start_step, start_step + EVAL_INT)
+    
+    # Evaluate at the start of the chunk
+    eval_z, eval_target = z_init_bank[0], z_target_bank[0]
+    key, eval_key = jax.random.split(key)
+    
+    current_actor_params = carry[1] 
+    eval_e, crashed = fast_eval_episode(current_actor_params, eval_z, xi_init_single, eval_target, MAX_ENV_STEPS, eval_key)
+    
+    episode_num = start_step // MAX_ENV_STEPS
+    
+    if crashed:
+        print(f"\nUpdate {start_step:06d} | Episode {episode_num} | Eval Tracking MSE: [CRASHED] | Time: {time.time()-start_time:.1f}s")
+    else:
+        print(f"\nUpdate {start_step:06d} | Episode {episode_num} | Eval Tracking MSE: {eval_e:.6f} | Time: {time.time()-start_time:.1f}s")
 
-    runner_state, metrics = train_step(runner_state)
+    # Run the compiled chunk on the GPU
+    carry, _ = train_chunk(carry, step_indices, z_init_bank, z_target_bank, xi_init_single)
 
-# Save output
-actor_state_final, critic_state_final = runner_state[0], runner_state[1]
+# Extract final weights and save
+final_actor_params = carry[1]
 with open('models/marl_heat2d_params.msgpack', 'wb') as f:
-    f.write(flax.serialization.to_bytes({'actor': actor_state_final.params, 'critic': critic_state_final.params}))
+    f.write(flax.serialization.to_bytes({'actor': final_actor_params}))
 print(f"Training finished in {time.time()-start_time:.1f}s. Weights saved.")

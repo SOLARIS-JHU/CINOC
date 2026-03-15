@@ -58,18 +58,18 @@ opt_critic = tx_critic.init(critic_params)
 
 # --- JAX-Native GAE ---
 @jax.jit
-def compute_gae_jax(rewards, values, dones, next_value, gamma=0.99, lam=0.95):
+def compute_gae_jax(rewards, values, dones, true_next_values, last_val, gamma=0.99, lam=0.95):
     def scan_fn(carry, transition):
-        r, v, d = transition
-        gae, next_v = carry
-        delta = r + gamma * next_v * (1.0 - d) - v
+        r, v, d, true_next_v = transition
+        gae, _ = carry
+        delta = r + gamma * true_next_v * (1.0 - d) - v
         gae = delta + gamma * lam * (1.0 - d) * gae
         return (gae, v), gae
     
     _, advantages = jax.lax.scan(
         scan_fn, 
-        (jnp.zeros_like(next_value), next_value), 
-        (rewards, values, dones), 
+        (jnp.zeros_like(last_val), last_val), 
+        (rewards, values, dones, true_next_values), 
         reverse=True
     )
     returns = advantages + values
@@ -118,7 +118,6 @@ def parallel_physics_step(z_batch, xi_batch, target_batch, actions, prev_v_batch
 
 # --- Minibatch Update Logic ---
 def update_ppo_minibatch(a_params, c_params, opt_a, opt_c, b_z, b_zt, b_xi, b_a, b_logp, b_ret, b_adv):
-    b_adv = (b_adv - b_adv.mean()) / (b_adv.std() + 1e-8)
 
     def loss_fn(ap, cp):
         mean, log_std = actor.apply(ap, b_z, b_zt, b_xi)
@@ -169,22 +168,25 @@ def train_step(runner_state):
         fresh_pv = jnp.zeros((NUM_PARALLEL_ENVS, N_AGENTS, 2))
         
         next_z = jnp.where(needs_reset[:, None, None], fresh_z, next_z)
+        # Get the value of the true next state BEFORE overwriting it with resets
+        true_next_v = critic.apply(c_params, next_z, zt, next_xi).squeeze(-1)
+
         next_zt = jnp.where(needs_reset[:, None, None], fresh_target, zt)
         next_xi = jnp.where(needs_reset[:, None, None], fresh_xi, next_xi)
         next_pv = jnp.where(needs_reset[:, None, None], fresh_pv, next_pv)
         next_counts = jnp.where(needs_reset, 0, counts)
         
-        transition = (z, zt, xi, actions, rewards.squeeze(-1), values, log_probs, dones.squeeze(-1))
+        transition = (z, zt, xi, actions, rewards.squeeze(-1), values, log_probs, dones.squeeze(-1), true_next_v)
         return (next_z, next_zt, next_xi, next_pv, next_counts, k), transition
 
     carry = (z_batch, target_batch, xi_batch, prev_v_batch, env_counts, rng)
     carry, transitions = jax.lax.scan(_env_step, carry, None, length=ROLLOUT_STEPS)
     (next_z_batch, next_target_batch, next_xi_batch, next_pv_batch, next_env_counts, rng) = carry
-    t_z, t_zt, t_xi, t_a, t_r, t_v, t_logp, t_d = transitions
+    t_z, t_zt, t_xi, t_a, t_r, t_v, t_logp, t_d, t_true_next_v = transitions
     
     # 2. GAE Phase
-    next_value = critic.apply(c_params, next_z_batch, next_target_batch, next_xi_batch).squeeze(-1)
-    adv, ret = compute_gae_jax(t_r, t_v, t_d, next_value)
+    last_val = critic.apply(c_params, next_z_batch, next_target_batch, next_xi_batch).squeeze(-1)
+    adv, ret = compute_gae_jax(t_r, t_v, t_d, t_true_next_v, last_val)
     
     # Flatten across time and envs
     f_z = t_z.reshape(-1, N_GRID, N_GRID)
@@ -194,6 +196,9 @@ def train_step(runner_state):
     f_logp = t_logp.reshape(-1) 
     f_ret = ret.reshape(-1)
     f_adv = adv.reshape(-1)
+    
+    # Normalize advantages across the ENTIRE batch here
+    f_adv = (f_adv - f_adv.mean()) / (f_adv.std() + 1e-8)
     
     dataset_size = f_z.shape[0]
 

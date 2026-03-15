@@ -106,7 +106,7 @@ if marl_p:
 # 3. PPO (Centralized global state inputs: z, target, xi)
 ppo_model = PPOActor(n_agents=n_agents)
 ppo_dummy_input = (jnp.zeros(N_grid), jnp.zeros(N_grid), jnp.zeros(n_agents))
-ppo_p = load_params(bench_models_dir / 'ppo_heat_params.msgpack', ppo_model, ppo_dummy_input)
+ppo_p = load_params(bench_models_dir / 'ppo_heat1d_params.msgpack', ppo_model, ppo_dummy_input)
 
 if ppo_p:
     def ppo_apply(p, z, target, xi):
@@ -120,7 +120,7 @@ if ppo_p:
 # 4. MAPPO (Decentralized patch inputs: obs)
 mappo_model = MAPPOActor(n_agents=n_agents)
 mappo_dummy_input = (jnp.zeros((n_agents, 128 + 41)),)
-mappo_p = load_params(bench_models_dir / 'mappo_heat_params.msgpack', mappo_model, mappo_dummy_input)
+mappo_p = load_params(bench_models_dir / 'mappo_heat_params_new.msgpack', mappo_model, mappo_dummy_input)
 
 if mappo_p:
     def mappo_apply(p, z, target, xi):

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 import sys
 from functools import partial
+from tqdm import trange
 
 # Add project root to sys.path
 script_dir = Path(__file__).resolve().parent.parent.parent.parent.parent
@@ -47,7 +48,9 @@ env = KSHypeMARLEnv(dynamics, n_agents=N_AGENTS, N_grid=N_GRID, L=L_DOMAIN, max_
 
 local_y_dim = 40 
 n_mu = env.n_mu
-pe_dim = 2048
+
+# CHANGED: 64 dim for positional encoding
+pe_dim = 64
 
 # Memory Optimization: We ONLY store the physical state in the buffer
 stored_obs_dim = local_y_dim + n_mu 
@@ -270,7 +273,7 @@ python_buffer_size = 0
 print("Starting Massively Parallel MARL Training...")
 start_time = time.time()
 
-for update_step in range(TOTAL_UPDATES):
+for update_step in trange(TOTAL_UPDATES):
     
     if update_step % EVAL_INT == 0:
         eval_u = state_bank[0] 

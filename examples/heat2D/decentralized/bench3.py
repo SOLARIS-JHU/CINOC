@@ -40,7 +40,7 @@ N_eval = 50
 ENV_MU = jnp.array([0.01]) 
 
 # CHANGED: Default d=128 to match training
-def get_2d_sinusoidal_encoding(p_2d, d=128, n=1000.0):
+def get_2d_sinusoidal_encoding(p_2d, d=64, n=1000.0):
     pe_x = get_sinusoidal_encoding(p_2d[:, 0], d=d, n=n)
     pe_y = get_sinusoidal_encoding(p_2d[:, 1], d=d, n=n)
     return jnp.concatenate([pe_x, pe_y], axis=-1)
@@ -92,14 +92,14 @@ if dpc_p:
 
 # 2. MARL (Decentralized Multi-Agent DDPG/TD3)
 marl_model = MARLActor2D()
-marl_dummy_input = jnp.zeros((n_agents, 557))
+marl_dummy_input = jnp.zeros((n_agents, 429))
 marl_p = load_params(bench_models_dir / 'marl_heat2d_params.msgpack', marl_model, (marl_dummy_input,))
 
 if marl_p:
     def marl_apply(p, z, target, xi):
         y = extract_patches_heat2d_jit(z, target, xi/L_domain, window_size=6, resized_dim=10)
         mu_broadcast = jnp.tile(ENV_MU, (n_agents, 1))
-        pe = get_2d_sinusoidal_encoding(xi/L_domain, d=128) 
+        pe = get_2d_sinusoidal_encoding(xi/L_domain, d=64) 
         
         obs = jnp.concatenate([y, mu_broadcast, pe], axis=-1)
         action = marl_model.apply(p, obs)

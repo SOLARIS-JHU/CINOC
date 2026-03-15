@@ -27,7 +27,7 @@ L_DOMAIN = 1.0
 N_GRID = 32
 
 NUM_PARALLEL_ENVS = 128
-ROLLOUT_STEPS = 100      # Match 2D episode length
+ROLLOUT_STEPS = 128      # Changed from 100 to 128 to match PPO and divide cleanly by 1024
 PPO_EPOCHS = 4
 MINIBATCH_SIZE = 1024
 TOTAL_TIMESTEPS = 50_000_000
@@ -100,8 +100,7 @@ def get_value(critic_params, z, target, xi):
     return critic.apply(critic_params, z, target, xi)
 
 def ppo_update_epoch(actor_state, critic_state, batch):
-    obs_no_pe, z, target, xi, actions, old_log_probs, advantages, returns = batch
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+    obs_no_pe, z, target, xi, actions, old_log_probs, advantages, returns, old_values = batch
     
     def actor_loss_fn(params):
         full_obs = attach_pe_batch(obs_no_pe, xi)
@@ -121,7 +120,13 @@ def ppo_update_epoch(actor_state, critic_state, batch):
         
     def value_loss_fn(params):
         v = critic.apply(params, z, target, xi)
-        return jnp.mean(jnp.square(v - returns))
+        
+        # Value clipping limits how much the value function can change per epoch
+        v_clipped = old_values + jnp.clip(v - old_values, -CLIP_EPS, CLIP_EPS)
+        v_loss_unclipped = jnp.square(v - returns)
+        v_loss_clipped = jnp.square(v_clipped - returns)
+        
+        return 0.5 * jnp.maximum(v_loss_unclipped, v_loss_clipped).mean()
         
     (a_loss, aux), a_grads = jax.value_and_grad(actor_loss_fn, has_aux=True)(actor_state.params)
     v_loss, v_grads = jax.value_and_grad(value_loss_fn)(critic_state.params)
@@ -154,9 +159,17 @@ def parallel_marl_physics_step(z_batch, xi_batch, target_batch, actions, prev_v_
     u_batch = actions[..., 0]
     v_batch = actions[..., 1:3]
     
-    # 1. Global Tracking Reward
+    # 1. Combined Local + Global Tracking Reward (Ported from MATD3)
+    x_idx = jnp.clip((safe_xi[..., 0] * (N_GRID - 1)).astype(jnp.int32), 0, N_GRID - 1)
+    y_idx = jnp.clip((safe_xi[..., 1] * (N_GRID - 1)).astype(jnp.int32), 0, N_GRID - 1)
+    batch_indices = jnp.arange(safe_z.shape[0])[:, None]
+    
+    local_z = safe_z[batch_indices, x_idx, y_idx]
+    local_target = target_batch[batch_indices, x_idx, y_idx]
+    local_mse = jnp.square(local_z - local_target)
+    
     global_mse = jnp.mean(jnp.square(safe_z - target_batch), axis=(1, 2))[:, None]
-    r_track = -global_mse 
+    r_track = -10.0 * local_mse - 10.0 * global_mse 
 
     # 2. Effort Penalty
     r_effort = -0.001 * (jnp.square(u_batch) + 0.1 * jnp.sum(jnp.square(v_batch), axis=-1))
@@ -179,6 +192,10 @@ def parallel_marl_physics_step(z_batch, xi_batch, target_batch, actions, prev_v_
     
     rewards_batch = r_track + r_effort + r_bound + r_coll + r_accel
     rewards_batch = jnp.where(dones_batch[:, None], -100.0, rewards_batch)
+    
+    # Scale rewards down to bring returns closer to a variance of 1.0
+    # This prevents gradients from exploding early in training.
+    rewards_batch = rewards_batch * 0.05 
     
     return safe_z, safe_xi, next_obs_batch_no_pe, rewards_batch, dones_batch, v_batch
 
@@ -225,36 +242,35 @@ def train_step(runner_state):
             next_obs_no_pe
         )
         
-        transition = (obs, z, zt, xi, action, log_prob, rewards, val, crashes)
+        # Grab true next value BEFORE the next state gets overwritten
+        true_next_v = get_value(critic_state.params, next_z, zt, next_xi)
+        
+        transition = (obs, z, zt, xi, action, log_prob, rewards, val, crashes, true_next_v)
         return (next_z, next_zt, next_xi, obs_new, next_pv, next_counts, k), transition
 
     carry = (z_batch, target_batch, xi_batch, obs_batch, prev_v_batch, env_counts, rng)
     carry, transitions = jax.lax.scan(_env_step, carry, None, length=ROLLOUT_STEPS)
     (next_z_batch, next_target_batch, next_xi_batch, next_obs_batch, next_pv_batch, next_env_counts, rng) = carry
-    t_obs, t_z, t_zt, t_xi, t_a, t_logp, t_r, t_v, t_d = transitions
+    t_obs, t_z, t_zt, t_xi, t_a, t_logp, t_r, t_v, t_d, t_true_next_v = transitions
     
-    # 2. GAE Phase (Python loop via unrolled JIT)
-    next_value = get_value(critic_state.params, next_z_batch, next_target_batch, next_xi_batch)
-    
-    # Shape rewards/dones for agent-specific computation
+    # 2. GAE Phase (Optimized with jax.lax.scan)
     dones_expanded = jnp.tile(t_d[:, :, None], (1, 1, N_AGENTS))
+    last_val = get_value(critic_state.params, next_z_batch, next_target_batch, next_xi_batch)
     
-    # Standard GAE computation matching step bounds
-    adv = jnp.zeros_like(t_r)
-    lastgaelam = jnp.zeros((NUM_PARALLEL_ENVS, N_AGENTS))
-    
-    for t in reversed(range(ROLLOUT_STEPS)):
-        if t == ROLLOUT_STEPS - 1:
-            nextnonterminal = 1.0 - dones_expanded[t]
-            nextvalues = next_value
-        else:
-            nextnonterminal = 1.0 - dones_expanded[t]
-            nextvalues = t_v[t+1]
-            
-        delta = t_r[t] + GAMMA * nextvalues * nextnonterminal - t_v[t]
-        lastgaelam = delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
-        adv = adv.at[t].set(lastgaelam)
+    def gae_scan_fn(carry, transition):
+        r, v, d_exp, true_next_v = transition
+        gae, _ = carry
+        nextnonterminal = 1.0 - d_exp
+        delta = r + GAMMA * true_next_v * nextnonterminal - v
+        gae = delta + GAMMA * GAE_LAMBDA * nextnonterminal * gae
+        return (gae, v), gae
         
+    _, adv = jax.lax.scan(
+        gae_scan_fn, 
+        (jnp.zeros((NUM_PARALLEL_ENVS, N_AGENTS)), last_val), 
+        (t_r, t_v, dones_expanded, t_true_next_v), 
+        reverse=True
+    )
     ret = adv + t_v
     
     # Flatten across time and envs
@@ -267,8 +283,8 @@ def train_step(runner_state):
     f_ret = ret.reshape(-1, N_AGENTS)
     f_adv = adv.reshape(-1, N_AGENTS)
 
-    # Global normalization of adv
-    f_adv = (f_adv - f_adv.mean(axis=0)) / (f_adv.std(axis=0) + 1e-8)
+    # Global normalization of adv (Shared across all agents!)
+    f_adv = (f_adv - f_adv.mean()) / (f_adv.std() + 1e-8)
     
     dataset_size = f_z.shape[0]
 
@@ -282,9 +298,12 @@ def train_step(runner_state):
             a_state_, c_state_ = mb_carry
             batch_idx = jax.lax.dynamic_slice(indices, (start_idx,), (MINIBATCH_SIZE,))
             
+            # Flatten t_v earlier in the function alongside the others:
+            f_v = t_v.reshape(-1, N_AGENTS)
+            
             mb_batch = (
                 f_obs[batch_idx], f_z[batch_idx], f_zt[batch_idx], f_xi[batch_idx],
-                f_a[batch_idx], f_logp[batch_idx], f_adv[batch_idx], f_ret[batch_idx]
+                f_a[batch_idx], f_logp[batch_idx], f_adv[batch_idx], f_ret[batch_idx], f_v[batch_idx]
             )
             
             a_state_n, c_state_n, al, vl, ent = ppo_update_epoch(a_state_, c_state_, mb_batch)
@@ -349,16 +368,25 @@ dummy_z = jnp.zeros((1, N_GRID, N_GRID))
 dummy_target = jnp.zeros((1, N_GRID, N_GRID))
 dummy_xi = jnp.zeros((1, N_AGENTS, 2))
 
+# Calculate exact number of optax steps for the LR schedule
+total_rollout_steps = NUM_PARALLEL_ENVS * ROLLOUT_STEPS
+num_updates = TOTAL_TIMESTEPS // total_rollout_steps
+optax_steps_per_update = (total_rollout_steps // MINIBATCH_SIZE) * PPO_EPOCHS
+total_optax_steps = num_updates * optax_steps_per_update
+
+# Linear decay from LR down to 0
+lr_schedule = optax.linear_schedule(init_value=LR, end_value=0.0, transition_steps=total_optax_steps)
+
 actor_state = TrainState.create(
     apply_fn=actor.apply,
     params=actor.init(act_k, dummy_obs_full),
-    tx=optax.chain(optax.clip_by_global_norm(0.5), optax.adam(LR, eps=1e-5))
+    tx=optax.chain(optax.clip_by_global_norm(0.5), optax.adam(lr_schedule, eps=1e-5))
 )
 
 critic_state = TrainState.create(
     apply_fn=critic.apply,
     params=critic.init(val_k, dummy_z, dummy_target, dummy_xi),
-    tx=optax.chain(optax.clip_by_global_norm(0.5), optax.adam(LR, eps=1e-5))
+    tx=optax.chain(optax.clip_by_global_norm(0.5), optax.adam(lr_schedule, eps=1e-5))
 )
 
 print("Loading 2D starting state & target banks from dataset...")
