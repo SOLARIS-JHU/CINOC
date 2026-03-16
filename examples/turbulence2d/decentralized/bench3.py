@@ -32,8 +32,8 @@ from examples.turbulence2d.decentralized.data_utils import get_batch_initial_con
 # MARL & RL Model Imports
 from examples.turbulence2d.decentralized.bench.env_turb2d import extract_patches_2d_jit
 from examples.turbulence2d.decentralized.bench.utils_hypemarl import get_sinusoidal_encoding
-from examples.turbulence2d.decentralized.bench.models_marl import MARLActor2D
-from examples.turbulence2d.decentralized.bench.models_rl import CentralizedActor
+from examples.turbulence2d.decentralized.bench.models_marl import MARLActor2DKS
+from examples.turbulence2d.decentralized.bench.models_rl import CentralizedActorKS2D
 
 # 2D Specific Configuration
 N_grid = 64
@@ -45,8 +45,10 @@ dt = 0.01
 viscosity = 5e-4
 N_eval = 20 # Evaluation batch size
 ENV_MU = jnp.array([L_domain, dt, viscosity])
+STATE_NORM_FACTOR = 50.0 # From RL script
 
-def get_2d_sinusoidal_encoding(p_2d, d=1024, n=1000.0):
+# Adapted: d defaults to 64 to match MARL training script
+def get_2d_sinusoidal_encoding(p_2d, d=64, n=1000.0):
     pe_x = get_sinusoidal_encoding(p_2d[:, 0], d=d, n=n)
     pe_y = get_sinusoidal_encoding(p_2d[:, 1], d=d, n=n)
     return jnp.concatenate([pe_x, pe_y], axis=-1)
@@ -94,8 +96,9 @@ if dpc_p:
     bench_registry['DPC'] = {'apply': dpc_apply_wrapped, 'params': dpc_p, 'color': 'blue'}
 
 # 2. MARL (Decentralized Multi-Agent)
-marl_model = MARLActor2D()
-marl_dummy_input = jnp.zeros((n_agents, 2819))
+marl_model = MARLActor2DKS()
+# Adapted: Observation dim is 387 -> (16*16 patch) + (3 mu) + (64*2 PE)
+marl_dummy_input = jnp.zeros((n_agents, 387))
 marl_p = load_params(bench_models_dir / 'marl_turb_params.msgpack', marl_model, marl_dummy_input)
 
 if marl_p:
@@ -105,7 +108,8 @@ if marl_p:
         
         y = extract_patches_2d_jit(w_phys, target_state, xi_norm, 16, N_grid)
         mu_broadcast = jnp.tile(ENV_MU, (n_agents, 1))
-        pe = get_2d_sinusoidal_encoding(xi_norm, d=1024) 
+        # Adapted: ensure d=64 matches training
+        pe = get_2d_sinusoidal_encoding(xi_norm, d=64) 
         
         obs_cat = jnp.concatenate([y, mu_broadcast, pe], axis=-1)
         action = marl_model.apply(p, obs_cat)
@@ -115,14 +119,15 @@ if marl_p:
     bench_registry['MARL'] = {'apply': marl_apply, 'params': marl_p, 'color': 'orange'}
 
 # 3. RL (Centralized God-View)
-rl_model = CentralizedActor(n_agents=n_agents)
+rl_model = CentralizedActorKS2D(n_agents=n_agents)
 rl_dummy_input = jnp.zeros((1, N_grid, N_grid)) 
 rl_p = load_params(bench_models_dir / 'rl_turb_params.msgpack', rl_model, rl_dummy_input)
 
 if rl_p:
     def rl_apply(p, xi_fixed, obs):
-        # obs from PDEDynamics2D is already shape (1, N_grid, N_grid)
-        action = rl_model.apply(p, obs)
+        # Adapted: obs must be normalized by STATE_NORM_FACTOR as it was during TD3 training
+        obs_norm = obs / STATE_NORM_FACTOR
+        action = rl_model.apply(p, obs_norm)
         return action.squeeze() 
     
     bench_registry['RL'] = {'apply': rl_apply, 'params': rl_p, 'color': 'green'}
@@ -144,7 +149,7 @@ if file_path.exists():
 else:
     print("Generating ICs on the fly...")
     key = jax.random.PRNGKey(1234)
-    w_hat_pool = get_batch_initial_conditions(key, N_eval, N_grid, L_domain)
+    w_hat_pool = get_batch_initial_conditions(key, N_eval, N_grid, L_domain, viscosity=5e-4)
 
 xi_batch = jnp.tile(xi_init, (N_eval, 1, 1))
 

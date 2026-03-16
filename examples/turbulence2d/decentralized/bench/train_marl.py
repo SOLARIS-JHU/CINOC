@@ -1,6 +1,12 @@
+import os
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
+os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
+os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.80'
+
 import jax
 import jax.numpy as jnp
 import optax
+import flax.linen as nn
 import flax.serialization
 from flax import struct
 import numpy as np
@@ -11,7 +17,7 @@ import sys
 from functools import partial
 from tqdm import trange
 
-# Enable x64 for Spectral Stability (Crucial for Turbulence)
+# Enable x64 globally (Crucial for Spectral Stability)
 jax.config.update("jax_enable_x64", True)
 
 # Add project root to sys.path
@@ -29,14 +35,13 @@ from examples.turbulence2d.decentralized.bench.models_marl import MARLActor2DKS,
 # ==========================================
 # 1. CONFIGURATIONS
 # ==========================================
-N_AGENTS = 64          # 8x8 grid
-L_DOMAIN = 1.0         # Domain size
+N_AGENTS = 64          
+L_DOMAIN = 1.0         
 N_GRID = 64
-U_MAX = 75.0           # Action scaling for Turbulence
+U_MAX = 75.0           
 
 ENV_BATCH_SIZE = 128 
-NN_BATCH_SIZE = 512    # Kept for memory limits
-EVAL_INT = 10
+EVAL_INT = 50          
 POLICY_DELAY = 2 
 
 # Turbulence Specific Control Timing
@@ -47,14 +52,14 @@ VISCOSITY = 5e-4
 SIGMA = 0.05           
 
 # Vectorization Configs
-NUM_PARALLEL_ENVS = 64
-TOTAL_UPDATES = 1000
+NUM_PARALLEL_ENVS = 32
+TOTAL_UPDATES = 100000 
 WARMUP_UPDATES = 500
 
 key = jax.random.PRNGKey(42)
 
 # ==========================================
-# 2. GLOBAL PRECOMPUTATION
+# 2. GLOBAL PRECOMPUTATION (Remains FP64)
 # ==========================================
 kx, ky, k_sq, k_inv = solver.get_spectral_grid(N_GRID, L_DOMAIN)
 dt_phys = DT / SUBSTEPS
@@ -77,7 +82,10 @@ def get_2d_sinusoidal_encoding(p_2d, d=64, n=1000.0):
     pe_y = get_sinusoidal_encoding(p_2d[:, 1], d=d, n=n)
     return jnp.concatenate([pe_x, pe_y], axis=-1)
 
-dummy_pool = jnp.zeros((1, N_GRID, N_GRID))
+# Physics dummies stay FP64
+dummy_pool = jnp.zeros((1, N_GRID, N_GRID), dtype=jnp.float64)
+target_state = jnp.zeros((N_GRID, N_GRID), dtype=jnp.float64)
+
 env = Turbulence2DMARLEnv(
     initial_conditions=dummy_pool, n_agents=N_AGENTS, 
     N_grid=N_GRID, L=L_DOMAIN, dt=DT, viscosity=VISCOSITY, 
@@ -87,23 +95,25 @@ env = Turbulence2DMARLEnv(
 patch_size = env.patch_size 
 local_y_dim = env.local_y_dim 
 n_mu = env.n_mu 
-pe_dim = 128 # 64 * 2 (X and Y)
+pe_dim = 128 
 
 stored_obs_dim = local_y_dim + n_mu 
 total_input_dim = stored_obs_dim + pe_dim
 
+# Cast constant MARL inputs to FP32
 xi_fixed = jnp.array(env.agent_positions)
 xi_norm = jnp.array(env.xi_norm)
 mu_jax = jnp.array(env.mu, dtype=jnp.float32)
 pe_jax = jnp.array(get_2d_sinusoidal_encoding(xi_norm, d=64), dtype=jnp.float32)
-target_state = jnp.zeros((N_GRID, N_GRID), dtype=jnp.float32)
 
-actor = MARLActor2DKS()
+actor = MARLActor2DKS(u_max=U_MAX)
 critic = MARLCritic2DKS()
 
 key, *subkeys = jax.random.split(key, 4)
-dummy_input = jnp.zeros((ENV_BATCH_SIZE, total_input_dim))
-dummy_u = jnp.zeros((ENV_BATCH_SIZE, 1))
+
+# MIXED PRECISION FIX: Force Flax to initialize networks in FP32
+dummy_input = jnp.zeros((ENV_BATCH_SIZE, total_input_dim), dtype=jnp.float32)
+dummy_u = jnp.zeros((ENV_BATCH_SIZE, 1), dtype=jnp.float32)
 
 actor_params = actor.init(subkeys[0], dummy_input)
 critic_params = critic.init(subkeys[1], dummy_input, dummy_u)
@@ -117,7 +127,7 @@ opt_actor = tx_actor.init(actor_params)
 opt_critic = tx_critic.init(critic_params)
 
 # ==========================================
-# 4. REPLAY BUFFER (KS2D Style)
+# 4. REPLAY BUFFER (Already FP32 enforced)
 # ==========================================
 @struct.dataclass
 class DeviceReplayBuffer:
@@ -165,7 +175,7 @@ def sample_buffer(buffer, batch_size, key):
     indices = jax.random.randint(key, shape=(batch_size,), minval=0, maxval=valid_range)
     return buffer.s[indices], buffer.a[indices], buffer.r[indices], buffer.ns[indices], buffer.d[indices]
 
-buffer = DeviceReplayBuffer.create(12_500, stored_obs_dim, 1)
+buffer = DeviceReplayBuffer.create(20_000, stored_obs_dim, 1)
 
 # ==========================================
 # 5. TRAINING LOGIC
@@ -175,14 +185,17 @@ def build_marl_obs_batch(full_state_batch):
     def single_env_obs(state):
         y_local = extract_patches_2d_jit(state, target_state, xi_norm, patch_size, N_GRID)
         mu_broadcast = jnp.tile(mu_jax, (N_AGENTS, 1))
-        return jnp.concatenate([y_local, mu_broadcast], axis=-1)
+        # MIXED PRECISION FIX: Cast down physics state (FP64) to MARL input (FP32)
+        y_local_32 = (y_local / 20.0).astype(jnp.float32)
+        return jnp.concatenate([y_local_32, mu_broadcast], axis=-1)
     return jax.vmap(single_env_obs)(full_state_batch)
 
 @jax.jit
 def update_critic(c_p, ta_p, tc_p, opt_c, x, u, r, nx, d, key):
     key, noise_key = jax.random.split(key)
     
-    noise = jnp.clip(jax.random.normal(noise_key, u.shape) * (U_MAX * 0.1), -U_MAX * 0.5, U_MAX * 0.5)
+    # Generate noise in FP32
+    noise = jnp.clip(jax.random.normal(noise_key, u.shape, dtype=jnp.float32) * (U_MAX * 0.1), -U_MAX * 0.5, U_MAX * 0.5)
     next_u = jnp.clip(actor.apply(ta_p, nx) + noise, -U_MAX, U_MAX)
     
     t_q1, t_q2 = critic.apply(tc_p, nx, next_u)
@@ -205,27 +218,31 @@ def update_actor_and_targets(a_p, c_p, ta_p, tc_p, opt_a, x):
     up_a, opt_a = tx_actor.update(grads_a, opt_a)
     a_p = optax.apply_updates(a_p, up_a)
     
-    tau = 0.005
+    tau = 0.001
     new_ta = jax.tree_util.tree_map(lambda new, old: tau*new + (1-tau)*old, a_p, ta_p)
     new_tc = jax.tree_util.tree_map(lambda new, old: tau*new + (1-tau)*old, c_p, tc_p)
     return a_p, new_ta, new_tc, opt_a
 
 @partial(jax.jit, static_argnames=['add_noise'])
-def get_batch_actions(a_p, obs_batch_no_pe, key=None, add_noise=True):
+def get_batch_actions(a_p, obs_batch_no_pe, step_idx=0, key=None, add_noise=True):
     pe_expanded = jnp.tile(pe_jax[None, :, :], (obs_batch_no_pe.shape[0], 1, 1))
     full_obs = jnp.concatenate([obs_batch_no_pe, pe_expanded], axis=-1)
     
-    # ACCELERATION: Removed double vmap from turb; nn.Dense natively processes N_AGENTS.
-    actions = actor.apply(a_p, full_obs)
+    actions = actor.apply(a_p, full_obs) # Remains FP32
     
     if add_noise:
-        noise = jax.random.normal(key, actions.shape) * (U_MAX * 0.1)
+        decay_progress = jnp.clip(step_idx / 50000.0, 0.0, 1.0)
+        current_noise_scale = 0.1 - (0.09 * decay_progress) 
+        
+        # Enforce FP32 for random noise mapping
+        noise = jax.random.normal(key, actions.shape, dtype=jnp.float32) * (U_MAX * current_noise_scale)
         actions = jnp.clip(actions + noise, -U_MAX, U_MAX)
     return actions
 
 @jax.jit
 def parallel_marl_physics_step(w_batch, actions):
-    acts_flat = actions.squeeze(-1) 
+    # MIXED PRECISION FIX: Cast MARL actions (FP32) up to Physics scale (FP64)
+    acts_flat = actions.squeeze(-1).astype(jnp.float64)
     
     def single_physics_step(w_single, act_single):
         w_hat = jnp.fft.fft2(w_single)
@@ -245,14 +262,18 @@ def parallel_marl_physics_step(w_batch, actions):
     safe_w = jnp.where(dones_batch[:, None, None], jnp.zeros_like(next_w_batch), next_w_batch)
     next_obs_batch_no_pe = build_marl_obs_batch(safe_w)
     
-    # Turbulence Rewards
     global_enstrophy = jnp.mean(jnp.square(safe_w), axis=(1, 2))
+    
+    # local_err is already FP32 because of build_marl_obs_batch
     y_local_err = next_obs_batch_no_pe[..., :patch_size**2] 
     local_rewards = -jnp.mean(jnp.square(y_local_err), axis=-1)
-    action_penalty = -1e-3 * jnp.mean(jnp.square(actions), axis=-1)
+    action_penalty = -1e-3 * jnp.mean(jnp.square(actions / U_MAX), axis=-1)
 
-    rewards_batch = 0.5 * local_rewards + 0.5 * (-global_enstrophy[:, None]) + action_penalty
-    rewards_batch = rewards_batch[..., None] 
+    rewards_batch = 0.5 * local_rewards + 0.5 * (-global_enstrophy[:, None] / 400.0) + action_penalty
+    
+    # MIXED PRECISION FIX: Force rewards and dones to FP32 before returning to buffer
+    rewards_batch = rewards_batch[..., None].astype(jnp.float32) 
+    dones_batch = dones_batch.astype(jnp.float32)
     
     return safe_w, next_obs_batch_no_pe, rewards_batch, dones_batch
 
@@ -260,8 +281,8 @@ def parallel_marl_physics_step(w_batch, actions):
 def fast_eval_episode(actor_params, init_state, max_steps):
     def step_fn(state, _):
         obs_no_pe = build_marl_obs_batch(state[None, ...]) 
-        act = get_batch_actions(actor_params, obs_no_pe, None, add_noise=False)
-        act_flat = act.squeeze() 
+        act = get_batch_actions(actor_params, obs_no_pe, step_idx=0, key=None, add_noise=False)
+        act_flat = act[0, :, 0].astype(jnp.float64)
         
         w_hat = jnp.fft.fft2(state)
         def rk4_loop(i, w):
@@ -279,7 +300,6 @@ def fast_eval_episode(actor_params, init_state, max_steps):
     _, (enstrophies, crashes) = jax.lax.scan(step_fn, init_state, None, length=max_steps)
     return jnp.mean(enstrophies), jnp.any(crashes)
 
-# ACCELERATION: Memory donation prevents constant buffer reallocation in VRAM
 @jax.jit(donate_argnums=(0,))
 def train_chunk(carry, step_indices, state_bank):
     def scan_step(carry, step_idx):
@@ -287,9 +307,9 @@ def train_chunk(carry, step_indices, state_bank):
         rng, act_k, res_k, samp_k, net_k = jax.random.split(rng, 5)
         
         def warmup_actions(_):
-            return jax.random.uniform(act_k, (NUM_PARALLEL_ENVS, N_AGENTS, 1), minval=-U_MAX, maxval=U_MAX)
+            return jax.random.uniform(act_k, (NUM_PARALLEL_ENVS, N_AGENTS, 1), minval=-U_MAX, maxval=U_MAX, dtype=jnp.float32)
         def policy_actions(_):
-            return get_batch_actions(a_p, obs, act_k, add_noise=True)
+            return get_batch_actions(a_p, obs, step_idx, act_k, add_noise=True)
             
         actions = jax.lax.cond(step_idx < WARMUP_UPDATES, warmup_actions, policy_actions, None)
         
@@ -298,9 +318,9 @@ def train_chunk(carry, step_indices, state_bank):
         truncs = steps >= MAX_ENV_STEPS
         needs_reset = jnp.logical_or(dones.flatten(), truncs)
         
-        # Turbulence Specific Failure Penalty
-        safe_rewards = jnp.where(dones[:, None, None], -500.0, rewards)
-        dones_expanded = jnp.tile(dones[:, None, None], (1, N_AGENTS, 1))
+        # Force FP32 arrays before passing into the Replay Buffer
+        safe_rewards = jnp.where(dones[:, None, None], -100.0, rewards).astype(jnp.float32)
+        dones_expanded = jnp.tile(dones[:, None, None], (1, N_AGENTS, 1)).astype(jnp.float32)
         
         new_buf = add_batch_to_buffer(buf, obs, actions, safe_rewards, next_obs, dones_expanded)
         
@@ -320,20 +340,12 @@ def train_chunk(carry, step_indices, state_bank):
             bnx_flat = bnx.reshape(-1, stored_obs_dim)
             bd_flat = bd.reshape(-1, 1)
             
-            # MEMORY SUBSAMPLING (Retained from Turbulence script due to large PE)
-            samp_k2, sub_k = jax.random.split(samp_k)
-            idx = jax.random.randint(sub_k, shape=(NN_BATCH_SIZE,), minval=0, maxval=bx_flat.shape[0])
+            pe_tiled = jnp.tile(pe_jax, (ENV_BATCH_SIZE, 1))
             
-            agent_indices = idx % N_AGENTS
-            pe_sub = pe_jax[agent_indices] 
+            bx_full = jnp.concatenate([bx_flat, pe_tiled], axis=-1)
+            bnx_full = jnp.concatenate([bnx_flat, pe_tiled], axis=-1)
             
-            bx_full = jnp.concatenate([bx_flat[idx], pe_sub], axis=-1)
-            bnx_full = jnp.concatenate([bnx_flat[idx], pe_sub], axis=-1)
-            bu_sub = bu_flat[idx]
-            br_sub = br_flat[idx]
-            bd_sub = bd_flat[idx]
-            
-            new_c_p, new_o_c = update_critic(c_p, ta_p, tc_p, o_c, bx_full, bu_sub, br_sub, bnx_full, bd_sub, net_k)
+            new_c_p, new_o_c = update_critic(c_p, ta_p, tc_p, o_c, bx_full, bu_flat, br_flat, bnx_full, bd_flat, net_k)
             
             def do_actor_update(_):
                 return update_actor_and_targets(a_p, new_c_p, ta_p, tc_p, o_a, bx_full)
@@ -370,22 +382,26 @@ file_path = data_dir / 'turbulence_chaotic_ics_64_more.pkl'
 
 if file_path.exists():
     with open(file_path, 'rb') as f:
+        # Load natively (do not force float64 yet so we don't destroy complex numbers)
         state_bank = jnp.array(pickle.load(f))
     print(f"Loaded {len(state_bank)} ICs from {file_path}")
 else:
     print("Generating ICs (this may take a few minutes)...")
-    state_bank = get_batch_initial_conditions(key, 500, N_GRID, L_DOMAIN)
+    state_bank = get_batch_initial_conditions(key, 500, N_GRID, L_DOMAIN, viscosity=5e-4)
     with open(file_path, 'wb') as f:
         pickle.dump(np.array(state_bank), f)
 
 if jnp.iscomplexobj(state_bank):
     print("Converting spectral initial conditions to physical space...")
-    state_bank = jnp.fft.ifft2(state_bank).real
+    # Convert to physical space first, THEN cast to float64
+    state_bank = jnp.fft.ifft2(state_bank).real.astype(jnp.float64)
+else:
+    state_bank = state_bank.astype(jnp.float64)
 
 key, subkey = jax.random.split(key)
 w_batch = jax.random.choice(subkey, state_bank, shape=(NUM_PARALLEL_ENVS,))
 obs_batch = build_marl_obs_batch(w_batch)
-env_step_counts = jnp.zeros(NUM_PARALLEL_ENVS)
+env_step_counts = jnp.zeros(NUM_PARALLEL_ENVS, dtype=jnp.int32)
 
 carry = (
     buffer, actor_params, critic_params, target_actor_params, target_critic_params,
