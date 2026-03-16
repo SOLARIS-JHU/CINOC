@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 import optax
+import flax.linen as nn
 import flax.serialization
 from flax import struct
 import numpy as np
@@ -17,69 +18,65 @@ sys.path.append(str(script_dir))
 
 # Project imports
 from env_ks2d import KS2DMARLEnv, extract_patches_2d_jit
-from models_marl import MARLActor2DKS, MARLCritic2DKS, U_MAX
 from utils_hypemarl import get_sinusoidal_encoding
 from examples.ks2d.decentralized.data_utils import get_batch_initial_conditions
 from examples.ks2d.decentralized.dynamics_dual import PDEDynamics2D 
+from examples.ks2d.decentralized.bench.models_marl import MARLActor2DKS, MARLCritic2DKS
 
-# --- Configurations ---
+# ==========================================
+# 1. CONFIGURATIONS
+# ==========================================
 N_AGENTS = 100
 L_DOMAIN = 32.0
 N_GRID = 64
 
 ENV_BATCH_SIZE = 128 
-EVAL_INT = 50  # Increased for larger chunks / faster execution
+EVAL_INT = 50 
 POLICY_DELAY = 2 
 
 # KS2D Specific Control Timing
-MAX_ENV_STEPS = 50     # Control steps (T_steps)
-SUBSTEPS = 10          # Physics steps per control step
-DT = 0.005             # Physics dt
+MAX_ENV_STEPS = 50     
+SUBSTEPS = 10          
+DT = 0.005             
 
 # Vectorization Configs
 NUM_PARALLEL_ENVS = 64
-TOTAL_UPDATES = 10000 
+TOTAL_UPDATES = 100000 
 WARMUP_UPDATES = 500
+U_MAX = 5.0  
 
-# CHANGED: d=64 so that X (64) + Y (64) = 128
+key = jax.random.PRNGKey(42)
+
+# ==========================================
+# 3. UTILS & ENVIRONMENT SETUP
+# ==========================================
 def get_2d_sinusoidal_encoding(p_2d, d=64, n=1000.0):
-    """Combines two 1D positional encodings for 2D coordinates."""
     pe_x = get_sinusoidal_encoding(p_2d[:, 0], d=d, n=n)
     pe_y = get_sinusoidal_encoding(p_2d[:, 1], d=d, n=n)
     return jnp.concatenate([pe_x, pe_y], axis=-1)
 
-# --- Initialization ---
-key = jax.random.PRNGKey(42)
-
 def direct_control_policy(action_params, u_obs, u_target, xi_fixed):
-    # Action shape is (Batch, N_agents), unroll_controlled handles this shape
     return action_params
 
 dynamics = PDEDynamics2D(policy_apply_fn=direct_control_policy)
 
-# Initialize dummy env to extract static parameters
 dummy_pool = jnp.zeros((1, N_GRID, N_GRID))
 env = KS2DMARLEnv(
     dynamics, initial_conditions=dummy_pool, n_agents=N_AGENTS, 
     N_grid=N_GRID, L=L_DOMAIN, dt=DT, substeps=SUBSTEPS, max_steps=MAX_ENV_STEPS
 )
 
-patch_size = env.patch_size # 12
-local_y_dim = env.local_y_dim # 3 * 144 = 432
-n_mu = env.n_mu # 2 (L, dt)
-
-# CHANGED: pe_dim down to 128
-pe_dim = 128 # 64 * 2 (X and Y)
+patch_size = env.patch_size 
+local_y_dim = env.local_y_dim 
+n_mu = env.n_mu 
+pe_dim = 128 
 
 stored_obs_dim = local_y_dim + n_mu 
 total_input_dim = stored_obs_dim + pe_dim
 
-# Extract static variables for JAX
 xi_fixed = jnp.array(env.agent_positions)
 xi_norm = jnp.array(env.xi_norm)
 mu_jax = jnp.array(env.mu)
-
-# CHANGED: Pass d=64 to match the 128 total dimensions
 pe_jax = jnp.array(get_2d_sinusoidal_encoding(xi_norm, d=64))
 target_state = jnp.zeros((N_GRID, N_GRID))
 
@@ -93,15 +90,17 @@ dummy_u = jnp.zeros((ENV_BATCH_SIZE, 1))
 actor_params = actor.init(subkeys[0], dummy_input)
 critic_params = critic.init(subkeys[1], dummy_input, dummy_u)
 
-target_actor_params = actor_params
-target_critic_params = critic_params
+target_actor_params = jax.tree_util.tree_map(jnp.copy, actor_params)
+target_critic_params = jax.tree_util.tree_map(jnp.copy, critic_params)
 
 tx_actor = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-6))
 tx_critic = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(5e-5))
 opt_actor = tx_actor.init(actor_params)
 opt_critic = tx_critic.init(critic_params)
 
-# --- 1. ON-DEVICE REPLAY BUFFER (3D) ---
+# ==========================================
+# 4. REPLAY BUFFER
+# ==========================================
 @struct.dataclass
 class DeviceReplayBuffer:
     s: jnp.ndarray
@@ -131,11 +130,11 @@ def add_batch_to_buffer(buffer, s_batch, a_batch, r_batch, ns_batch, d_batch):
     batch_size = s_batch.shape[0]
     indices = (buffer.ptr + jnp.arange(batch_size)) % buffer.max_size
     
-    new_s = buffer.s.at[indices].set(s_batch)
-    new_a = buffer.a.at[indices].set(a_batch)
-    new_r = buffer.r.at[indices].set(r_batch)
-    new_ns = buffer.ns.at[indices].set(ns_batch)
-    new_d = buffer.d.at[indices].set(d_batch)
+    new_s = buffer.s.at[indices].set(s_batch.astype(jnp.float32))
+    new_a = buffer.a.at[indices].set(a_batch.astype(jnp.float32))
+    new_r = buffer.r.at[indices].set(r_batch.astype(jnp.float32))
+    new_ns = buffer.ns.at[indices].set(ns_batch.astype(jnp.float32))
+    new_d = buffer.d.at[indices].set(d_batch.astype(jnp.float32))
     
     new_ptr = (buffer.ptr + batch_size) % buffer.max_size
     new_size = jnp.minimum(buffer.size + batch_size, buffer.max_size)
@@ -150,7 +149,9 @@ def sample_buffer(buffer, batch_size, key):
 
 buffer = DeviceReplayBuffer.create(12_500, stored_obs_dim, 1)
 
-# --- 2. PURE JAX OBSERVATION BUILDER ---
+# ==========================================
+# 5. TRAINING LOGIC
+# ==========================================
 @jax.jit
 def build_marl_obs_batch(full_state_batch):
     def single_env_obs(state):
@@ -159,7 +160,6 @@ def build_marl_obs_batch(full_state_batch):
         return jnp.concatenate([y_local, mu_broadcast], axis=-1)
     return jax.vmap(single_env_obs)(full_state_batch)
 
-# --- 3. JIT TRAINING & ROLLOUT ---
 @jax.jit
 def update_critic(c_p, ta_p, tc_p, opt_c, x, u, r, nx, d, key):
     key, noise_key = jax.random.split(key)
@@ -193,11 +193,12 @@ def update_actor_and_targets(a_p, c_p, ta_p, tc_p, opt_a, x):
     return a_p, new_ta, new_tc, opt_a
 
 @partial(jax.jit, static_argnames=['add_noise'])
-def get_batch_actions(a_p, obs_batch_no_pe, key, add_noise=True):
+def get_batch_actions(a_p, obs_batch_no_pe, key=None, add_noise=True):
     pe_expanded = jnp.tile(pe_jax[None, :, :], (obs_batch_no_pe.shape[0], 1, 1))
     full_obs = jnp.concatenate([obs_batch_no_pe, pe_expanded], axis=-1)
     
-    actions = jax.vmap(jax.vmap(actor.apply, in_axes=(None, 0)), in_axes=(None, 0))(a_p, full_obs)
+    # ACCELERATION: Removed double vmap! nn.Dense natively processes N_AGENTS.
+    actions = actor.apply(a_p, full_obs)
     
     if add_noise:
         noise = jax.random.normal(key, actions.shape) * (U_MAX * 0.1)
@@ -224,18 +225,16 @@ def parallel_marl_physics_step(u_batch, actions):
     safe_u = jnp.where(dones_batch[:, None, None], jnp.zeros_like(next_u_batch), next_u_batch)
     next_obs_batch_no_pe = build_marl_obs_batch(safe_u)
     
-    # 2D KS Reward Logic
+    # ACCURACY FIX: Scale down massive 2D energy so it doesn't break MARL local rewards
     global_energy = jnp.mean(jnp.square(safe_u), axis=(1, 2))
-    
     y_local_err = next_obs_batch_no_pe[..., :patch_size**2] 
     local_rewards = -jnp.mean(jnp.square(y_local_err), axis=-1)
     
-    rewards_batch = 0.5 * local_rewards + 0.5 * (-global_energy[:, None])
+    rewards_batch = 0.5 * local_rewards + 0.5 * (-global_energy[:, None] / 10.0)
     rewards_batch = rewards_batch[..., None] 
     
     return safe_u, next_obs_batch_no_pe, rewards_batch, dones_batch
 
-# --- 4. FAST JIT-COMPILED EVALUATION ---
 @partial(jax.jit, static_argnames=['max_steps'])
 def fast_eval_episode(actor_params, init_state, max_steps):
     def step_fn(state, _):
@@ -257,15 +256,13 @@ def fast_eval_episode(actor_params, init_state, max_steps):
     _, (energies, crashes) = jax.lax.scan(step_fn, init_state, None, length=max_steps)
     return jnp.mean(energies), jnp.any(crashes)
 
-
-# --- 5. THE SCAN-COMPILED TRAINING CHUNK ---
-@jax.jit
+# ACCELERATION: Memory donation prevents constant buffer reallocation in VRAM
+@jax.jit(donate_argnums=(0,))
 def train_chunk(carry, step_indices, state_bank):
     def scan_step(carry, step_idx):
         buf, a_p, c_p, ta_p, tc_p, o_a, o_c, u, obs, steps, rng = carry
         rng, act_k, res_k, samp_k, net_k = jax.random.split(rng, 5)
         
-        # 1. Action Selection
         def warmup_actions(_):
             return jax.random.uniform(act_k, (NUM_PARALLEL_ENVS, N_AGENTS, 1), minval=-U_MAX, maxval=U_MAX)
         def policy_actions(_):
@@ -273,31 +270,26 @@ def train_chunk(carry, step_indices, state_bank):
             
         actions = jax.lax.cond(step_idx < WARMUP_UPDATES, warmup_actions, policy_actions, None)
         
-        # 2. Physics Step
         next_u, next_obs, rewards, dones = parallel_marl_physics_step(u, actions)
         steps += 1
         truncs = steps >= MAX_ENV_STEPS
         needs_reset = jnp.logical_or(dones.flatten(), truncs)
         
-        # 3. Update Buffer
         safe_rewards = jnp.where(dones[:, None, None], -100.0, rewards)
         dones_expanded = jnp.tile(dones[:, None, None], (1, N_AGENTS, 1))
         
         new_buf = add_batch_to_buffer(buf, obs, actions, safe_rewards, next_obs, dones_expanded)
         
-        # 4. Handle Resets
         fresh_states = jax.random.choice(res_k, state_bank, shape=(NUM_PARALLEL_ENVS,))
         u_next = jnp.where(needs_reset[:, None, None], fresh_states, next_u)
-        obs_next = build_marl_obs_batch(u_next) # Rebuilding from safe state avoids masking logic
+        obs_next = build_marl_obs_batch(u_next) 
         steps_next = jnp.where(needs_reset, 0, steps)
 
-        # 5. Network Updates (Conditional on Buffer Size)
         def do_network_updates(net_state):
             c_p, a_p, ta_p, tc_p, o_c, o_a = net_state
             
             bx, bu, br, bnx, bd = sample_buffer(new_buf, ENV_BATCH_SIZE, samp_k)
             
-            # MARL Reshaping & PE Injection
             bx_flat = bx.reshape(-1, stored_obs_dim)
             bu_flat = bu.reshape(-1, 1)
             br_flat = br.reshape(-1, 1)
@@ -309,10 +301,8 @@ def train_chunk(carry, step_indices, state_bank):
             bx_full = jnp.concatenate([bx_flat, pe_tiled], axis=-1)
             bnx_full = jnp.concatenate([bnx_flat, pe_tiled], axis=-1)
             
-            # Critic Update
             new_c_p, new_o_c = update_critic(c_p, ta_p, tc_p, o_c, bx_full, bu_flat, br_flat, bnx_full, bd_flat, net_k)
             
-            # Policy Delayed Actor Update
             def do_actor_update(_):
                 return update_actor_and_targets(a_p, new_c_p, ta_p, tc_p, o_a, bx_full)
             def skip_actor_update(_):
@@ -338,7 +328,9 @@ def train_chunk(carry, step_indices, state_bank):
 
     return jax.lax.scan(scan_step, carry, step_indices)
 
-# --- Vectorized Training Loop ---
+# ==========================================
+# 6. EXECUTION LOOP
+# ==========================================
 print("Loading 2D KS Initial Conditions...")
 data_dir = Path('../../data')
 data_dir.mkdir(parents=True, exist_ok=True)
@@ -359,7 +351,6 @@ u_batch = jax.random.choice(subkey, state_bank, shape=(NUM_PARALLEL_ENVS,))
 obs_batch = build_marl_obs_batch(u_batch)
 env_step_counts = jnp.zeros(NUM_PARALLEL_ENVS)
 
-# Pack everything into the initial carry state
 carry = (
     buffer, actor_params, critic_params, target_actor_params, target_critic_params,
     opt_actor, opt_critic, u_batch, obs_batch, env_step_counts, key
@@ -374,13 +365,9 @@ for chunk_idx in trange(num_chunks):
     start_step = chunk_idx * EVAL_INT
     step_indices = jnp.arange(start_step, start_step + EVAL_INT)
     
-    # Run the compiled chunk
     carry, _ = train_chunk(carry, step_indices, state_bank)
-    
-    # Unpack the current actor for evaluation
     current_actor_params = carry[1] 
     
-    # Fast Evaluation
     eval_u = state_bank[0] 
     eval_e, crashed = fast_eval_episode(current_actor_params, eval_u, MAX_ENV_STEPS)
     
@@ -392,8 +379,9 @@ for chunk_idx in trange(num_chunks):
     else:
         print(f"\nUpdate {current_total_step:05d} | Episode {episode_num} | Eval Energy: {eval_e:.6f} | Time: {time.time()-start_time:.1f}s")
 
-# Extract final weights and save
 final_actor_params = carry[1]
-with open('models/marl_ks2d_params.msgpack', 'wb') as f:
+models_dir = Path('models')
+models_dir.mkdir(exist_ok=True)
+with open(models_dir / 'marl_ks2d_params.msgpack', 'wb') as f:
     f.write(flax.serialization.to_bytes({'actor': final_actor_params}))
 print(f"Training finished in {time.time()-start_time:.1f}s. Weights saved.")

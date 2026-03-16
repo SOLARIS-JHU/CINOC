@@ -26,8 +26,10 @@ from models.policy_ks2d import DecentralizedKS2DControlNet
 from examples.ks2d.decentralized.data_utils import get_batch_initial_conditions
 from examples.ks2d.decentralized.bench.env_ks2d import extract_patches_2d_jit
 from examples.ks2d.decentralized.bench.utils_hypemarl import get_sinusoidal_encoding
-from examples.ks2d.decentralized.bench.models_marl import MARLActor2DKS
 from examples.ks2d.decentralized.bench.models_rl import CentralizedActorKS2D
+from examples.ks2d.decentralized.bench.models_mappo import MAPPOActor2DKS
+from examples.ks2d.decentralized.bench.models_ppo import PPOActor2DKS
+from examples.ks2d.decentralized.bench.models_marl import MARLActor2DKS
 
 # 2D Specific Configuration
 N_grid = 64
@@ -38,6 +40,9 @@ substeps = 10
 dt = 0.005
 N_eval = 20
 ENV_MU = jnp.array([L_domain, dt]) 
+
+# Shared RL Normalization Factor
+STATE_NORM_FACTOR = 5.0 
 
 def get_2d_sinusoidal_encoding(p_2d, d=1024, n=1000.0):
     pe_x = get_sinusoidal_encoding(p_2d[:, 0], d=d, n=n)
@@ -55,6 +60,7 @@ def load_params(filename, model, dummy_input):
     variables = model.init(jax.random.PRNGKey(0), *dummy_input)
     try:
         state_dict = msgpack_restore(bytes_data)
+        # Automatically extract 'actor' if it was saved as a multi-model dict (like MAPPO/TD3)
         if 'actor' in state_dict: state_dict = state_dict['actor']
         if 'params' in variables and 'params' not in state_dict: state_dict = {'params': state_dict}
         elif 'params' not in variables and 'params' in state_dict: state_dict = state_dict['params']
@@ -76,37 +82,68 @@ dpc_p = load_params('ks2d_centralized_params.msgpack', dpc_model, (jnp.zeros((N_
 if dpc_p:
     bench_registry['DPC'] = {'apply': dpc_model.apply, 'params': dpc_p, 'color': 'blue'}
 
-# 2. MARL (Decentralized Multi-Agent)
+# 2. MARL (Decentralized Multi-Agent TD3)
 marl_model = MARLActor2DKS()
-# Dummy Input calculation: Patch 3 channels * 12x12 (432) + Mu (2) + PE (2048) = 2482
-marl_dummy_input = jnp.zeros((n_agents, 2482))
+marl_dummy_input = jnp.zeros((n_agents, 562)) # 432 (patch) + 2 (mu) + 128 (pe)
 marl_p = load_params(bench_models_dir / 'marl_ks2d_params.msgpack', marl_model, (marl_dummy_input,))
 
 if marl_p:
     def marl_apply(p, u_curr, u_target, xi_fixed):
-        y = extract_patches_2d_jit(u_curr, u_target, xi_fixed/L_domain, patch_size=12, n_grid=N_grid)
+        y = extract_patches_2d_jit(u_curr, u_target, xi_fixed/L_domain, patch_size=12, n_grid=N_grid)        
         mu_broadcast = jnp.tile(ENV_MU, (n_agents, 1))
-        pe = get_2d_sinusoidal_encoding(xi_fixed/L_domain, d=1024) 
+        pe = get_2d_sinusoidal_encoding(xi_fixed/L_domain, d=64) 
+        
         obs = jnp.concatenate([y, mu_broadcast, pe], axis=-1)
         action = marl_model.apply(p, obs)
-        return action[..., 0] 
+        return action[..., 0]
     
     bench_registry['MARL'] = {'apply': marl_apply, 'params': marl_p, 'color': 'orange'}
 
-# 3. RL (Centralized God-View)
-rl_model = CentralizedActorKS2D()
-rl_dummy_input = jnp.zeros((1, N_grid, N_grid)) 
-rl_p = load_params(bench_models_dir / 'rl_ks2d_params.msgpack', rl_model, (rl_dummy_input,))
+# 3. TD3 (Centralized Actor)
+td3_model = CentralizedActorKS2D(n_agents=n_agents)
+td3_dummy_input = jnp.zeros((1, N_grid, N_grid)) 
+td3_p = load_params(bench_models_dir / 'rl_ks2d_params.msgpack', td3_model, (td3_dummy_input,))
 
-if rl_p:
-    def rl_apply(p, u_curr, u_target, xi_fixed):
-        action = rl_model.apply(p, u_curr[None, ...])
+if td3_p:
+    def td3_apply(p, u_curr, u_target, xi_fixed):
+        u_norm = u_curr / STATE_NORM_FACTOR
+        action = td3_model.apply(p, u_norm[None, ...])
         return action.squeeze() 
     
-    bench_registry['RL'] = {'apply': rl_apply, 'params': rl_p, 'color': 'green'}
+    bench_registry['TD3'] = {'apply': td3_apply, 'params': td3_p, 'color': 'purple'}
 
+# 4. PPO (Centralized Actor)
+ppo_model = PPOActor2DKS(n_agents=n_agents)
+ppo_dummy_input = jnp.zeros((1, N_grid, N_grid))
+ppo_p = load_params(bench_models_dir / 'ppo_ks2d_params.msgpack', ppo_model, (ppo_dummy_input,))
 
-# 4. Uncontrolled Baseline
+if ppo_p:
+    def ppo_apply(p, u_curr, u_target, xi_fixed):
+        u_norm = u_curr / STATE_NORM_FACTOR
+        mean, _ = ppo_model.apply(p, u_norm[None, ...])
+        return mean.squeeze()
+    
+    bench_registry['PPO'] = {'apply': ppo_apply, 'params': ppo_p, 'color': 'cyan'}
+
+# 5. MAPPO (Multi-Agent PPO)
+mappo_model = MAPPOActor2DKS(n_agents=n_agents)
+mappo_dummy_input = jnp.zeros((1, n_agents, 560))
+mappo_p = load_params(bench_models_dir / 'mappo_ks2d_params.msgpack', mappo_model, (mappo_dummy_input,))
+
+if mappo_p:
+    def mappo_apply(p, u_curr, u_target, xi_fixed):
+        y = extract_patches_2d_jit(u_curr, u_target, xi_fixed/L_domain, patch_size=12, n_grid=N_grid)
+        y_norm = y / STATE_NORM_FACTOR  
+        
+        pe = get_2d_sinusoidal_encoding(xi_fixed/L_domain, d=64) 
+        obs = jnp.concatenate([y_norm, pe], axis=-1) # Use y_norm
+        
+        mean, _ = mappo_model.apply(p, obs[None, ...])
+        return mean.squeeze()
+    
+    bench_registry['MAPPO'] = {'apply': mappo_apply, 'params': mappo_p, 'color': 'magenta'}
+
+# 6. Uncontrolled Baseline
 bench_registry['Uncontrolled'] = {
     'apply': lambda p, u_curr, u_target, xi_fixed: jnp.zeros(n_agents), 
     'params': None, 'color': 'red'

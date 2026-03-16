@@ -49,7 +49,6 @@ env = KSHypeMARLEnv(dynamics, n_agents=N_AGENTS, N_grid=N_GRID, L=L_DOMAIN, max_
 local_y_dim = 40 
 n_mu = env.n_mu
 
-# CHANGED: 64 dim for positional encoding
 pe_dim = 64
 
 # Memory Optimization: We ONLY store the physical state in the buffer

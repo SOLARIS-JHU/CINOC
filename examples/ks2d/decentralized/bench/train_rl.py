@@ -36,8 +36,10 @@ DT = 0.005             # Physics dt
 
 # Vectorization Configs
 NUM_PARALLEL_ENVS = 64
-TOTAL_UPDATES = 100000 
+TOTAL_UPDATES = 10000 
 WARMUP_UPDATES = 500
+
+STATE_NORM_FACTOR = 5.0
 
 # --- Initialization ---
 key = jax.random.PRNGKey(42)
@@ -62,7 +64,7 @@ key, *subkeys = jax.random.split(key, 4)
 
 # Dummy inputs for initialization
 dummy_z = jnp.zeros((ENV_BATCH_SIZE, N_GRID, N_GRID))
-dummy_action = jnp.zeros((ENV_BATCH_SIZE, N_AGENTS, 1))
+dummy_action = jnp.zeros((ENV_BATCH_SIZE, N_AGENTS))
 
 actor_params = actor.init(subkeys[0], dummy_z)
 critic_params = critic.init(subkeys[1], dummy_z, dummy_action)
@@ -88,10 +90,10 @@ class DeviceReplayBuffer:
     max_size: int = struct.field(pytree_node=False)
 
     @classmethod
-    def create(cls, max_size, n_grid, n_agents, a_dim):
+    def create(cls, max_size, n_grid, n_agents):
         return cls(
             z=jnp.zeros((max_size, n_grid, n_grid), dtype=jnp.float32),
-            a=jnp.zeros((max_size, n_agents, a_dim), dtype=jnp.float32),
+            a=jnp.zeros((max_size, n_agents), dtype=jnp.float32),
             r=jnp.zeros((max_size, 1), dtype=jnp.float32),
             nz=jnp.zeros((max_size, n_grid, n_grid), dtype=jnp.float32),
             d=jnp.zeros((max_size, 1), dtype=jnp.float32),
@@ -122,22 +124,24 @@ def sample_buffer(buffer, batch_size, key):
     indices = jax.random.randint(key, shape=(batch_size,), minval=0, maxval=valid_range)
     return buffer.z[indices], buffer.a[indices], buffer.r[indices], buffer.nz[indices], buffer.d[indices]
 
-buffer = DeviceReplayBuffer.create(12_500, N_GRID, N_AGENTS, 1)
-
+buffer = DeviceReplayBuffer.create(12_500, N_GRID, N_AGENTS)
 
 # --- JIT TRAINING & ROLLOUT FUNCTIONS ---
 @jax.jit
 def update_critic(c_p, ta_p, tc_p, opt_c, z, a, r, nz, d, key): 
     key, noise_key = jax.random.split(key)
     
-    noise = jnp.clip(jax.random.normal(noise_key, a.shape) * (U_MAX * 0.1), -U_MAX * 0.5, U_MAX * 0.5)
-    next_a = jnp.clip(actor.apply(ta_p, nz) + noise, -U_MAX, U_MAX)
+    z_norm = z / STATE_NORM_FACTOR
+    nz_norm = nz / STATE_NORM_FACTOR
     
-    t_q1, t_q2 = critic.apply(tc_p, nz, next_a)
+    noise = jnp.clip(jax.random.normal(noise_key, a.shape) * (U_MAX * 0.1), -U_MAX * 0.5, U_MAX * 0.5)
+    next_a = jnp.clip(actor.apply(ta_p, nz_norm) + noise, -U_MAX, U_MAX)
+    
+    t_q1, t_q2 = critic.apply(tc_p, nz_norm, next_a)
     target_q = r + 0.99 * (1.0 - d) * jnp.minimum(t_q1, t_q2)
     
     def c_loss_fn(p):
-        q1, q2 = critic.apply(p, z, a)
+        q1, q2 = critic.apply(p, z_norm, a)
         return jnp.mean((q1 - target_q)**2 + (q2 - target_q)**2)
     
     l_c, grads_c = jax.value_and_grad(c_loss_fn)(c_p)
@@ -146,8 +150,10 @@ def update_critic(c_p, ta_p, tc_p, opt_c, z, a, r, nz, d, key):
 
 @jax.jit
 def update_actor_and_targets(a_p, c_p, ta_p, tc_p, opt_a, z):
+    z_norm = z / STATE_NORM_FACTOR
+    
     def a_loss_fn(p):
-        return -jnp.mean(critic.apply(c_p, z, actor.apply(p, z))[0])
+        return -jnp.mean(critic.apply(c_p, z_norm, actor.apply(p, z_norm))[0])
     
     l_a, grads_a = jax.value_and_grad(a_loss_fn)(a_p)
     up_a, opt_a = tx_actor.update(grads_a, opt_a)
@@ -168,17 +174,16 @@ def get_batch_actions(a_p, z_batch, key, add_noise=True):
     return actions
 
 @jax.jit
-def parallel_physics_step(u_batch, actions):
-    acts_flat = actions.squeeze(-1) 
+def parallel_physics_step(u_batch, actions, xi_fixed):
     
     def single_physics_step(u_single, act_single):
         traj = dynamics.unroll_controlled(
-            u_init=u_single, xi_fixed=xi_fixed, u_target=target_state, params=act_single, 
+            u_init=u_single, xi_fixed=xi_fixed, u_target=target_state, params=act_single, # Pass it here
             t_steps=1, substeps=SUBSTEPS, N_grid=N_GRID, L=L_DOMAIN, dt=DT, sigma=1.2
         )
         return traj[0][-1]
     
-    next_u_batch = jax.vmap(single_physics_step)(u_batch, acts_flat)
+    next_u_batch = jax.vmap(single_physics_step)(u_batch, actions)
     
     is_invalid = jnp.logical_not(jnp.isfinite(next_u_batch).all(axis=(1, 2)))
     is_exploding = jnp.max(jnp.abs(next_u_batch), axis=(1, 2)) > 100.0
@@ -186,9 +191,9 @@ def parallel_physics_step(u_batch, actions):
     
     safe_u = jnp.where(dones_batch[:, :, None], jnp.zeros_like(next_u_batch), next_u_batch)
     
-    # Centralized Global Energy Reward
+    # Scale the reward!
     global_energy = jnp.mean(jnp.square(safe_u), axis=(1, 2))[:, None]
-    rewards_batch = -global_energy
+    rewards_batch = -(global_energy / 10.0) 
     
     return safe_u, rewards_batch, dones_batch
 
@@ -215,21 +220,21 @@ def fast_eval_episode(actor_params, init_state, max_steps):
 
 # --- 3. THE SCAN-COMPILED TRAINING CHUNK ---
 @jax.jit
-def train_chunk(carry, step_indices, state_bank):
+def train_chunk(carry, step_indices, state_bank, xi_fixed):
     def scan_step(carry, step_idx):
         buf, a_p, c_p, ta_p, tc_p, o_a, o_c, u, steps, rng = carry
         rng, act_k, res_k, samp_k, net_k = jax.random.split(rng, 5)
         
         # 1. Action Selection (Warmup vs Policy)
         def warmup_actions(_):
-            return jax.random.uniform(act_k, (NUM_PARALLEL_ENVS, N_AGENTS, 1), minval=-U_MAX, maxval=U_MAX)
+            return jax.random.uniform(act_k, (NUM_PARALLEL_ENVS, N_AGENTS), minval=-U_MAX, maxval=U_MAX)
         def policy_actions(_):
             return get_batch_actions(a_p, u, act_k, add_noise=True)
             
         actions = jax.lax.cond(step_idx < WARMUP_UPDATES, warmup_actions, policy_actions, None)
         
         # 2. Physics Step
-        next_u, rewards, dones = parallel_physics_step(u, actions)
+        next_u, rewards, dones = parallel_physics_step(u, actions, xi_fixed)
         steps += 1
         truncs = steps >= MAX_ENV_STEPS
         needs_reset = jnp.logical_or(dones.flatten(), truncs)
@@ -315,7 +320,7 @@ for chunk_idx in trange(num_chunks):
     step_indices = jnp.arange(start_step, start_step + EVAL_INT)
     
     # Run the compiled chunk
-    carry, _ = train_chunk(carry, step_indices, state_bank)
+    carry, _ = train_chunk(carry, step_indices, state_bank, xi_fixed)
     
     # Unpack the current actor for evaluation
     current_actor_params = carry[1] 
