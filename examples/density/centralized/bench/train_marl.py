@@ -27,6 +27,7 @@ script_dir = Path(__file__).resolve().parent.parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
 from examples.density.centralized.dynamics import ns2d_step_jax
+from models_marl import MARLActor, MARLCritic
 
 # =============================================================================
 # Load Data & Config
@@ -54,7 +55,7 @@ POLICY_DELAY = 2
 MAX_ENV_STEPS = 150 
 
 NUM_PARALLEL_ENVS = 128
-TOTAL_UPDATES = 100000 
+TOTAL_UPDATES = 100000
 WARMUP_UPDATES = 500
 
 # Physics Constants 
@@ -63,77 +64,8 @@ SIGMA_PUSH = 0.2
 PUSH_MAX = 0.8
 R_SAFE = 0.15
 
-
 # =============================================================================
-# Centralized Models (Dense MLP based for Flattened 2D Grids)
-# =============================================================================
-class CentralizedActor(nn.Module):
-    n_agents: int
-    hidden_dim: int = 256
-    
-    @nn.compact
-    def __call__(self, rho, target, xi):
-        # Flatten the 2D spatial grids: (..., Nx, Ny) -> (..., Nx*Ny)
-        rho_flat = rho.reshape((*rho.shape[:-2], -1))
-        target_flat = target.reshape((*target.shape[:-2], -1))
-        
-        # Flatten the 2D agent positions: (..., n_agents, 2) -> (..., n_agents*2)
-        xi_flat = xi.reshape((*xi.shape[:-2], -1))
-        
-        # Concatenate all global information into a single 1D vector per batch
-        x = jnp.concatenate([rho_flat, target_flat, xi_flat], axis=-1)
-        
-        x = nn.Dense(self.hidden_dim)(x)
-        x = nn.relu(x)
-        x = nn.Dense(self.hidden_dim)(x)
-        x = nn.relu(x)
-        
-        # Normalization trick for stability
-        x = x / (jnp.linalg.norm(x, axis=-1, keepdims=True) + 1.0)
-        
-        # Dual Heads for Push Velocity (vx, vy) for ALL agents simultaneously
-        vx_raw = nn.Dense(self.n_agents)(x)
-        vy_raw = nn.Dense(self.n_agents)(x)
-        
-        vx_out = PUSH_MAX * jnp.tanh(vx_raw)
-        vy_out = PUSH_MAX * jnp.tanh(vy_raw)
-        
-        # Stack to form output shape: (..., n_agents, 2)
-        return jnp.stack([vx_out, vy_out], axis=-1)
-
-class CentralizedCritic(nn.Module):
-    hidden_dim: int = 256
-
-    @nn.compact
-    def __call__(self, rho, target, xi, actions):
-        # Flatten the 2D spatial grids
-        rho_flat = rho.reshape((*rho.shape[:-2], -1))
-        target_flat = target.reshape((*target.shape[:-2], -1))
-        
-        # Flatten agent positions and actions
-        xi_flat = xi.reshape((*xi.shape[:-2], -1))
-        actions_flat = actions.reshape((*actions.shape[:-2], -1))
-        
-        xu = jnp.concatenate([rho_flat, target_flat, xi_flat, actions_flat], axis=-1)
-        
-        # Q1
-        q1 = nn.Dense(self.hidden_dim)(xu)
-        q1 = nn.relu(q1)
-        q1 = nn.Dense(self.hidden_dim)(q1)
-        q1 = nn.relu(q1)
-        q1 = nn.Dense(1)(q1)
-
-        # Q2
-        q2 = nn.Dense(self.hidden_dim)(xu)
-        q2 = nn.relu(q2)
-        q2 = nn.Dense(self.hidden_dim)(q2)
-        q2 = nn.relu(q2)
-        q2 = nn.Dense(1)(q2)
-        
-        return q1, q2
-
-# =============================================================================
-# Dynamics Wrapper
+# Dynamics Wrapper (Reused from Centralized)
 # =============================================================================
 @struct.dataclass
 class DensityDynamicsWrapper:
@@ -175,8 +107,8 @@ def direct_control_policy(action_params, rho_obs, rho_target, xi_fixed):
 
 dynamics = DensityDynamicsWrapper(policy_apply_fn=direct_control_policy)
 
-actor = CentralizedActor(n_agents=N_AGENTS)
-critic = CentralizedCritic()
+actor = MARLActor(n_agents=N_AGENTS)
+critic = MARLCritic()
 
 key, *subkeys = jax.random.split(key, 4)
 
@@ -261,6 +193,7 @@ buffer = DeviceReplayBuffer.create(50_000)
 def update_critic(c_p, ta_p, tc_p, opt_c, rho, target, xi, a, r, nrho, nxi, d, key):
     key, noise_key = jax.random.split(key)
     
+    # MATD3 Target Policy Smoothing
     noise_scale = jnp.array([PUSH_MAX, PUSH_MAX]) * 0.1
     noise = jnp.clip(jax.random.normal(noise_key, a.shape) * noise_scale, -0.5 * noise_scale, 0.5 * noise_scale)
     
@@ -282,6 +215,7 @@ def update_critic(c_p, ta_p, tc_p, opt_c, rho, target, xi, a, r, nrho, nxi, d, k
 def update_actor_and_targets(a_p, c_p, ta_p, tc_p, opt_a, rho, target, xi):
     def a_loss_fn(p):
         curr_a = actor.apply(p, rho, target, xi)
+        # MATD3 Actor Update: Maximize Q1(s, pi(s)) using Centralized Critic
         q_vals, _ = critic.apply(c_p, rho, target, xi, curr_a)
         return -jnp.mean(q_vals)
     
@@ -323,7 +257,7 @@ def parallel_physics_step(rho_batch, xi_batch, target_batch, actions, key):
     safe_rho = jnp.where(dones_batch[:, None, None], jnp.zeros_like(next_rho_batch), next_rho_batch)
     safe_xi = jnp.where(dones_batch[:, None, None], xi_batch, next_xi_batch)
     
-    # --- REWARDS (Centralized mapping) ---
+    # --- REWARDS (Shared Global MATD3 Reward) ---
     mse = jnp.mean(jnp.square(safe_rho - target_batch), axis=(1, 2))
     
     effort = 0.001 * jnp.mean(jnp.sum(jnp.square(actions), axis=-1), axis=1)
@@ -365,7 +299,6 @@ def train_chunk(carry, step_indices, rho_init_bank, rho_target_bank, xi_init_sin
         
         safe_rew = jnp.where(dones, jnp.array(-100.0, dtype=jnp.float32), rew.astype(jnp.float32))
         
-        # Everything goes into buffer natively without PE
         new_buf = add_batch_to_buffer(
             buf, rho.astype(jnp.float32), target.astype(jnp.float32), xi.astype(jnp.float32), 
             actions.astype(jnp.float32), safe_rew, nrho.astype(jnp.float32), 
@@ -389,6 +322,7 @@ def train_chunk(carry, step_indices, rho_init_bank, rho_target_bank, xi_init_sin
             
             new_c_p, new_o_c = update_critic(c_p, ta_p, tc_p, o_c, brho, btarget, bxi, ba, br, bnrho, bnxi, bd, net_k)
             
+            # MATD3 Delayed Policy Updates
             def do_actor_update(_):
                 return update_actor_and_targets(a_p, new_c_p, ta_p, tc_p, o_a, brho, btarget, bxi)
             def skip_actor_update(_):
@@ -456,7 +390,7 @@ carry = (
     opt_actor, opt_critic, rho_batch, target_batch, xi_batch, env_step_counts, key
 )
 
-print(f"Starting Massively Parallel MARL Training (Chunked & JITed NS2D Density Control)...")
+print(f"Starting Massively Parallel MATD3 Training (Chunked & JITed NS2D Density Control)...")
 start_time = time.time()
 
 num_chunks = TOTAL_UPDATES // EVAL_INT
@@ -483,7 +417,9 @@ for chunk_idx in trange(num_chunks):
     else:
         print(f"\nUpdate {current_total_step:06d} | Episode {episode_num} | Eval Tracking MSE: {eval_e:.6f} | Time: {time.time()-start_time:.1f}s")
 
+# Ensure the models dir exists
+os.makedirs('models', exist_ok=True)
 final_actor_params = carry[1]
-with open('models/rl_ns2d_centralized_params.msgpack', 'wb') as f:
+with open('models/marl_matd3_ns2d_params.msgpack', 'wb') as f:
     f.write(flax.serialization.to_bytes({'actor': final_actor_params}))
-print(f"Training finished in {time.time()-start_time:.1f}s. Weights saved.")
+print(f"Training finished in {time.time()-start_time:.1f}s. MATD3 Actor Weights saved.")

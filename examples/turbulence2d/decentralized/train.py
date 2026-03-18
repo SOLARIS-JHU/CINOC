@@ -46,7 +46,7 @@ CONFIG = {
     
     # Files
     'ic_filename': 'turbulence_chaotic_ics_64_more.pkl',
-    'model_save_name': 'turbulence_params.msgpack'
+    'model_save_name': 'turbulence_params___.msgpack'
 }
 
 # --- 2. Data Generation ---
@@ -208,5 +208,5 @@ if __name__ == "__main__":
     plt.ylabel('Loss')
     plt.legend()
     plt.grid(True, which="both", ls="-", alpha=0.2)
-    # plt.savefig('turbulence_training_metrics.png')
-    # print("Metrics plotted.")
+    plt.savefig('turbulence_training_metrics.png')
+    print("Metrics plotted.")

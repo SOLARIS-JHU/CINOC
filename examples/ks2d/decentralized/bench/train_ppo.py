@@ -116,9 +116,22 @@ critic_params = critic.init(subkeys[1], dummy_u)
 num_updates = TOTAL_UPDATES // EVAL_INT 
 total_training_steps = num_updates * EVAL_INT 
 
-# FIX 3: Microscopic Actor Learning Rate
-lr_schedule_actor = optax.linear_schedule(init_value=1e-4, end_value=0.0, transition_steps=total_training_steps)
-lr_schedule_critic = optax.linear_schedule(init_value=1e-3, end_value=0.0, transition_steps=total_training_steps)
+# --- NEW: Calculate exact number of optimizer steps ---
+dataset_size = NUM_PARALLEL_ENVS * ROLLOUT_STEPS
+num_minibatches = dataset_size // MINIBATCH_SIZE
+total_optimizer_steps = TOTAL_UPDATES * PPO_EPOCHS * num_minibatches
+
+# FIX 3: Microscopic Actor Learning Rate (Corrected schedules)
+lr_schedule_actor = optax.linear_schedule(
+    init_value=1e-4, 
+    end_value=0.0, 
+    transition_steps=total_optimizer_steps
+)
+lr_schedule_critic = optax.linear_schedule(
+    init_value=1e-3, 
+    end_value=0.0, 
+    transition_steps=total_optimizer_steps
+)
 
 tx_actor = optax.chain(optax.clip_by_global_norm(0.5), optax.adam(lr_schedule_actor))
 tx_critic = optax.chain(optax.clip_by_global_norm(0.5), optax.adam(lr_schedule_critic))

@@ -33,7 +33,7 @@ from examples.turbulence2d.decentralized.data_utils import get_batch_initial_con
 from examples.turbulence2d.decentralized.bench.env_turb2d import extract_patches_2d_jit
 from examples.turbulence2d.decentralized.bench.utils_hypemarl import get_sinusoidal_encoding
 from examples.turbulence2d.decentralized.bench.models_marl import MARLActor2DKS
-from examples.turbulence2d.decentralized.bench.models_rl import CentralizedActorKS2D
+from examples.turbulence2d.decentralized.bench.models_rl import CentralizedActor
 
 # 2D Specific Configuration
 N_grid = 64
@@ -119,16 +119,26 @@ if marl_p:
     bench_registry['MARL'] = {'apply': marl_apply, 'params': marl_p, 'color': 'orange'}
 
 # 3. RL (Centralized God-View)
-rl_model = CentralizedActorKS2D(n_agents=n_agents)
-rl_dummy_input = jnp.zeros((1, N_grid, N_grid)) 
+rl_model = CentralizedActor(n_agents=n_agents)
+# FIX: Force float32 for dummy input to ensure proper Flax Network initialization
+rl_dummy_input = jnp.zeros((1, N_grid, N_grid), dtype=jnp.float32) 
+
 rl_p = load_params(bench_models_dir / 'rl_turb_params.msgpack', rl_model, rl_dummy_input)
+if not rl_p:
+    # Fallback to check the root models directory if not moved yet
+    rl_p = load_params(Path('models/rl_turb_params.msgpack'), rl_model, rl_dummy_input)
 
 if rl_p:
     def rl_apply(p, xi_fixed, obs):
-        # Adapted: obs must be normalized by STATE_NORM_FACTOR as it was during TD3 training
-        obs_norm = obs / STATE_NORM_FACTOR
-        action = rl_model.apply(p, obs_norm)
-        return action.squeeze() 
+        # Match training script: ensure 2D, scale, cast to float32
+        obs_squeeze = obs.squeeze()
+        obs_norm = (obs_squeeze / STATE_NORM_FACTOR).astype(jnp.float32)
+        
+        # Add batch dim manually: (1, N_grid, N_grid)
+        action = rl_model.apply(p, obs_norm[None, ...])
+        
+        # Squeeze batch dim and cast back to float64 for PDE solver
+        return action.squeeze().astype(jnp.float64) 
     
     bench_registry['RL'] = {'apply': rl_apply, 'params': rl_p, 'color': 'green'}
 

@@ -4,6 +4,15 @@ os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
 os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.80'
 
 import jax
+jax.config.update("jax_enable_x64", True)
+
+# --- Keep compilation fast with JAX Caching ---
+jax.config.update("jax_disable_jit", False)
+cache_dir = os.path.join(os.path.dirname(__file__), ".jax_cache")
+os.makedirs(cache_dir, exist_ok=True)
+jax.config.update("jax_compilation_cache_dir", cache_dir)
+# ----------------------------------------------
+
 import jax.numpy as jnp
 import optax
 import flax.serialization
@@ -16,15 +25,12 @@ import sys
 from functools import partial
 from tqdm import trange
 
-# Enable x64 for Spectral Stability (Crucial for Turbulence PDE)
-jax.config.update("jax_enable_x64", True)
-
 # Add project root to sys.path
 script_dir = Path(__file__).resolve().parent.parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
 # Project imports
-from models_rl import CentralizedActorKS2D, CentralizedCriticKS2D
+from models_rl import CentralizedActor, CentralizedCritic
 from examples.turbulence2d.decentralized.data_utils import get_batch_initial_conditions
 import tesseracts.turbulence2d.solver as solver
 
@@ -32,7 +38,7 @@ import tesseracts.turbulence2d.solver as solver
 N_AGENTS = 64          # 8x8 grid
 L_DOMAIN = 1.0         # Domain size
 N_GRID = 64
-U_MAX = 75.0           # Action scaling for Turbulence
+U_MAX = 75.0
 
 ENV_BATCH_SIZE = 128 
 EVAL_INT = 50
@@ -46,10 +52,10 @@ VISCOSITY = 5e-4       # Fluid viscosity
 
 # Vectorization Configs
 NUM_PARALLEL_ENVS = 64
-TOTAL_UPDATES = 50000 
+TOTAL_UPDATES = 10000#100000 
 WARMUP_UPDATES = 500
 
-# Training Tricks added from KS2D
+# Training Tricks
 STATE_NORM_FACTOR = 50.0  # Adjusted for turbulence vorticity magnitudes
 
 key = jax.random.PRNGKey(42)
@@ -69,8 +75,8 @@ forcing_hat = solver.compute_forcing_profile(
 )
 
 # Models
-actor = CentralizedActorKS2D(n_agents=N_AGENTS)
-critic = CentralizedCriticKS2D()
+actor = CentralizedActor(n_agents=N_AGENTS)
+critic = CentralizedCritic(n_agents=N_AGENTS)
 
 key, *subkeys = jax.random.split(key, 4)
 
@@ -84,7 +90,7 @@ critic_params = critic.init(subkeys[1], dummy_z, dummy_action)
 target_actor_params = actor_params
 target_critic_params = critic_params
 
-tx_actor = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-6))
+tx_actor = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-5))
 tx_critic = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(5e-5))
 opt_actor = tx_actor.init(actor_params)
 opt_critic = tx_critic.init(critic_params)
@@ -119,7 +125,6 @@ def add_batch_to_buffer(buffer, z_b, a_b, r_b, nz_b, d_b):
     batch_size = z_b.shape[0]
     indices = (buffer.ptr + jnp.arange(batch_size)) % buffer.max_size
     
-    # Force cast inputs down to FP32 before saving to memory
     new_z = buffer.z.at[indices].set(z_b.astype(jnp.float32))
     new_a = buffer.a.at[indices].set(a_b.astype(jnp.float32))
     new_r = buffer.r.at[indices].set(r_b.astype(jnp.float32))
@@ -137,7 +142,6 @@ def sample_buffer(buffer, batch_size, key):
     indices = jax.random.randint(key, shape=(batch_size,), minval=0, maxval=valid_range)
     return buffer.z[indices], buffer.a[indices], buffer.r[indices], buffer.nz[indices], buffer.d[indices]
 
-# Increased safely to 50,000 for better memory retention
 buffer = DeviceReplayBuffer.create(50_000, N_GRID, N_AGENTS)
 
 # --- 2. JIT TRAINING & ROLLOUT FUNCTIONS ---
@@ -145,11 +149,9 @@ buffer = DeviceReplayBuffer.create(50_000, N_GRID, N_AGENTS)
 def update_critic(c_p, ta_p, tc_p, opt_c, z, a, r, nz, d, key): 
     key, noise_key = jax.random.split(key)
     
-    # State Normalization (Ensures FP32 processing)
     z_norm = (z / STATE_NORM_FACTOR).astype(jnp.float32)
     nz_norm = (nz / STATE_NORM_FACTOR).astype(jnp.float32)
     
-    # Generate noise in FP32
     noise = jnp.clip(jax.random.normal(noise_key, a.shape, dtype=jnp.float32) * (U_MAX * 0.1), -U_MAX * 0.5, U_MAX * 0.5)
     next_a = jnp.clip(actor.apply(ta_p, nz_norm) + noise, -U_MAX, U_MAX)
     
@@ -183,10 +185,11 @@ def update_actor_and_targets(a_p, c_p, ta_p, tc_p, opt_a, z):
 @partial(jax.jit, static_argnames=['add_noise'])
 def get_batch_actions(a_p, z_batch, step_idx=0, key=None, add_noise=True):
     z_norm = (z_batch / STATE_NORM_FACTOR).astype(jnp.float32)
-    actions = jax.vmap(actor.apply, in_axes=(None, 0))(a_p, z_norm) # Outputs FP32
+    
+    # FIX: Remove jax.vmap. Flax CNNs handle batch dimension gracefully.
+    actions = actor.apply(a_p, z_norm) 
     
     if add_noise:
-        # Step-based noise decay
         decay_progress = jnp.clip(step_idx / 50000.0, 0.0, 1.0)
         current_noise_scale = 0.1 - (0.09 * decay_progress) 
         
@@ -196,12 +199,10 @@ def get_batch_actions(a_p, z_batch, step_idx=0, key=None, add_noise=True):
 
 @jax.jit
 def parallel_physics_step(w_init_batch, actions):
-    # MIXED PRECISION FIX: Cast actor actions up to FP64 for solver
     actions_64 = actions.astype(jnp.float64)
     
     def single_physics_step(w_single, act_single):
         w_hat = jnp.fft.fft2(w_single)
-        
         def rk4_loop(i, w):
             return solver.rk4_step(
                 w, dt_phys, kx, ky, k_sq, k_inv, VISCOSITY, forcing_hat, act_single
@@ -217,11 +218,22 @@ def parallel_physics_step(w_init_batch, actions):
     
     safe_w = jnp.where(dones_batch[:, :, None], jnp.zeros_like(next_w_batch), next_w_batch)
     
+    # REWARD SCALING
     global_enstrophy = jnp.mean(jnp.square(safe_w), axis=(1, 2))[:, None]
-    rewards_batch = -global_enstrophy
     
-    # Keep safe_w at FP64 for continuous solver looping
-    return safe_w, rewards_batch, dones_batch
+    # Normalize actions to [-1, 1] before calculating effort
+    normalized_actions = actions / U_MAX
+    effort = jnp.mean(jnp.square(normalized_actions), axis=1)[:, None]
+    
+    # Scale massive physical values down so Neural Networks can build stable Q-Values
+    r_track = -(global_enstrophy / 100.0)
+    
+    # Gentle penalty to discourage maxing out actions constantly
+    r_effort = -(effort * 1e-3) 
+    
+    rewards_batch = r_track + r_effort
+    
+    return safe_w, rewards_batch.astype(jnp.float32), dones_batch
 
 # --- 3. FAST JIT-COMPILED EVALUATION ---
 @partial(jax.jit, static_argnames=['max_steps'])
@@ -230,9 +242,7 @@ def fast_eval_episode(actor_params, init_state, max_steps):
         state_norm = (state / STATE_NORM_FACTOR).astype(jnp.float32)
         act = actor.apply(actor_params, state_norm[None, ...])
         
-        # Squeeze batch dim and cast up to FP64 for the physics step
         act_flat = act.squeeze(0).astype(jnp.float64) 
-        
         w_hat = jnp.fft.fft2(state)
         
         def rk4_loop(i, w):
@@ -260,7 +270,6 @@ def train_chunk(carry, step_indices, state_bank):
         def warmup_actions(_):
             return jax.random.uniform(act_k, (NUM_PARALLEL_ENVS, N_AGENTS), minval=-U_MAX, maxval=U_MAX, dtype=jnp.float32)
         def policy_actions(_):
-            # Pass step_idx for noise decay mapping
             return get_batch_actions(a_p, w, step_idx, act_k, add_noise=True)
             
         actions = jax.lax.cond(step_idx < WARMUP_UPDATES, warmup_actions, policy_actions, None)
@@ -271,7 +280,10 @@ def train_chunk(carry, step_indices, state_bank):
         needs_reset = jnp.logical_or(dones.flatten(), truncs)
         
         safe_next_w = jnp.where(dones[:, :, None], jnp.zeros_like(next_w), next_w)
-        safe_rewards = jnp.where(dones, -500.0, rewards)
+        
+        # CRASH PENALTY FIX: Must be significantly worse than surviving scaled rewards
+        safe_rewards = jnp.where(dones, -50.0, rewards)
+        
         new_buf = add_batch_to_buffer(buf, w, actions, safe_rewards, safe_next_w, dones)
         
         fresh_states = jax.random.choice(res_k, state_bank, shape=(NUM_PARALLEL_ENVS,))
@@ -282,7 +294,6 @@ def train_chunk(carry, step_indices, state_bank):
             c_p, a_p, ta_p, tc_p, o_c, o_a = net_state
             
             bs, ba, br, bns, bd = sample_buffer(new_buf, ENV_BATCH_SIZE, samp_k)
-            
             new_c_p, new_o_c = update_critic(c_p, ta_p, tc_p, o_c, bs, ba, br, bns, bd, net_k)
             
             def do_actor_update(_):
@@ -318,7 +329,6 @@ file_path = data_dir / 'turbulence_chaotic_ics_64_more.pkl'
 
 if file_path.exists():
     with open(file_path, 'rb') as f:
-        # Load natively to avoid complex number warning
         state_bank = jnp.array(pickle.load(f))
     print(f"Loaded {len(state_bank)} ICs from {file_path}")
 else:
@@ -329,7 +339,6 @@ else:
 
 if jnp.iscomplexobj(state_bank):
     print("Converting spectral initial conditions to physical space...")
-    # Safe cast to FP64 post-conversion
     state_bank = jnp.fft.ifft2(state_bank).real.astype(jnp.float64)
 else:
     state_bank = state_bank.astype(jnp.float64)
@@ -367,6 +376,10 @@ for chunk_idx in trange(num_chunks):
         print(f"\nUpdate {current_total_step:05d} | Episode {episode_num} | Eval Enstrophy: {eval_enstrophy:.4f} | Time: {time.time()-start_time:.1f}s")
 
 final_actor_params = carry[1]
+
+# Ensure models dir exists
+os.makedirs('models', exist_ok=True)
+
 with open('models/rl_turb_params.msgpack', 'wb') as f:
     f.write(flax.serialization.to_bytes({'actor': final_actor_params}))
 print(f"Training finished in {time.time()-start_time:.1f}s. Weights saved.")

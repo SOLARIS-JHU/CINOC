@@ -35,7 +35,7 @@ NUM_PARALLEL_ENVS = 128
 TOTAL_UPDATES = 100000 
 WARMUP_UPDATES = 500
 
-# --- Positional Encoding Fix (128 Dim Total) ---
+# --- Positional Encoding (128 Dim Total) ---
 PE_D = 64  # 64 features per axis -> 128 total PE features
 
 def get_2d_sinusoidal_encoding(p_2d, d=PE_D, n=1000.0):

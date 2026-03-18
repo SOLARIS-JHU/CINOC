@@ -190,7 +190,7 @@ def main():
     print(f"\nTraining completed in {elapsed:.1f}s")
     
     # Save
-    save_path = Path(__file__).parent / 'ns2d_params_nuovo.msgpack'
+    save_path = Path(__file__).parent / 'ns2d_params.msgpack'
     with open(save_path, 'wb') as f:
         f.write(flax.serialization.to_bytes(params))
     print(f"Saved: {save_path}")
@@ -216,8 +216,8 @@ def main():
     axes[2].set_yscale('log')
     
     plt.tight_layout()
-    plt.savefig(Path(__file__).parent / 'training_curves_nuovo.png', dpi=150)
-    print("Saved: training_curves_nuovo.png")
+    plt.savefig(Path(__file__).parent / 'training_curves.png', dpi=150)
+    print("Saved: training_curves.png")
     
     print("\nDone!")
 
