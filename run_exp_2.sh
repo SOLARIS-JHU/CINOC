@@ -5,13 +5,13 @@ LOG_DIR="/home/zanot/projects/Multi-Agent-DPC/logs"
 mkdir -p "$LOG_DIR"
 
 SCRIPTS=(
-    "/home/zanot/projects/Multi-Agent-DPC/examples/ks2d/decentralized/bench/train_ppo.py"
-    "/home/zanot/projects/Multi-Agent-DPC/examples/density/centralized/bench/train_rl.py"
-    "/home/zanot/projects/Multi-Agent-DPC/examples/density/centralized/bench/train_marl.py"
-    "/home/zanot/projects/Multi-Agent-DPC/examples/density/centralized/bench/train_mappo.py"
-    "/home/zanot/projects/Multi-Agent-DPC/examples/density/centralized/bench/train_ppo.py"
-    "/home/zanot/projects/Multi-Agent-DPC/examples/turbulence2d/decentralized/bench/models_marl.py"
-    "/home/zanot/projects/Multi-Agent-DPC/examples/turbulence2d/decentralized/bench/models_rl.py"
+    # "/home/zanot/projects/Multi-Agent-DPC/examples/ks2d/decentralized/bench/train_ppo.py"
+    # "/home/zanot/projects/Multi-Agent-DPC/examples/density/centralized/bench/train_rl.py"
+    # "/home/zanot/projects/Multi-Agent-DPC/examples/density/centralized/bench/train_marl.py"
+    # "/home/zanot/projects/Multi-Agent-DPC/examples/density/centralized/bench/train_mappo.py"
+    # "/home/zanot/projects/Multi-Agent-DPC/examples/density/centralized/bench/train_ppo.py"
+    "/home/zanot/projects/Multi-Agent-DPC/examples/turbulence2d/decentralized/bench/train_mappo.py"
+    "/home/zanot/projects/Multi-Agent-DPC/examples/turbulence2d/decentralized/bench/train_rl.py"
 )
 
 NUM_SCRIPTS=${#SCRIPTS[@]}

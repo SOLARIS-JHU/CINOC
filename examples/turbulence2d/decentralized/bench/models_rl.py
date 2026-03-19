@@ -1,17 +1,13 @@
 import jax.numpy as jnp
 import flax.linen as nn
 
-U_MAX = 40.0  
-
 class CentralizedActor(nn.Module):
     n_agents: int = 64
 
     @nn.compact
     def __call__(self, z):
-        # Add channel dimension for CNN: (..., N_grid, N_grid, 1)
         x = jnp.expand_dims(z, -1) 
         
-        # Spatial feature extraction
         x = nn.Conv(features=16, kernel_size=(5, 5), strides=(2, 2))(x)
         x = nn.relu(x)
         x = nn.Conv(features=32, kernel_size=(3, 3), strides=(2, 2))(x)
@@ -19,16 +15,14 @@ class CentralizedActor(nn.Module):
         x = nn.Conv(features=64, kernel_size=(3, 3), strides=(2, 2))(x)
         x = nn.relu(x)
         
-        # Dimension-agnostic flatten: Flattens Height x Width x Channels
-        # Safely handles both batched (Batch, 4096) and unbatched (4096,) calls
         x = x.reshape((*x.shape[:-3], -1)) 
         
         x = nn.Dense(256)(x)
         x = nn.relu(x)
         
-        # Output directly for all agents
         out = nn.Dense(self.n_agents)(x)
-        return jnp.tanh(out) * U_MAX
+        # ONLY return the normalized [-1.0, 1.0] percentage!
+        return jnp.tanh(out) 
 
 class CentralizedCritic(nn.Module):
     n_agents: int = 64
@@ -44,10 +38,13 @@ class CentralizedCritic(nn.Module):
         x = nn.Conv(features=64, kernel_size=(3, 3), strides=(2, 2))(x)
         x = nn.relu(x)
         
-        # Dimension-agnostic flatten
         z_features = x.reshape((*x.shape[:-3], -1))
         
-        # Concat spatial features with the continuous actions
+        # --- NEW: Compress state features so they don't drown out actions ---
+        z_features = nn.Dense(256)(z_features)
+        z_features = nn.relu(z_features)
+        
+        # Now concatenate 256 state dims with 64 action dims (much more balanced)
         xu = jnp.concatenate([z_features, actions], axis=-1)
         
         # Q1

@@ -46,13 +46,13 @@ POLICY_DELAY = 2
 
 # Turbulence Specific Control Timing & Physics
 MAX_ENV_STEPS = 150    # Control steps
-SUBSTEPS = 5           # Physics steps per control step
+SUBSTEPS = 5           # Physics steps per control step (KEPT AT 5 AS REQUESTED)
 DT = 0.01              # Physics dt
 VISCOSITY = 5e-4       # Fluid viscosity
 
 # Vectorization Configs
 NUM_PARALLEL_ENVS = 64
-TOTAL_UPDATES = 10000#100000 
+TOTAL_UPDATES = 100000 
 WARMUP_UPDATES = 500
 
 # Training Tricks
@@ -90,8 +90,8 @@ critic_params = critic.init(subkeys[1], dummy_z, dummy_action)
 target_actor_params = actor_params
 target_critic_params = critic_params
 
-tx_actor = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-5))
-tx_critic = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(5e-5))
+tx_actor = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-4))
+tx_critic = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-4))
 opt_actor = tx_actor.init(actor_params)
 opt_critic = tx_critic.init(critic_params)
 
@@ -142,7 +142,7 @@ def sample_buffer(buffer, batch_size, key):
     indices = jax.random.randint(key, shape=(batch_size,), minval=0, maxval=valid_range)
     return buffer.z[indices], buffer.a[indices], buffer.r[indices], buffer.nz[indices], buffer.d[indices]
 
-buffer = DeviceReplayBuffer.create(50_000, N_GRID, N_AGENTS)
+buffer = DeviceReplayBuffer.create(100_000, N_GRID, N_AGENTS)
 
 # --- 2. JIT TRAINING & ROLLOUT FUNCTIONS ---
 @jax.jit
@@ -152,14 +152,24 @@ def update_critic(c_p, ta_p, tc_p, opt_c, z, a, r, nz, d, key):
     z_norm = (z / STATE_NORM_FACTOR).astype(jnp.float32)
     nz_norm = (nz / STATE_NORM_FACTOR).astype(jnp.float32)
     
-    noise = jnp.clip(jax.random.normal(noise_key, a.shape, dtype=jnp.float32) * (U_MAX * 0.1), -U_MAX * 0.5, U_MAX * 0.5)
-    next_a = jnp.clip(actor.apply(ta_p, nz_norm) + noise, -U_MAX, U_MAX)
+    # 1. Normalize actions from the replay buffer back to [-1, 1]
+    a_norm = a / U_MAX
     
-    t_q1, t_q2 = critic.apply(tc_p, nz_norm, next_a)
+    # 2. Actor natively outputs [-1, 1]
+    next_a_norm = actor.apply(ta_p, nz_norm)
+    
+    # 3. Target Policy Smoothing noise strictly in the [-1, 1] space
+    noise_std = 2.0 / U_MAX
+    noise_clip = 6.0 / U_MAX
+    noise = jax.random.normal(noise_key, next_a_norm.shape, dtype=jnp.float32) * noise_std
+    noise = jnp.clip(noise, -noise_clip, noise_clip)
+    next_a_norm = jnp.clip(next_a_norm + noise, -1.0, 1.0)
+    
+    t_q1, t_q2 = critic.apply(tc_p, nz_norm, next_a_norm)
     target_q = r + 0.99 * (1.0 - d) * jnp.minimum(t_q1, t_q2)
     
     def c_loss_fn(p):
-        q1, q2 = critic.apply(p, z_norm, a)
+        q1, q2 = critic.apply(p, z_norm, a_norm)
         return jnp.mean((q1 - target_q)**2 + (q2 - target_q)**2)
     
     l_c, grads_c = jax.value_and_grad(c_loss_fn)(c_p)
@@ -171,7 +181,10 @@ def update_actor_and_targets(a_p, c_p, ta_p, tc_p, opt_a, z):
     z_norm = (z / STATE_NORM_FACTOR).astype(jnp.float32)
     
     def a_loss_fn(p):
-        return -jnp.mean(critic.apply(c_p, z_norm, actor.apply(p, z_norm))[0])
+        # Natively in [-1, 1]
+        norm_actions = actor.apply(p, z_norm)
+        # Pass directly to Critic. DO NOT divide by U_MAX!
+        return -jnp.mean(critic.apply(c_p, z_norm, norm_actions)[0])
     
     l_a, grads_a = jax.value_and_grad(a_loss_fn)(a_p)
     up_a, opt_a = tx_actor.update(grads_a, opt_a)
@@ -186,16 +199,20 @@ def update_actor_and_targets(a_p, c_p, ta_p, tc_p, opt_a, z):
 def get_batch_actions(a_p, z_batch, step_idx=0, key=None, add_noise=True):
     z_norm = (z_batch / STATE_NORM_FACTOR).astype(jnp.float32)
     
-    # FIX: Remove jax.vmap. Flax CNNs handle batch dimension gracefully.
-    actions = actor.apply(a_p, z_norm) 
+    # Natively in [-1, 1]
+    a_norm = actor.apply(a_p, z_norm) 
     
     if add_noise:
-        decay_progress = jnp.clip(step_idx / 50000.0, 0.0, 1.0)
-        current_noise_scale = 0.1 - (0.09 * decay_progress) 
+        # Exploration noise (Matched to MARL: fixed std=5.0, clip=15.0)
+        noise_std = 5.0 / U_MAX
+        noise_clip = 15.0 / U_MAX
         
-        noise = jax.random.normal(key, actions.shape, dtype=jnp.float32) * (U_MAX * current_noise_scale)
-        actions = jnp.clip(actions + noise, -U_MAX, U_MAX)
-    return actions
+        noise = jax.random.normal(key, a_norm.shape, dtype=jnp.float32) * noise_std
+        noise = jnp.clip(noise, -noise_clip, noise_clip)
+        a_norm = jnp.clip(a_norm + noise, -1.0, 1.0)
+        
+    # Scale up to real-world physics values BEFORE returning to the environment
+    return a_norm * U_MAX
 
 @jax.jit
 def parallel_physics_step(w_init_batch, actions):
@@ -218,18 +235,15 @@ def parallel_physics_step(w_init_batch, actions):
     
     safe_w = jnp.where(dones_batch[:, :, None], jnp.zeros_like(next_w_batch), next_w_batch)
     
-    # REWARD SCALING
+    # LOGARITHMIC REWARD: Flattens chaotic spikes, boosts fine-tuning toward 0
     global_enstrophy = jnp.mean(jnp.square(safe_w), axis=(1, 2))[:, None]
+    r_track = -jnp.log(global_enstrophy + 1.0)
     
-    # Normalize actions to [-1, 1] before calculating effort
     normalized_actions = actions / U_MAX
     effort = jnp.mean(jnp.square(normalized_actions), axis=1)[:, None]
-    
-    # Scale massive physical values down so Neural Networks can build stable Q-Values
-    r_track = -(global_enstrophy / 100.0)
-    
-    # Gentle penalty to discourage maxing out actions constantly
-    r_effort = -(effort * 1e-3) 
+
+    # Increase action penalty heavily to stop the agent from maxing out U_MAX randomly
+    r_effort = -(effort * 0.001)
     
     rewards_batch = r_track + r_effort
     
@@ -242,7 +256,7 @@ def fast_eval_episode(actor_params, init_state, max_steps):
         state_norm = (state / STATE_NORM_FACTOR).astype(jnp.float32)
         act = actor.apply(actor_params, state_norm[None, ...])
         
-        act_flat = act.squeeze(0).astype(jnp.float64) 
+        act_flat = (act.squeeze(0) * U_MAX).astype(jnp.float64)
         w_hat = jnp.fft.fft2(state)
         
         def rk4_loop(i, w):
@@ -258,7 +272,9 @@ def fast_eval_episode(actor_params, init_state, max_steps):
         return next_state, (enstrophy, crashed)
 
     _, (enstrophies, crashes) = jax.lax.scan(step_fn, init_state, None, length=max_steps)
-    return enstrophies[-1], jnp.any(crashes)
+    
+    # Track BOTH mean and final enstrophy
+    return jnp.mean(enstrophies), enstrophies[-1], jnp.any(crashes)
 
 # --- 4. THE SCAN-COMPILED TRAINING CHUNK ---
 @jax.jit
@@ -268,7 +284,10 @@ def train_chunk(carry, step_indices, state_bank):
         rng, act_k, res_k, samp_k, net_k = jax.random.split(rng, 5)
         
         def warmup_actions(_):
-            return jax.random.uniform(act_k, (NUM_PARALLEL_ENVS, N_AGENTS), minval=-U_MAX, maxval=U_MAX, dtype=jnp.float32)
+            # SOFT WARMUP: Limit initial exploration chaos to 50% of U_MAX
+            safe_u_max = U_MAX * 0.5
+            return jax.random.uniform(act_k, (NUM_PARALLEL_ENVS, N_AGENTS), minval=-safe_u_max, maxval=safe_u_max, dtype=jnp.float32)
+            
         def policy_actions(_):
             return get_batch_actions(a_p, w, step_idx, act_k, add_noise=True)
             
@@ -281,7 +300,6 @@ def train_chunk(carry, step_indices, state_bank):
         
         safe_next_w = jnp.where(dones[:, :, None], jnp.zeros_like(next_w), next_w)
         
-        # CRASH PENALTY FIX: Must be significantly worse than surviving scaled rewards
         safe_rewards = jnp.where(dones, -50.0, rewards)
         
         new_buf = add_batch_to_buffer(buf, w, actions, safe_rewards, safe_next_w, dones)
@@ -365,15 +383,17 @@ for chunk_idx in trange(num_chunks):
     current_actor_params = carry[1] 
     
     eval_w = state_bank[0] 
-    eval_enstrophy, crashed = fast_eval_episode(current_actor_params, eval_w, MAX_ENV_STEPS)
+    
+    # UPDATED: Evaluation unpacking
+    eval_e_mean, eval_e_final, crashed = fast_eval_episode(current_actor_params, eval_w, MAX_ENV_STEPS)
     
     current_total_step = start_step + EVAL_INT
     episode_num = current_total_step // MAX_ENV_STEPS
     
     if crashed:
-        print(f"\nUpdate {current_total_step:05d} | Episode {episode_num} | Eval Enstrophy: [CRASHED] | Time: {time.time()-start_time:.1f}s")
+        print(f"\nUpdate {current_total_step:05d} | Episode {episode_num} | Eval Mean: [CRASHED] | Eval Final: [CRASHED] | Time: {time.time()-start_time:.1f}s")
     else:
-        print(f"\nUpdate {current_total_step:05d} | Episode {episode_num} | Eval Enstrophy: {eval_enstrophy:.4f} | Time: {time.time()-start_time:.1f}s")
+        print(f"\nUpdate {current_total_step:05d} | Episode {episode_num} | Eval Mean: {eval_e_mean:.4f} | Eval Final: {eval_e_final:.4f} | Time: {time.time()-start_time:.1f}s")
 
 final_actor_params = carry[1]
 

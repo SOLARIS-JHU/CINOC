@@ -163,13 +163,11 @@ def sample_buffer(buffer, batch_size, key):
     indices = jax.random.randint(key, shape=(batch_size,), minval=0, maxval=valid_range)
     return buffer.w[indices], buffer.a[indices], buffer.r[indices], buffer.nw[indices], buffer.d[indices]
 
-# SHRUNK TO 12,500 FROM KS2D
-buffer = DeviceReplayBuffer.create(12_500, N_GRID, 1)
+buffer = DeviceReplayBuffer.create(100_000, N_GRID, 1)
 
 # ==========================================
 # 5. DPC PATCH EXTRACTION LOGIC
 # ==========================================
-# FIX: Declared n_grid and p_size as static arguments for jnp.pad
 @partial(jax.jit, static_argnames=['n_grid', 'p_size'])
 def extract_local_patch(field, xi_n, n_grid, p_size):
     i = (xi_n[1] * n_grid).astype(jnp.int32) 
@@ -205,7 +203,10 @@ def build_marl_obs_batch(full_state_batch):
 def update_critic(c_p, ta_p, tc_p, opt_c, x_patches, pe, u, r, nx_patches, d, key):
     key, noise_key = jax.random.split(key)
     
-    noise = jnp.clip(jax.random.normal(noise_key, u.shape, dtype=jnp.float32) * (U_MAX * 0.1), -U_MAX * 0.5, U_MAX * 0.5)
+    # Decoupled from U_MAX: Fixed std dev of 5.0, strictly clamped to +/- 15.0
+    noise = jax.random.normal(noise_key, u.shape, dtype=jnp.float32) * 2.0
+    noise = jnp.clip(noise, -6.0, 6.0)
+    
     next_u = jnp.clip(actor.apply(ta_p, nx_patches, pe) + noise, -U_MAX, U_MAX)
     
     t_q1, t_q2 = critic.apply(tc_p, nx_patches, pe, next_u)
@@ -240,8 +241,10 @@ def get_batch_actions(a_p, obs_batch_patches, step_idx=0, key=None, add_noise=Tr
     actions = actor.apply(a_p, obs_batch_patches, pe_expanded)
     
     if add_noise:
-        # CONSTANT 10% NOISE FROM KS2D
-        noise = jax.random.normal(key, actions.shape, dtype=jnp.float32) * (U_MAX * 0.1)
+        # Decoupled from U_MAX: Fixed std dev of 5.0, strictly clamped to +/- 15.0
+        noise = jax.random.normal(key, actions.shape, dtype=jnp.float32) * 5.0
+        noise = jnp.clip(noise, -15.0, 15.0)
+        
         actions = jnp.clip(actions + noise, -U_MAX, U_MAX)
     return actions
 
@@ -267,16 +270,28 @@ def parallel_marl_physics_step(w_batch, actions):
     # Calculate global enstrophy (The true physics objective)
     global_enstrophy = jnp.mean(jnp.square(safe_w), axis=(1, 2))
     
-    # Scale it down so networks can learn (Target range: -1.0 to 0.0)
-    global_reward = -(global_enstrophy / 400.0)
+    # Calculate global enstrophy
+    global_enstrophy = jnp.mean(jnp.square(safe_w), axis=(1, 2))
+    global_reward = -jnp.log(global_enstrophy + 1.0)
     
-    # Tiny penalty to discourage maxing out actions constantly
+    # Local Credit Assignment
+    grid_dim = int(np.sqrt(N_AGENTS)) # 8
+    cell_size = N_GRID // grid_dim    # 8
+    
+    # Reshape field to isolate agent-specific grid cells (B, 8, 8, 8, 8)
+    w_blocks = safe_w.reshape(-1, grid_dim, cell_size, grid_dim, cell_size)
+    w_blocks = w_blocks.swapaxes(2, 3) 
+    
+    # Calculate Enstrophy strictly inside each agent's zone
+    local_enstrophy = jnp.mean(jnp.square(w_blocks), axis=(3, 4)).reshape(-1, N_AGENTS)
+    local_reward = -jnp.log(local_enstrophy + 1.0)
+    
     action_penalty = -1e-3 * jnp.mean(jnp.square(actions / U_MAX), axis=-1)
 
-    # Every agent receives the exact same global reward + their personal effort
-    rewards_batch = global_reward[:, None] + action_penalty
+    # Blend: 30% Team Goal, 70% Individual Accountability
+    mixed_reward = (0.3 * global_reward[:, None]) + (0.7 * local_reward) + action_penalty
     
-    rewards_batch = rewards_batch[..., None].astype(jnp.float32) 
+    rewards_batch = mixed_reward[..., None].astype(jnp.float32) 
     dones_batch = dones_batch.astype(jnp.float32)
     
     return safe_w, rewards_batch, dones_batch
@@ -300,7 +315,9 @@ def fast_eval_episode(actor_params, init_state, max_steps):
         return next_state, (enstrophy, crashed)
 
     _, (enstrophies, crashes) = jax.lax.scan(step_fn, init_state, None, length=max_steps)
-    return jnp.mean(enstrophies), jnp.any(crashes)
+    
+    # Return both the mean across the episode and the absolute final value
+    return jnp.mean(enstrophies), enstrophies[-1], jnp.any(crashes)
 
 @jax.jit(donate_argnums=(0,))
 def train_chunk(carry, step_indices, state_bank):
@@ -312,7 +329,10 @@ def train_chunk(carry, step_indices, state_bank):
         curr_patches = build_marl_obs_batch(w)
         
         def warmup_actions(_):
-            return jax.random.uniform(act_k, (NUM_PARALLEL_ENVS, N_AGENTS, 1), minval=-U_MAX, maxval=U_MAX, dtype=jnp.float32)
+            # Scale down warmup chaos to 50% of U_MAX to prevent poisoning the initial replay buffer
+            safe_u_max = U_MAX * 0.5 
+            return jax.random.uniform(act_k, (NUM_PARALLEL_ENVS, N_AGENTS, 1), minval=-safe_u_max, maxval=safe_u_max, dtype=jnp.float32)
+        
         def policy_actions(_):
             return get_batch_actions(a_p, curr_patches, step_idx, act_k, add_noise=True)
             
@@ -426,15 +446,16 @@ for chunk_idx in trange(num_chunks):
     current_actor_params = carry[1] 
     
     eval_w = state_bank[0] 
-    eval_e, crashed = fast_eval_episode(current_actor_params, eval_w, MAX_ENV_STEPS)
+    # Unpack the new final enstropy value
+    eval_e_mean, eval_e_final, crashed = fast_eval_episode(current_actor_params, eval_w, MAX_ENV_STEPS)
     
     current_total_step = start_step + EVAL_INT
     episode_num = current_total_step // MAX_ENV_STEPS
     
     if crashed:
-        print(f"\nUpdate {current_total_step:05d} | Episode {episode_num} | Eval Enstrophy: [CRASHED] | Time: {time.time()-start_time:.1f}s")
+        print(f"\nUpdate {current_total_step:05d} | Episode {episode_num} | Eval Mean: [CRASHED] | Eval Final: [CRASHED] | Time: {time.time()-start_time:.1f}s")
     else:
-        print(f"\nUpdate {current_total_step:05d} | Episode {episode_num} | Eval Enstrophy: {eval_e:.4f} | Time: {time.time()-start_time:.1f}s")
+        print(f"\nUpdate {current_total_step:05d} | Episode {episode_num} | Eval Mean: {eval_e_mean:.4f} | Eval Final: {eval_e_final:.4f} | Time: {time.time()-start_time:.1f}s")
 
 final_actor_params = carry[1]
 models_dir = Path('models')

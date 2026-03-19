@@ -45,7 +45,10 @@ dt = 0.01
 viscosity = 5e-4
 N_eval = 20 # Evaluation batch size
 ENV_MU = jnp.array([L_domain, dt, viscosity])
+
+# Scaling Constants
 STATE_NORM_FACTOR = 50.0 # From RL script
+U_MAX_RL = 75.0          
 
 # Adapted: d defaults to 64 to match MARL training script
 def get_2d_sinusoidal_encoding(p_2d, d=64, n=1000.0):
@@ -62,10 +65,9 @@ def load_params(filename, model, dummy_input):
         return None
     with open(filename, 'rb') as f: bytes_data = f.read()
     
-    # Init expects (xi_fixed, obs) for TurbulenceNet 
-    # Or (dummy_input) for Actor models
-    if isinstance(model, DecentralizedTurbulenceNet):
-        variables = model.init(jax.random.PRNGKey(0), dummy_input[0], dummy_input[1])
+    # Handle both single arrays and tuples of inputs automatically
+    if isinstance(dummy_input, tuple):
+        variables = model.init(jax.random.PRNGKey(0), *dummy_input)
     else:
         variables = model.init(jax.random.PRNGKey(0), dummy_input)
         
@@ -95,10 +97,38 @@ if dpc_p:
         return dpc_model.apply(p, xi_fixed, obs)
     bench_registry['DPC'] = {'apply': dpc_apply_wrapped, 'params': dpc_p, 'color': 'blue'}
 
+# --- MARL Patch Extraction Helpers ---
+@partial(jax.jit, static_argnames=['n_grid', 'p_size'])
+def extract_local_patch(field, xi_n, n_grid, p_size):
+    i = (xi_n[1] * n_grid).astype(jnp.int32) 
+    j = (xi_n[0] * n_grid).astype(jnp.int32)
+    half_patch = p_size // 2
+
+    padded_field = jnp.pad(field, ((half_patch, half_patch), (half_patch, half_patch)), mode='wrap')
+    patch = jax.lax.dynamic_slice(padded_field, (i, j), (p_size, p_size))
+    return patch
+
+def get_marl_obs(w_curr, xi_norm):
+    grads = jnp.gradient(w_curr)
+    grad_y, grad_x = grads[0], grads[1]
+
+    def get_local_obs(xi_single):
+        p_w  = extract_local_patch(w_curr, xi_single, N_grid, 20)
+        p_gx = extract_local_patch(grad_x, xi_single, N_grid, 20)
+        p_gy = extract_local_patch(grad_y, xi_single, N_grid, 20)
+        return jnp.stack([p_w, p_gx, p_gy], axis=-1)
+
+    local_patches = jax.vmap(get_local_obs)(xi_norm)
+    return (local_patches / 50.0).astype(jnp.float32)
+
 # 2. MARL (Decentralized Multi-Agent)
-marl_model = MARLActor2DKS()
-# Adapted: Observation dim is 387 -> (16*16 patch) + (3 mu) + (64*2 PE)
-marl_dummy_input = jnp.zeros((n_agents, 387))
+marl_model = MARLActor2DKS(u_max=75.0) # Match u_max from training script
+
+# Match the two inputs from training: (patches: [N, 20, 20, 3], pe: [N, 128])
+marl_dummy_patches = jnp.zeros((n_agents, 20, 20, 3), dtype=jnp.float32)
+marl_dummy_pe = jnp.zeros((n_agents, 128), dtype=jnp.float32)
+marl_dummy_input = (marl_dummy_patches, marl_dummy_pe)
+
 marl_p = load_params(bench_models_dir / 'marl_turb_params.msgpack', marl_model, marl_dummy_input)
 
 if marl_p:
@@ -106,17 +136,16 @@ if marl_p:
         w_phys = obs.squeeze()
         xi_norm = xi_fixed / L_domain
         
-        y = extract_patches_2d_jit(w_phys, target_state, xi_norm, 16, N_grid)
-        mu_broadcast = jnp.tile(ENV_MU, (n_agents, 1))
-        # Adapted: ensure d=64 matches training
-        pe = get_2d_sinusoidal_encoding(xi_norm, d=64) 
+        # Build patches and positional encodings 
+        patches = get_marl_obs(w_phys, xi_norm)
+        pe = get_2d_sinusoidal_encoding(xi_norm, d=64).astype(jnp.float32) 
         
-        obs_cat = jnp.concatenate([y, mu_broadcast, pe], axis=-1)
-        action = marl_model.apply(p, obs_cat)
+        action = marl_model.apply(p, patches, pe)
         
         return action.squeeze(-1)
     
     bench_registry['MARL'] = {'apply': marl_apply, 'params': marl_p, 'color': 'orange'}
+
 
 # 3. RL (Centralized God-View)
 rl_model = CentralizedActor(n_agents=n_agents)
@@ -135,10 +164,12 @@ if rl_p:
         obs_norm = (obs_squeeze / STATE_NORM_FACTOR).astype(jnp.float32)
         
         # Add batch dim manually: (1, N_grid, N_grid)
-        action = rl_model.apply(p, obs_norm[None, ...])
+        act_norm = rl_model.apply(p, obs_norm[None, ...])
         
-        # Squeeze batch dim and cast back to float64 for PDE solver
-        return action.squeeze().astype(jnp.float64) 
+        # FIX: Scale by U_MAX_RL before passing to the physics solver!
+        action = (act_norm * U_MAX_RL).squeeze().astype(jnp.float64) 
+        
+        return action
     
     bench_registry['RL'] = {'apply': rl_apply, 'params': rl_p, 'color': 'green'}
 
