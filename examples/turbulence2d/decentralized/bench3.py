@@ -92,7 +92,7 @@ target_state = jnp.zeros((N_grid, N_grid))
 
 # 1. DPC (Centralized)
 dpc_model = DecentralizedTurbulenceNet(features=(32, 64), patch_size=16, domain_size=(L_domain, L_domain), u_max=40.0)
-dpc_p = load_params('turbulence_params.msgpack', dpc_model, (xi_init, jnp.zeros((1, N_grid, N_grid))))
+dpc_p = load_params('bench/models/turbulence_params.msgpack', dpc_model, (xi_init, jnp.zeros((1, N_grid, N_grid))))
 if dpc_p:
     def dpc_apply_wrapped(p, xi_fixed, obs):
         return dpc_model.apply(p, xi_fixed, obs)
