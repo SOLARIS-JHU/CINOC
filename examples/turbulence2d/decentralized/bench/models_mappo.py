@@ -16,7 +16,7 @@ class CNNFeatureExtractor(nn.Module):
         # Flatten spatial dimensions
         x = x.reshape((*x.shape[:-3], -1))
         
-        # Soft Normalization
+        # Soft Normalization (from DPC)
         x = x / (jnp.linalg.norm(x, axis=-1, keepdims=True) + 1.0) 
         
         x = nn.Dense(32)(x)
@@ -26,8 +26,7 @@ class CNNFeatureExtractor(nn.Module):
 class MAPPOActorTurb(nn.Module):
     n_agents: int
     u_max: float = 75.0
-    hidden_dim: int = 64
-
+    
     @nn.compact
     def __call__(self, patches, pos_enc):
         """
@@ -37,45 +36,40 @@ class MAPPOActorTurb(nn.Module):
         branch_out = CNNFeatureExtractor()(patches)
         combined = jnp.concatenate([branch_out, pos_enc], axis=-1)
         
-        h = nn.Dense(self.hidden_dim)(combined)
+        h = nn.Dense(64)(combined)
         h = nn.tanh(h)
+        
+        # Output unbounded raw mean (we squash it in the main script)
         mean_raw = nn.Dense(1)(h)
         
-        # Bound the mean to the control limit
-        mean = jnp.tanh(mean_raw) * self.u_max
+        # Learnable state-independent log standard deviation
+        log_std = self.param('log_std', lambda rng, shape: jnp.zeros(shape), (1, 1))
         
-        # Initialize std dev to be tight around the bounded mean
-        log_std = self.param('log_std', lambda rng, shape: jnp.full(shape, -0.5), (self.n_agents, 1))
-        
-        batch_shape = mean.shape[:-2]
+        # Broadcast to match mean_raw shape: (..., N_AGENTS, 1)
+        batch_shape = mean_raw.shape[:-2]
         log_std_b = jnp.broadcast_to(log_std, (*batch_shape, self.n_agents, 1))
         
-        return mean, log_std_b
+        return mean_raw, log_std_b
 
 class MAPPOCriticTurb(nn.Module):
     n_agents: int
-    hidden_dim: int = 256
-
+    
     @nn.compact
-    def __call__(self, global_w):
+    def __call__(self, patches, pos_enc):
         """
-        global_w: (..., N_GRID, N_GRID) -> Centralized state for CTDE
+        patches: (..., N_AGENTS, 20, 20, 3) 
+        pos_enc: (..., N_AGENTS, pe_dim)
+        
+        Decentralized Value network to match MATD3's Q-network logic.
         """
-        # Add channel dimension for CNN
-        x = jnp.expand_dims(global_w, axis=-1)
+        branch_out = CNNFeatureExtractor()(patches)
+        combined = jnp.concatenate([branch_out, pos_enc], axis=-1)
         
-        # Lightweight CNN to encode the 64x64 global grid
-        x = nn.Conv(16, kernel_size=(4, 4), strides=(2, 2), padding='SAME')(x)
-        x = nn.relu(x)
-        x = nn.Conv(32, kernel_size=(4, 4), strides=(2, 2), padding='SAME')(x)
-        x = nn.relu(x)
+        # V-network Architecture
+        v = nn.Dense(256)(combined)
+        v = nn.relu(v)
+        v = nn.Dense(256)(v)
+        v = nn.relu(v)
+        v = nn.Dense(1)(v)
         
-        x = x.reshape((*x.shape[:-3], -1))
-        
-        x = nn.Dense(self.hidden_dim)(x)
-        x = nn.relu(x)
-        x = nn.Dense(self.hidden_dim)(x)
-        x = nn.relu(x)
-        
-        v = nn.Dense(self.n_agents)(x) 
         return v

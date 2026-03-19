@@ -116,7 +116,7 @@ critic_params = critic.init(subkeys[1], dummy_u)
 num_updates = TOTAL_UPDATES // EVAL_INT 
 total_training_steps = num_updates * EVAL_INT 
 
-# --- NEW: Calculate exact number of optimizer steps ---
+# --- Calculate exact number of optimizer steps ---
 dataset_size = NUM_PARALLEL_ENVS * ROLLOUT_STEPS
 num_minibatches = dataset_size // MINIBATCH_SIZE
 total_optimizer_steps = TOTAL_UPDATES * PPO_EPOCHS * num_minibatches

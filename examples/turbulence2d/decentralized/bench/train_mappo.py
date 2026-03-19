@@ -51,8 +51,8 @@ NUM_PARALLEL_ENVS = 64
 ROLLOUT_STEPS = 150 
 PPO_EPOCHS = 4
 MINIBATCH_SIZE = 400 
-TOTAL_UPDATES = 1000#0
-EVAL_INT = 50 
+TOTAL_UPDATES = 2501000
+EVAL_INT = 1
 
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
@@ -142,11 +142,9 @@ def parallel_marl_physics_step(w_batch, actions):
     
     safe_w = jnp.where(dones_batch[:, None, None], jnp.zeros_like(next_w_batch), next_w_batch)
         
-    # LOG REWARD: Global Enstrophy
     global_enstrophy = jnp.mean(jnp.square(safe_w), axis=(1, 2))
     global_reward = -jnp.log(global_enstrophy + 1.0)
     
-    # LOG REWARD: Local Credit Assignment
     grid_dim_sq = int(np.sqrt(N_AGENTS)) 
     cell_size = N_GRID // grid_dim_sq    
     
@@ -158,27 +156,33 @@ def parallel_marl_physics_step(w_batch, actions):
     
     action_penalty = -1e-3 * jnp.mean(jnp.square(actions / U_MAX), axis=-1)
 
-    # Mixed log reward architecture
     mixed_reward = (0.3 * global_reward[:, None]) + (0.7 * local_reward) + action_penalty
     
-    rewards_batch = mixed_reward.astype(jnp.float32) 
-    dones_batch_exp = jnp.tile(dones_batch[:, None], (1, N_AGENTS)).astype(jnp.float32)
+    rewards_batch = mixed_reward[..., None].astype(jnp.float32) 
+    dones_batch_exp = jnp.tile(dones_batch[:, None, None], (1, N_AGENTS, 1)).astype(jnp.float32)
     
     return safe_w, rewards_batch, dones_batch_exp
 
 # ==========================================
-# 4. PPO CORE FUNCTIONS (CTDE)
+# 4. PPO CORE FUNCTIONS
 # ==========================================
-def get_action_and_value(actor_params, critic_params, patches, pe, global_w, key):
-    # ACTOR -> Decentralized local patch observations
-    mean, log_std = actor.apply(actor_params, patches, pe)
+def get_action_and_value(actor_params, critic_params, patches, pe, key):
+    # ACTOR -> Squashed Gaussian
+    mean_raw, log_std = actor.apply(actor_params, patches, pe)
     std = jnp.exp(log_std)
-    action = mean + std * jax.random.normal(key, mean.shape)
-    log_prob = -0.5 * jnp.sum(jnp.square((action - mean) / std) + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
     
-    # CRITIC -> Centralized global field
-    val = critic.apply(critic_params, (global_w / 50.0).astype(jnp.float32))
-    return action, log_prob, val
+    unscaled_action = mean_raw + std * jax.random.normal(key, mean_raw.shape)
+    env_action = jnp.tanh(unscaled_action) * U_MAX
+    
+    # Jacobian correction for Tanh Squashing
+    log_prob_normal = -0.5 * jnp.sum(jnp.square((unscaled_action - mean_raw) / std) + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
+    log_prob_correction = jnp.sum(jnp.log(U_MAX * (1.0 - jnp.square(jnp.tanh(unscaled_action))) + 1e-6), axis=-1)
+    
+    log_prob = log_prob_normal - log_prob_correction
+    
+    # CRITIC -> Decentralized Value
+    val = critic.apply(critic_params, patches, pe)
+    return unscaled_action, env_action, log_prob, val
 
 def compute_gae_jax(rewards, values, dones, true_next_values, last_val, gamma=0.99, lam=0.95):
     def scan_fn(carry, transition):
@@ -199,13 +203,17 @@ def compute_gae_jax(rewards, values, dones, true_next_values, last_val, gamma=0.
     return advantages, returns
 
 def ppo_update_epoch(actor_state, critic_state, batch):
-    patches, pe, global_w, actions, old_log_probs, advantages, returns, old_values = batch    
+    patches, pe, unscaled_actions, old_log_probs, advantages, returns, old_values = batch    
     
     def actor_loss_fn(params):
-        mean, log_std = actor.apply(params, patches, pe) 
+        mean_raw, log_std = actor.apply(params, patches, pe) 
         std = jnp.exp(log_std)
         
-        log_probs = -0.5 * jnp.sum(jnp.square((actions - mean) / std) + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
+        # Reconstruct Log Probs with updated parameters
+        log_prob_normal = -0.5 * jnp.sum(jnp.square((unscaled_actions - mean_raw) / std) + 2 * log_std + jnp.log(2 * jnp.pi), axis=-1)
+        log_prob_correction = jnp.sum(jnp.log(U_MAX * (1.0 - jnp.square(jnp.tanh(unscaled_actions))) + 1e-6), axis=-1)
+        log_probs = log_prob_normal - log_prob_correction
+        
         entropy = jnp.sum(0.5 + 0.5 * jnp.log(2 * jnp.pi) + log_std, axis=-1)
         ratio = jnp.exp(log_probs - old_log_probs)
         
@@ -217,7 +225,7 @@ def ppo_update_epoch(actor_state, critic_state, batch):
         return pg_loss - ENTROPY_COEF * entropy_loss, (pg_loss, entropy_loss)
         
     def value_loss_fn(params):
-        v = critic.apply(params, (global_w / 50.0).astype(jnp.float32)) 
+        v = critic.apply(params, patches, pe) 
         
         v_clipped = old_values + jnp.clip(v - old_values, -CLIP_EPS, CLIP_EPS)
         v_loss_unclipped = jnp.square(v - returns)
@@ -240,7 +248,6 @@ def ppo_update_epoch(actor_state, critic_state, batch):
 def train_step(runner_state, state_bank):
     actor_state, critic_state, w_batch, obs_patches, env_counts, rng = runner_state
     
-    # Pre-tile positional encodings for the rollout batch
     pe_tiled = jnp.tile(pe_jax[None, :, :], (NUM_PARALLEL_ENVS, 1, 1))
 
     # 1. Rollout Phase
@@ -248,54 +255,51 @@ def train_step(runner_state, state_bank):
         w, patches, counts, k = carry
         k, act_k, reset_k = jax.random.split(k, 3)
         
-        action, log_prob, val = get_action_and_value(actor_state.params, critic_state.params, patches, pe_tiled, w, act_k)
+        unscaled_action, env_action, log_prob, val = get_action_and_value(actor_state.params, critic_state.params, patches, pe_tiled, act_k)
         
-        # Clip action strictly to U_MAX
-        env_action = jnp.clip(action, -U_MAX, U_MAX)
         next_w, rewards, crashes = parallel_marl_physics_step(w, env_action)
+        
+        next_patches = build_marl_obs_batch(next_w)
+        true_next_v = critic.apply(critic_state.params, next_patches, pe_tiled)
         
         counts += 1
         truncs = counts >= MAX_ENV_STEPS
-        needs_reset = jnp.logical_or(crashes[:, 0], truncs)
+        needs_reset = jnp.logical_or(crashes[:, 0, 0], truncs)
         
         fresh_states = jax.random.choice(reset_k, state_bank, shape=(NUM_PARALLEL_ENVS,))
         next_w_final = jnp.where(needs_reset[:, None, None], fresh_states, next_w)
         next_counts = jnp.where(needs_reset, 0, counts)
         
         next_patches_final = build_marl_obs_batch(next_w_final)
-        true_next_v = critic.apply(critic_state.params, (next_w_final / 50.0).astype(jnp.float32))
         
-        # We DO NOT store patches in the transition tuple anymore
-        transition = (w, action, log_prob, rewards, val, crashes, true_next_v)
+        # Store global 'w' (very lightweight) instead of patches
+        transition = (w, unscaled_action, log_prob, rewards, val, crashes, true_next_v)
         return (next_w_final, next_patches_final, next_counts, k), transition
 
     carry = (w_batch, obs_patches, env_counts, rng)
     carry, transitions = jax.lax.scan(_env_step, carry, None, length=ROLLOUT_STEPS)
     (next_w_batch, next_patches_batch, next_env_counts, rng) = carry
     
-    # Unpack transitions (t_patches is gone)
-    t_w, t_a, t_logp, t_r, t_v, t_d, t_true_next_v = transitions
+    t_w, t_a_unscaled, t_logp, t_r, t_v, t_d, t_true_next_v = transitions
     
     # 2. GAE Phase
-    last_val = critic.apply(critic_state.params, (next_w_batch / 50.0).astype(jnp.float32))
+    last_val = critic.apply(critic_state.params, next_patches_batch, pe_tiled)
     adv, ret = compute_gae_jax(t_r, t_v, t_d, t_true_next_v, last_val, GAMMA, GAE_LAMBDA)
-    
     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
     
-    # Flatten timelines for PPO Updates (no f_patches)
+    # 3. Optimization Phase Setup
     f_w = t_w.reshape(-1, N_GRID, N_GRID) 
-    f_a = t_a.reshape(-1, N_AGENTS, 1)
+    f_a = t_a_unscaled.reshape(-1, N_AGENTS, 1)
     f_logp = t_logp.reshape(-1, N_AGENTS)
-    f_ret = ret.reshape(-1, N_AGENTS)
     f_adv = adv.reshape(-1, N_AGENTS)
-    f_v = t_v.reshape(-1, N_AGENTS)
+    f_ret = ret.reshape(-1, N_AGENTS, 1)
+    f_v = t_v.reshape(-1, N_AGENTS, 1)
 
     dataset_size = f_w.shape[0]
     num_minibatches = dataset_size // MINIBATCH_SIZE
-    
     pe_tiled_mb = jnp.tile(pe_jax[None, :, :], (MINIBATCH_SIZE, 1, 1))
 
-    # 3. Optimization Phase
+    # 4. Optimization Loop
     def _update_epoch(epoch_carry, _):
         a_state, c_state, k = epoch_carry
         k, subk = jax.random.split(k)
@@ -311,13 +315,12 @@ def train_step(runner_state, state_bank):
 
         def _update_minibatch(mb_carry, mb_data):
             a_state_, c_state_ = mb_carry
-            mb_w_, mb_a_, mb_logp_, mb_ret_, mb_adv_, mb_v_ = mb_data
+            mb_w_, mb_a_unscaled_, mb_logp_, mb_ret_, mb_adv_, mb_v_ = mb_data
             
-            # --- CRITICAL FIX: ON-THE-FLY PATCH EXTRACTION ---
-            # Builds patches dynamically for just this minibatch 
+            # Compute patches dynamically ON THE MINIBATCH (Saves ~10GB of VRAM)
             mb_p_ = build_marl_obs_batch(mb_w_) 
                         
-            mb_batch = (mb_p_, pe_tiled_mb, mb_w_, mb_a_, mb_logp_, mb_adv_, mb_ret_, mb_v_)
+            mb_batch = (mb_p_, pe_tiled_mb, mb_a_unscaled_, mb_logp_, mb_adv_, mb_ret_, mb_v_)
             a_state_n, c_state_n, al, vl, ent = ppo_update_epoch(a_state_, c_state_, mb_batch)
             return (a_state_n, c_state_n), jnp.stack([al, vl, ent])
             
@@ -356,8 +359,11 @@ def fast_eval_episode(actor_params, init_w, max_steps):
         obs_patches = build_marl_obs_batch(state[None, ...]) 
         pe_expanded = jnp.tile(pe_jax[None, :, :], (obs_patches.shape[0], 1, 1))
         
-        mean, _ = actor.apply(actor_params, obs_patches, pe_expanded)
-        act_flat = mean[0, :, 0].astype(jnp.float64)
+        mean_raw, _ = actor.apply(actor_params, obs_patches, pe_expanded)
+        
+        # Deterministic evaluation using bounded Tanh
+        env_action = jnp.tanh(mean_raw) * U_MAX
+        act_flat = env_action[0, :, 0].astype(jnp.float64)
         
         w_hat = jnp.fft.fft2(state)
         def rk4_loop(i, w):
@@ -381,10 +387,9 @@ critic = MAPPOCriticTurb(n_agents=N_AGENTS)
 
 key, act_k, val_k = jax.random.split(key, 3)
 
-# Initializer Shapes
+# Initializer Shapes (Critic now uses patches)
 dummy_patches = jnp.zeros((1, N_AGENTS, PATCH_SIZE, PATCH_SIZE, 3), dtype=jnp.float32)
 dummy_pe = jnp.zeros((1, N_AGENTS, pe_dim), dtype=jnp.float32)
-dummy_w_global = jnp.zeros((1, N_GRID, N_GRID), dtype=jnp.float32)
 
 total_rollout_steps = NUM_PARALLEL_ENVS * ROLLOUT_STEPS
 optax_steps_per_update = (total_rollout_steps // MINIBATCH_SIZE) * PPO_EPOCHS
@@ -400,7 +405,7 @@ actor_state = TrainState.create(
 
 critic_state = TrainState.create(
     apply_fn=critic.apply,
-    params=critic.init(val_k, dummy_w_global),
+    params=critic.init(val_k, dummy_patches, dummy_pe),
     tx=optax.chain(optax.clip_by_global_norm(0.5), optax.adam(lr_schedule, eps=1e-5))
 )
 
@@ -433,23 +438,27 @@ initial_runner_state = (
     jnp.zeros(NUM_PARALLEL_ENVS), key
 )
 
-print(f"Starting Massively Parallel CTDE MAPPO Training for 2D Turbulence...")
+print(f"Starting Massively Parallel Decentralized PPO Training for 2D Turbulence...")
 start_time = time.time()
 
 runner_state = initial_runner_state
-num_chunks = TOTAL_UPDATES // EVAL_INT
 
-for chunk_idx in trange(num_chunks):
-    eval_w = state_bank[0]
-    eval_e_mean, eval_e_final, crashed = fast_eval_episode(runner_state[0].params, eval_w, MAX_ENV_STEPS)
+# We evaluate every 5 PPO updates instead of 50, because 5 PPO updates = 750 physics steps.
+EVAL_FREQ = 5 
+
+for update_idx in trange(TOTAL_UPDATES):
+    # Run a single PPO rollout & update (150 physics steps)
+    runner_state, chunk_metrics = train_step(runner_state, state_bank)
     
-    current_update = chunk_idx * EVAL_INT
-    if crashed:
-        print(f"\nUpdate {current_update:04d} | Eval Mean: [CRASHED] | Time: {time.time()-start_time:.1f}s")
-    else:
-        print(f"\nUpdate {current_update:04d} | Eval Mean: {eval_e_mean:.4f} | Final: {eval_e_final:.4f} | Time: {time.time()-start_time:.1f}s")
-    
-    runner_state, chunk_metrics = train_chunk(runner_state, state_bank)
+    # Evaluate and print periodically
+    if update_idx % EVAL_FREQ == 0:
+        eval_w = state_bank[0]
+        eval_e_mean, eval_e_final, crashed = fast_eval_episode(runner_state[0].params, eval_w, MAX_ENV_STEPS)
+        
+        if crashed:
+            print(f"\nUpdate {update_idx:04d} | Eval Mean: [CRASHED] | Time: {time.time()-start_time:.1f}s")
+        else:
+            print(f"\nUpdate {update_idx:04d} | Eval Mean: {eval_e_mean:.4f} | Final: {eval_e_final:.4f} | Time: {time.time()-start_time:.1f}s")
 
 final_actor_params = runner_state[0].params
 final_critic_params = runner_state[1].params

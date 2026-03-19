@@ -34,6 +34,7 @@ from examples.turbulence2d.decentralized.bench.env_turb2d import extract_patches
 from examples.turbulence2d.decentralized.bench.utils_hypemarl import get_sinusoidal_encoding
 from examples.turbulence2d.decentralized.bench.models_marl import MARLActor2DKS
 from examples.turbulence2d.decentralized.bench.models_rl import CentralizedActor
+from examples.turbulence2d.decentralized.bench.models_mappo import MAPPOActorTurb
 
 # 2D Specific Configuration
 N_grid = 64
@@ -149,13 +150,13 @@ if marl_p:
 
 # 3. RL (Centralized God-View)
 rl_model = CentralizedActor(n_agents=n_agents)
-# FIX: Force float32 for dummy input to ensure proper Flax Network initialization
+# Force float32 for dummy input to ensure proper Flax Network initialization
 rl_dummy_input = jnp.zeros((1, N_grid, N_grid), dtype=jnp.float32) 
 
 rl_p = load_params(bench_models_dir / 'rl_turb_params.msgpack', rl_model, rl_dummy_input)
 if not rl_p:
     # Fallback to check the root models directory if not moved yet
-    rl_p = load_params(Path('models/rl_turb_params.msgpack'), rl_model, rl_dummy_input)
+    rl_p = load_params(Path('bench/models/rl_turb_params.msgpack'), rl_model, rl_dummy_input)
 
 if rl_p:
     def rl_apply(p, xi_fixed, obs):
@@ -172,6 +173,52 @@ if rl_p:
         return action
     
     bench_registry['RL'] = {'apply': rl_apply, 'params': rl_p, 'color': 'green'}
+
+# --- MAPPO (Turbulence-Specific CTDE) ---
+mappo_model = MAPPOActorTurb(n_agents=n_agents, u_max=75.0)
+
+# Match training initialization: (patches: [batch, N, 20, 20, 3], pe: [batch, N, 128])
+mappo_dummy_patches = jnp.zeros((1, n_agents, 20, 20, 3), dtype=jnp.float32)
+mappo_dummy_pe = jnp.zeros((1, n_agents, 128), dtype=jnp.float32)
+mappo_dummy_input = (mappo_dummy_patches, mappo_dummy_pe)
+
+# Note: Make sure this path points to where your training script actually saved it!
+# The training script saved to Path('models/mappo_turb_params.msgpack')
+mappo_p = load_params('bench/models/mappo_turb_params.msgpack', mappo_model, mappo_dummy_input)
+
+if mappo_p:
+    @jax.jit
+    def mappo_apply(p, xi_fixed, obs):
+        # 1. Pre-process observation (Vorticity field)
+        w_phys = obs.squeeze()
+        xi_norm = xi_fixed / L_domain
+        
+        # 2. Extract 3-channel patches (Vorticity + Gradients)
+        grads = jnp.gradient(w_phys)
+        grad_y, grad_x = grads[0], grads[1]
+
+        def get_local_obs(xi_single):
+            p_w  = extract_local_patch(w_phys, xi_single, N_grid, 20)
+            p_gx = extract_local_patch(grad_x, xi_single, N_grid, 20)
+            p_gy = extract_local_patch(grad_y, xi_single, N_grid, 20)
+            return jnp.stack([p_w, p_gx, p_gy], axis=-1)
+
+        patches = jax.vmap(get_local_obs)(xi_norm)
+        # Scale by 50.0 to match training normalization
+        patches_norm = (patches / 50.0).astype(jnp.float32)
+        
+        pe = get_2d_sinusoidal_encoding(xi_norm, d=64).astype(jnp.float32)
+        
+        # 3. Apply model to get raw unscaled mean
+        mean_raw, _ = mappo_model.apply(p, patches_norm[None, ...], pe[None, ...])
+        
+        # 4. Apply Tanh squashing and scale by U_MAX (75.0)
+        # This precisely matches `fast_eval_episode` from the training script
+        env_action = jnp.tanh(mean_raw) * 75.0
+        
+        return env_action.squeeze().astype(jnp.float64)
+
+    bench_registry['MAPPO'] = {'apply': mappo_apply, 'params': mappo_p, 'color': 'purple'}
 
 # 4. Uncontrolled Baseline
 bench_registry['Uncontrolled'] = {
