@@ -41,7 +41,7 @@ N_GRID = 64
 U_MAX = 75.0           
 PATCH_SIZE = 20        
 
-ENV_BATCH_SIZE = 128 
+ENV_BATCH_SIZE = 512 
 EVAL_INT = 50          
 POLICY_DELAY = 2 
 
@@ -109,8 +109,8 @@ critic_params = critic.init(subkeys[1], dummy_patches, dummy_pe, dummy_u)
 target_actor_params = jax.tree_util.tree_map(jnp.copy, actor_params)
 target_critic_params = jax.tree_util.tree_map(jnp.copy, critic_params)
 
-tx_actor = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-4))
-tx_critic = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-4))
+tx_actor = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(3e-5))
+tx_critic = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(3e-5))
 opt_actor = tx_actor.init(actor_params)
 opt_critic = tx_critic.init(critic_params)
 
@@ -343,7 +343,7 @@ def train_chunk(carry, step_indices, state_bank):
         truncs = steps >= MAX_ENV_STEPS
         needs_reset = jnp.logical_or(dones.flatten(), truncs)
         
-        safe_rewards = jnp.where(dones[:, None, None], -50.0, rewards).astype(jnp.float32)
+        safe_rewards = jnp.where(dones[:, None, None], -5000.0, rewards).astype(jnp.float32)
         dones_expanded = jnp.tile(dones[:, None, None], (1, N_AGENTS, 1)).astype(jnp.float32)
         
         # Store Global State `w` instead of patches

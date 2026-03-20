@@ -33,8 +33,10 @@ from examples.turbulence2d.decentralized.data_utils import get_batch_initial_con
 from examples.turbulence2d.decentralized.bench.env_turb2d import extract_patches_2d_jit
 from examples.turbulence2d.decentralized.bench.utils_hypemarl import get_sinusoidal_encoding
 from examples.turbulence2d.decentralized.bench.models_marl import MARLActor2DKS
-from examples.turbulence2d.decentralized.bench.models_rl import CentralizedActor
 from examples.turbulence2d.decentralized.bench.models_mappo import MAPPOActorTurb
+from examples.turbulence2d.decentralized.bench.models_rl import FCNActor
+from examples.turbulence2d.decentralized.bench.models_ppo import FCNActorPPO
+
 
 # 2D Specific Configuration
 N_grid = 64
@@ -48,10 +50,9 @@ N_eval = 20 # Evaluation batch size
 ENV_MU = jnp.array([L_domain, dt, viscosity])
 
 # Scaling Constants
-STATE_NORM_FACTOR = 50.0 # From RL script
+STATE_NORM_FACTOR = 50.0 
 U_MAX_RL = 75.0          
 
-# Adapted: d defaults to 64 to match MARL training script
 def get_2d_sinusoidal_encoding(p_2d, d=64, n=1000.0):
     pe_x = get_sinusoidal_encoding(p_2d[:, 0], d=d, n=n)
     pe_y = get_sinusoidal_encoding(p_2d[:, 1], d=d, n=n)
@@ -66,7 +67,6 @@ def load_params(filename, model, dummy_input):
         return None
     with open(filename, 'rb') as f: bytes_data = f.read()
     
-    # Handle both single arrays and tuples of inputs automatically
     if isinstance(dummy_input, tuple):
         variables = model.init(jax.random.PRNGKey(0), *dummy_input)
     else:
@@ -83,7 +83,6 @@ def load_params(filename, model, dummy_input):
         return None
 
 print("Loading Models...")
-# Initialize 8x8 grid of agents
 grid_dim = int(np.sqrt(n_agents))
 x_lin = np.linspace(0, L_domain, grid_dim, endpoint=False) + (L_domain/grid_dim)/2
 xv, yv = np.meshgrid(x_lin, x_lin)
@@ -122,10 +121,8 @@ def get_marl_obs(w_curr, xi_norm):
     local_patches = jax.vmap(get_local_obs)(xi_norm)
     return (local_patches / 50.0).astype(jnp.float32)
 
-# 2. MARL (Decentralized Multi-Agent)
-marl_model = MARLActor2DKS(u_max=75.0) # Match u_max from training script
-
-# Match the two inputs from training: (patches: [N, 20, 20, 3], pe: [N, 128])
+# 2. MARL 
+marl_model = MARLActor2DKS(u_max=75.0) 
 marl_dummy_patches = jnp.zeros((n_agents, 20, 20, 3), dtype=jnp.float32)
 marl_dummy_pe = jnp.zeros((n_agents, 128), dtype=jnp.float32)
 marl_dummy_input = (marl_dummy_patches, marl_dummy_pe)
@@ -136,64 +133,76 @@ if marl_p:
     def marl_apply(p, xi_fixed, obs):
         w_phys = obs.squeeze()
         xi_norm = xi_fixed / L_domain
-        
-        # Build patches and positional encodings 
         patches = get_marl_obs(w_phys, xi_norm)
         pe = get_2d_sinusoidal_encoding(xi_norm, d=64).astype(jnp.float32) 
-        
         action = marl_model.apply(p, patches, pe)
-        
         return action.squeeze(-1)
     
     bench_registry['MARL'] = {'apply': marl_apply, 'params': marl_p, 'color': 'orange'}
 
 
-# 3. RL (Centralized God-View)
-rl_model = CentralizedActor(n_agents=n_agents)
-# Force float32 for dummy input to ensure proper Flax Network initialization
+# --- 3. TD3 ---
+rl_model = FCNActor()
 rl_dummy_input = jnp.zeros((1, N_grid, N_grid), dtype=jnp.float32) 
 
 rl_p = load_params(bench_models_dir / 'rl_turb_params.msgpack', rl_model, rl_dummy_input)
 if not rl_p:
-    # Fallback to check the root models directory if not moved yet
-    rl_p = load_params(Path('bench/models/rl_turb_params.msgpack'), rl_model, rl_dummy_input)
+    rl_p = load_params(Path('models/rl_turb_params.msgpack'), rl_model, rl_dummy_input)
 
 if rl_p:
     def rl_apply(p, xi_fixed, obs):
-        # Match training script: ensure 2D, scale, cast to float32
         obs_squeeze = obs.squeeze()
-        obs_norm = (obs_squeeze / STATE_NORM_FACTOR).astype(jnp.float32)
+        obs_norm = jnp.clip(obs_squeeze / STATE_NORM_FACTOR, -5.0, 5.0).astype(jnp.float32)
         
-        # Add batch dim manually: (1, N_grid, N_grid)
         act_norm = rl_model.apply(p, obs_norm[None, ...])
         
-        # FIX: Scale by U_MAX_RL before passing to the physics solver!
+        # Scale by U_MAX_RL before passing to the physics solver (TD3 specific)
         action = (act_norm * U_MAX_RL).squeeze().astype(jnp.float64) 
         
         return action
     
-    bench_registry['RL'] = {'apply': rl_apply, 'params': rl_p, 'color': 'green'}
+    bench_registry['RL (TD3)'] = {'apply': rl_apply, 'params': rl_p, 'color': 'green'}
 
-# --- MAPPO (Turbulence-Specific CTDE) ---
+
+# --- 4. PPO ---
+ppo_model = FCNActorPPO(n_agents=n_agents, u_max=U_MAX_RL)
+ppo_dummy_input = jnp.zeros((1, N_grid, N_grid), dtype=jnp.float32)
+
+ppo_p = load_params(bench_models_dir / 'ppo_turb_params.msgpack', ppo_model, ppo_dummy_input)
+if not ppo_p:
+    ppo_p = load_params(Path('models/ppo_turb_params.msgpack'), ppo_model, ppo_dummy_input)
+
+if ppo_p:
+    def ppo_apply(p, xi_fixed, obs):
+        obs_squeeze = obs.squeeze()
+        obs_norm = jnp.clip(obs_squeeze / STATE_NORM_FACTOR, -5.0, 5.0).astype(jnp.float32)
+        
+        # PPO actor returns (mean, log_std). We only extract the mean for deterministic eval.
+        mean, _ = ppo_model.apply(p, obs_norm[None, ...])
+        
+        # PPO natively scales the output to U_MAX via its final layer
+        action = mean.squeeze(0).astype(jnp.float64) 
+        
+        return action
+    
+    bench_registry['PPO'] = {'apply': ppo_apply, 'params': ppo_p, 'color': 'magenta'}
+
+
+# --- 5. MAPPO (Turbulence-Specific CTDE) ---
 mappo_model = MAPPOActorTurb(n_agents=n_agents, u_max=75.0)
-
-# Match training initialization: (patches: [batch, N, 20, 20, 3], pe: [batch, N, 128])
 mappo_dummy_patches = jnp.zeros((1, n_agents, 20, 20, 3), dtype=jnp.float32)
 mappo_dummy_pe = jnp.zeros((1, n_agents, 128), dtype=jnp.float32)
 mappo_dummy_input = (mappo_dummy_patches, mappo_dummy_pe)
 
-# Note: Make sure this path points to where your training script actually saved it!
-# The training script saved to Path('models/mappo_turb_params.msgpack')
 mappo_p = load_params('bench/models/mappo_turb_params.msgpack', mappo_model, mappo_dummy_input)
+if not mappo_p:
+    mappo_p = load_params('models/mappo_turb_params.msgpack', mappo_model, mappo_dummy_input)
 
 if mappo_p:
     @jax.jit
     def mappo_apply(p, xi_fixed, obs):
-        # 1. Pre-process observation (Vorticity field)
         w_phys = obs.squeeze()
         xi_norm = xi_fixed / L_domain
-        
-        # 2. Extract 3-channel patches (Vorticity + Gradients)
         grads = jnp.gradient(w_phys)
         grad_y, grad_x = grads[0], grads[1]
 
@@ -204,23 +213,16 @@ if mappo_p:
             return jnp.stack([p_w, p_gx, p_gy], axis=-1)
 
         patches = jax.vmap(get_local_obs)(xi_norm)
-        # Scale by 50.0 to match training normalization
         patches_norm = (patches / 50.0).astype(jnp.float32)
-        
         pe = get_2d_sinusoidal_encoding(xi_norm, d=64).astype(jnp.float32)
         
-        # 3. Apply model to get raw unscaled mean
         mean_raw, _ = mappo_model.apply(p, patches_norm[None, ...], pe[None, ...])
-        
-        # 4. Apply Tanh squashing and scale by U_MAX (75.0)
-        # This precisely matches `fast_eval_episode` from the training script
         env_action = jnp.tanh(mean_raw) * 75.0
-        
         return env_action.squeeze().astype(jnp.float64)
 
     bench_registry['MAPPO'] = {'apply': mappo_apply, 'params': mappo_p, 'color': 'purple'}
 
-# 4. Uncontrolled Baseline
+# 6. Uncontrolled Baseline
 bench_registry['Uncontrolled'] = {
     'apply': lambda p, xi_fixed, obs: jnp.zeros(n_agents), 
     'params': None, 'color': 'red'
@@ -302,7 +304,7 @@ for name in bench_registry:
     plt.colorbar(im2, label='ω(x,y)')
     
     plt.tight_layout()
-    plt.savefig(output_dir / f"state_{name.lower()}.pdf")
+    plt.savefig(output_dir / f"state_{name.replace(' ', '_').lower()}.pdf")
     plt.close()
 
 # --- 5. Plotting Trendlines ---

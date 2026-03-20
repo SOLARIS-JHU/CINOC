@@ -29,8 +29,8 @@ from tqdm import trange
 script_dir = Path(__file__).resolve().parent.parent.parent.parent.parent
 sys.path.append(str(script_dir))
 
-# Project imports
-from models_rl import CentralizedActor, CentralizedCritic
+# --- UPDATED: Import the FCN Models ---
+from models_rl import FCNActor, FCNCritic
 from examples.turbulence2d.decentralized.data_utils import get_batch_initial_conditions
 import tesseracts.turbulence2d.solver as solver
 
@@ -44,19 +44,16 @@ ENV_BATCH_SIZE = 128
 EVAL_INT = 50
 POLICY_DELAY = 2 
 
-# Turbulence Specific Control Timing & Physics
-MAX_ENV_STEPS = 150    # Control steps
-SUBSTEPS = 5           # Physics steps per control step (KEPT AT 5 AS REQUESTED)
-DT = 0.01              # Physics dt
-VISCOSITY = 5e-4       # Fluid viscosity
+MAX_ENV_STEPS = 150    
+SUBSTEPS = 5           
+DT = 0.01              
+VISCOSITY = 5e-4       
 
-# Vectorization Configs
 NUM_PARALLEL_ENVS = 64
 TOTAL_UPDATES = 100000 
 WARMUP_UPDATES = 500
 
-# Training Tricks
-STATE_NORM_FACTOR = 50.0  # Adjusted for turbulence vorticity magnitudes
+STATE_NORM_FACTOR = 50.0  
 
 key = jax.random.PRNGKey(42)
 
@@ -74,13 +71,12 @@ forcing_hat = solver.compute_forcing_profile(
     centers_flat[:, 0], centers_flat[:, 1], N_GRID, L_DOMAIN, 0.05
 )
 
-# Models
-actor = CentralizedActor(n_agents=N_AGENTS)
-critic = CentralizedCritic(n_agents=N_AGENTS)
+# --- UPDATED: Initialize FCN Models ---
+actor = FCNActor()
+critic = FCNCritic()
 
 key, *subkeys = jax.random.split(key, 4)
 
-# MIXED PRECISION FIX: Force dummy inputs to FP32 to initialize FP32 Neural Networks
 dummy_z = jnp.zeros((ENV_BATCH_SIZE, N_GRID, N_GRID), dtype=jnp.float32)
 dummy_action = jnp.zeros((ENV_BATCH_SIZE, N_AGENTS), dtype=jnp.float32) 
 
@@ -90,8 +86,15 @@ critic_params = critic.init(subkeys[1], dummy_z, dummy_action)
 target_actor_params = actor_params
 target_critic_params = critic_params
 
-tx_actor = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-4))
-tx_critic = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(1e-4))
+# --- NEW: Cosine Decay Learning Rate Schedule ---
+lr_schedule = optax.cosine_decay_schedule(
+    init_value=1e-4, 
+    decay_steps=TOTAL_UPDATES, 
+    alpha=0.1  # Decays to 1e-4 * 0.1 = 1e-5 at the end of training
+)
+
+tx_actor = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(learning_rate=lr_schedule))
+tx_critic = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(learning_rate=lr_schedule))
 opt_actor = tx_actor.init(actor_params)
 opt_critic = tx_critic.init(critic_params)
 
@@ -149,16 +152,13 @@ buffer = DeviceReplayBuffer.create(100_000, N_GRID, N_AGENTS)
 def update_critic(c_p, ta_p, tc_p, opt_c, z, a, r, nz, d, key): 
     key, noise_key = jax.random.split(key)
     
-    z_norm = (z / STATE_NORM_FACTOR).astype(jnp.float32)
-    nz_norm = (nz / STATE_NORM_FACTOR).astype(jnp.float32)
+    # FIX: Hard-clip states to protect CNN from explosive gradients
+    z_norm = jnp.clip(z / STATE_NORM_FACTOR, -5.0, 5.0).astype(jnp.float32)
+    nz_norm = jnp.clip(nz / STATE_NORM_FACTOR, -5.0, 5.0).astype(jnp.float32)
     
-    # 1. Normalize actions from the replay buffer back to [-1, 1]
     a_norm = a / U_MAX
-    
-    # 2. Actor natively outputs [-1, 1]
     next_a_norm = actor.apply(ta_p, nz_norm)
     
-    # 3. Target Policy Smoothing noise strictly in the [-1, 1] space
     noise_std = 2.0 / U_MAX
     noise_clip = 6.0 / U_MAX
     noise = jax.random.normal(noise_key, next_a_norm.shape, dtype=jnp.float32) * noise_std
@@ -178,12 +178,11 @@ def update_critic(c_p, ta_p, tc_p, opt_c, z, a, r, nz, d, key):
 
 @jax.jit
 def update_actor_and_targets(a_p, c_p, ta_p, tc_p, opt_a, z):
-    z_norm = (z / STATE_NORM_FACTOR).astype(jnp.float32)
+    # FIX: Hard-clip states to protect CNN from explosive gradients
+    z_norm = jnp.clip(z / STATE_NORM_FACTOR, -5.0, 5.0).astype(jnp.float32)
     
     def a_loss_fn(p):
-        # Natively in [-1, 1]
         norm_actions = actor.apply(p, z_norm)
-        # Pass directly to Critic. DO NOT divide by U_MAX!
         return -jnp.mean(critic.apply(c_p, z_norm, norm_actions)[0])
     
     l_a, grads_a = jax.value_and_grad(a_loss_fn)(a_p)
@@ -197,13 +196,12 @@ def update_actor_and_targets(a_p, c_p, ta_p, tc_p, opt_a, z):
 
 @partial(jax.jit, static_argnames=['add_noise'])
 def get_batch_actions(a_p, z_batch, step_idx=0, key=None, add_noise=True):
-    z_norm = (z_batch / STATE_NORM_FACTOR).astype(jnp.float32)
+    # FIX: Hard-clip states to protect CNN from explosive gradients
+    z_norm = jnp.clip(z_batch / STATE_NORM_FACTOR, -5.0, 5.0).astype(jnp.float32)
     
-    # Natively in [-1, 1]
     a_norm = actor.apply(a_p, z_norm) 
     
     if add_noise:
-        # Exploration noise (Matched to MARL: fixed std=5.0, clip=15.0)
         noise_std = 5.0 / U_MAX
         noise_clip = 15.0 / U_MAX
         
@@ -211,7 +209,6 @@ def get_batch_actions(a_p, z_batch, step_idx=0, key=None, add_noise=True):
         noise = jnp.clip(noise, -noise_clip, noise_clip)
         a_norm = jnp.clip(a_norm + noise, -1.0, 1.0)
         
-    # Scale up to real-world physics values BEFORE returning to the environment
     return a_norm * U_MAX
 
 @jax.jit
@@ -235,15 +232,14 @@ def parallel_physics_step(w_init_batch, actions):
     
     safe_w = jnp.where(dones_batch[:, :, None], jnp.zeros_like(next_w_batch), next_w_batch)
     
-    # LOGARITHMIC REWARD: Flattens chaotic spikes, boosts fine-tuning toward 0
     global_enstrophy = jnp.mean(jnp.square(safe_w), axis=(1, 2))[:, None]
     r_track = -jnp.log(global_enstrophy + 1.0)
     
     normalized_actions = actions / U_MAX
     effort = jnp.mean(jnp.square(normalized_actions), axis=1)[:, None]
 
-    # Increase action penalty heavily to stop the agent from maxing out U_MAX randomly
-    r_effort = -(effort * 0.001)
+    # Heavily penalize actions so the baseline becomes the preferred default
+    r_effort = -(effort * .1) 
     
     rewards_batch = r_track + r_effort
     
@@ -253,7 +249,8 @@ def parallel_physics_step(w_init_batch, actions):
 @partial(jax.jit, static_argnames=['max_steps'])
 def fast_eval_episode(actor_params, init_state, max_steps):
     def step_fn(state, _):
-        state_norm = (state / STATE_NORM_FACTOR).astype(jnp.float32)
+        # FIX: Hard-clip states for evaluation stability too
+        state_norm = jnp.clip(state / STATE_NORM_FACTOR, -5.0, 5.0).astype(jnp.float32)
         act = actor.apply(actor_params, state_norm[None, ...])
         
         act_flat = (act.squeeze(0) * U_MAX).astype(jnp.float64)
@@ -273,7 +270,6 @@ def fast_eval_episode(actor_params, init_state, max_steps):
 
     _, (enstrophies, crashes) = jax.lax.scan(step_fn, init_state, None, length=max_steps)
     
-    # Track BOTH mean and final enstrophy
     return jnp.mean(enstrophies), enstrophies[-1], jnp.any(crashes)
 
 # --- 4. THE SCAN-COMPILED TRAINING CHUNK ---
@@ -284,9 +280,10 @@ def train_chunk(carry, step_indices, state_bank):
         rng, act_k, res_k, samp_k, net_k = jax.random.split(rng, 5)
         
         def warmup_actions(_):
-            # SOFT WARMUP: Limit initial exploration chaos to 50% of U_MAX
-            safe_u_max = U_MAX * 0.5
-            return jax.random.uniform(act_k, (NUM_PARALLEL_ENVS, N_AGENTS), minval=-safe_u_max, maxval=safe_u_max, dtype=jnp.float32)
+            # FIX: Gaussian zero-centered warmup to stay near natural enstrophy
+            noise_std = U_MAX * 0.05
+            noise = jax.random.normal(act_k, (NUM_PARALLEL_ENVS, N_AGENTS), dtype=jnp.float32) * noise_std
+            return jnp.clip(noise, -U_MAX * 0.15, U_MAX * 0.15)
             
         def policy_actions(_):
             return get_batch_actions(a_p, w, step_idx, act_k, add_noise=True)
@@ -300,7 +297,8 @@ def train_chunk(carry, step_indices, state_bank):
         
         safe_next_w = jnp.where(dones[:, :, None], jnp.zeros_like(next_w), next_w)
         
-        safe_rewards = jnp.where(dones, -50.0, rewards)
+        # FIX: -2000.0 Crash penalty
+        safe_rewards = jnp.where(dones, -2000.0, rewards)
         
         new_buf = add_batch_to_buffer(buf, w, actions, safe_rewards, safe_next_w, dones)
         
@@ -384,7 +382,6 @@ for chunk_idx in trange(num_chunks):
     
     eval_w = state_bank[0] 
     
-    # UPDATED: Evaluation unpacking
     eval_e_mean, eval_e_final, crashed = fast_eval_episode(current_actor_params, eval_w, MAX_ENV_STEPS)
     
     current_total_step = start_step + EVAL_INT
@@ -397,7 +394,6 @@ for chunk_idx in trange(num_chunks):
 
 final_actor_params = carry[1]
 
-# Ensure models dir exists
 os.makedirs('models', exist_ok=True)
 
 with open('models/rl_turb_params.msgpack', 'wb') as f:

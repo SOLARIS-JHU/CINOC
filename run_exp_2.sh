@@ -5,17 +5,18 @@ LOG_DIR="/home/zanot/projects/Multi-Agent-DPC/logs"
 mkdir -p "$LOG_DIR"
 
 SCRIPTS=(
-    # "/home/zanot/projects/Multi-Agent-DPC/examples/ks2d/decentralized/bench/train_ppo.py"
-    # "/home/zanot/projects/Multi-Agent-DPC/examples/density/centralized/bench/train_rl.py"
-    # "/home/zanot/projects/Multi-Agent-DPC/examples/density/centralized/bench/train_marl.py"
-    # "/home/zanot/projects/Multi-Agent-DPC/examples/density/centralized/bench/train_mappo.py"
-    # "/home/zanot/projects/Multi-Agent-DPC/examples/density/centralized/bench/train_ppo.py"
-    "/home/zanot/projects/Multi-Agent-DPC/examples/turbulence2d/decentralized/bench/train_mappo.py"
-    "/home/zanot/projects/Multi-Agent-DPC/examples/turbulence2d/decentralized/bench/train_rl.py"
+    # "/home/zanot/projects/Multi-Agent-DPC/examples/fkpp1d/decentralized/bench3.py"
+    # "/home/zanot/projects/Multi-Agent-DPC/examples/heat1d/decentralized/bench3.py"
+    # "/home/zanot/projects/Multi-Agent-DPC/examples/heat2D/decentralized/bench3.py"
+    "/home/zanot/projects/Multi-Agent-DPC/examples/heat2D_obstacles/decentralized/bench3.py"
+    "/home/zanot/projects/Multi-Agent-DPC/examples/ks1d/decentralized/bench3.py"
+    "/home/zanot/projects/Multi-Agent-DPC/examples/ks2d/decentralized/bench3.py"
+    "/home/zanot/projects/Multi-Agent-DPC/examples/turbulence2d/decentralized/bench3.py"
+    "/home/zanot/projects/Multi-Agent-DPC/examples/density/centralized/bench3.py"
 )
 
 NUM_SCRIPTS=${#SCRIPTS[@]}
-CURRENT_SCRIPT=0
+CURRENT_SCRIPT=3
 
 for SCRIPT_PATH in "${SCRIPTS[@]}"; do
     ((CURRENT_SCRIPT++))
@@ -52,7 +53,7 @@ for SCRIPT_PATH in "${SCRIPTS[@]}"; do
     # Apply 90-second cooldown timer (skip if it's the final script)
     if [ "$CURRENT_SCRIPT" -lt "$NUM_SCRIPTS" ]; then
         echo ">>> Run finished (or failed). Cooling down GPU for 90 seconds..." | tee -a "$LOG_FILE"
-        sleep 90
+        sleep 1
     fi
 
 done
