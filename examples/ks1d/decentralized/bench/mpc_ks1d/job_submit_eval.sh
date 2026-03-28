@@ -10,8 +10,7 @@
 #SBATCH --mail-type=end
 #SBATCH --mail-user=droysar1@jhu.edu
 
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate sciml_c
+source $HOME/jax_torch2.venv/bin/activate
 
 cd /home/droysar1/scr4_sgoswam4/Dibakar/multi_agent_dpc/CINOC/examples/ks1d/decentralized/bench/mpc_ks1d/
 
