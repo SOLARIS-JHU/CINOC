@@ -31,6 +31,7 @@ from examples.fkpp1d.decentralized.bench.models_marl import MARLActor
 from examples.fkpp1d.decentralized.bench.models_rl import CentralizedActor
 from examples.fkpp1d.decentralized.bench.models_ppo import PPOActor
 from examples.fkpp1d.decentralized.bench.models_mappo import MAPPOActor
+from examples.fkpp1d.decentralized.bench.models_dpc import CentralizedMLPControlNet
 
 # FKPP specific configuration
 N_grid, L_domain, n_agents = 100, 1.0, 20
@@ -94,11 +95,11 @@ def load_params(filename, model, dummy_input):
 print("Loading Models...")
 xi_init = jnp.linspace(0.2, 0.8, n_agents)
 
-# 1. DPC
-dpc_model = DecentralizedControlNet(features=(64, 64))
-dpc_p = load_params('decentralized_params.msgpack', dpc_model, (jnp.zeros(N_grid), jnp.zeros(N_grid), xi_init))
-if dpc_p:
-    bench_registry['DPC'] = {'apply': dpc_model.apply, 'params': dpc_p, 'color': 'blue'}
+# 1. CINOC
+CINOC_model = DecentralizedControlNet(features=(64, 64))
+CINOC_p = load_params('decentralized_params.msgpack', CINOC_model, (jnp.zeros(N_grid), jnp.zeros(N_grid), xi_init))
+if CINOC_p:
+    bench_registry['CINOC'] = {'apply': CINOC_model.apply, 'params': CINOC_p, 'color': 'blue'}
 
 # 2. MARL (DDPG/TD3)
 marl_model = MARLActor()
@@ -122,7 +123,6 @@ rl_dummy_xi = jnp.zeros((1, n_agents))
 rl_p = load_params(bench_models_dir / 'rl_fkpp_params.msgpack', rl_model, (rl_dummy_z, rl_dummy_z, rl_dummy_xi))
 if rl_p:
     def rl_apply(p, z, target, xi):
-        # Apply adds batch dim [None, ...] since model expects batched inputs
         action = rl_model.apply(p, z[None, ...], target[None, ...], xi[None, ...])
         return action[0, :, 0], action[0, :, 1]
     bench_registry['RL'] = {'apply': rl_apply, 'params': rl_p, 'color': 'purple'}
@@ -136,10 +136,10 @@ if ppo_p:
         return mean[0, :, 0], mean[0, :, 1]
     bench_registry['PPO'] = {'apply': ppo_apply, 'params': ppo_p, 'color': 'green'}
 
-# 5. MAPPO (Decentralized)
+# 5. MAPPO (Decentralized - Baseline)
 mappo_model = MAPPOActor(n_agents=n_agents)
 mappo_dummy_input = jnp.zeros((1, n_agents, 170))
-mappo_p = load_params(bench_models_dir / 'mappo_fkpp_params.msgpack', mappo_model, (mappo_dummy_input,))
+mappo_p = load_params(bench_models_dir / 'mappo_fkpp_params2.msgpack', mappo_model, (mappo_dummy_input,))
 if mappo_p:
     def mappo_apply(p, z, target, xi):
         y = extract_patches_jit(z, target, xi/L_domain, window_size=4)
@@ -150,7 +150,46 @@ if mappo_p:
         return mean[0, :, 0], mean[0, :, 1]
     bench_registry['MAPPO'] = {'apply': mappo_apply, 'params': mappo_p, 'color': 'cyan'}
 
-# 6. Uncontrolled Baseline
+# 6. Centralized DPC (MLP)
+dpc_model = CentralizedMLPControlNet(hidden_dim=256, n_agents=n_agents)
+dpc_dummy_inputs = (jnp.zeros(N_grid), jnp.zeros(N_grid), xi_init)
+dpc_path = bench_models_dir / 'dpc_fkpp_params.msgpack'
+
+dpc_p = None
+if os.path.exists(dpc_path):
+    with open(dpc_path, 'rb') as f:
+        dpc_bytes = f.read()
+    
+    # 1. Restore the raw dictionary
+    raw_dict = msgpack_restore(dpc_bytes)
+    
+    # 2. Step into the 'dcp' wrapper from the training script
+    if 'dcp' in raw_dict:
+        state_dict = raw_dict['dcp']
+    else:
+        state_dict = raw_dict
+        
+    # 3. Initialize variables to get the target structure
+    variables = dpc_model.init(jax.random.PRNGKey(0), *dpc_dummy_inputs)
+    
+    # 4. Safely load the dictionary into the initialized structure
+    try:
+        dpc_p = from_state_dict(variables, state_dict)
+        print("[+] Successfully loaded DPC")
+    except Exception as e:
+        print(f"[-] Failed to load DPC: {e}")
+else:
+    print(f"[-] {dpc_path} not found.")
+
+if dpc_p:
+    def dpc_apply(p, z, target, xi):
+        # The MLP returns the tuple (u, v) directly
+        return dpc_model.apply(p, z, target, xi)
+    
+    bench_registry['DPC'] = {'apply': dpc_apply, 'params': dpc_p, 'color': 'magenta'}
+
+    
+# 7. Uncontrolled Baseline
 bench_registry['Uncontrolled'] = {
     'apply': lambda p, z, t, xi: (jnp.zeros(n_agents), jnp.zeros(n_agents)), 
     'params': None, 'color': 'red'
@@ -192,6 +231,7 @@ for name in bench_registry:
     mean_val, std_val = jnp.mean(final_err), jnp.std(final_err)
     print(f"{name:<15} | {mean_val:.6f}             | ±{2*std_val:.6f}")
 print("="*70)
+
 
 # --- 6. Plotting ---
 plt.figure(figsize=(18, 8))
