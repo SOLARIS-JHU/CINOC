@@ -1,0 +1,23 @@
+
+============================================================
+MPC EVALUATION SUMMARY
+============================================================
+Samples evaluated: 10
+Rollout steps per sample: 400
+MPC horizon: 20
+MPC solve frequency: every 1 step(s)
+
+--- Control Performance ---
+Final Window MSE:
+  Mean: 1.3797e-04
+  Std:  4.0648e-05
+
+--- Timing Statistics ---
+Per-step MPC SOLVE time (optimization only):
+  Mean: 592.0862 ms
+  Std:  27.9127 ms
+  Min:  558.9550 ms
+  Max:  1730.0472 ms
+
+Full rollout time (400 steps):
+  Mean: 237105.59 ms
