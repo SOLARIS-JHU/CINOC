@@ -39,7 +39,7 @@ CONFIG = {
     # Training
     'n_agents': 100,       
     'batch_size': 4,
-    'epochs': 5000,
+    'epochs': 500,
     'pool_size': 500,       
     
     # Files
