@@ -1,17 +1,18 @@
 """
 Nonlinear MPC Controller for 2D Kuramoto-Sivashinsky Equation using CasADi + IPOPT
 
-The controller uses exact dense spatial matrices derived from the 
-spectral (Crank-Nicolson / Forward Euler) scheme to model KS dynamics natively in CasADi.
+The controller uses exact sparse finite-difference spatial matrices 
+(Implicit Crank-Nicolson) to model KS dynamics natively in CasADi iteratively for N*N.
 """
 
 import casadi as ca
 import numpy as np
+import scipy.sparse as sp
 import time
 
 class KSMPC2D:
     """
-    Nonlinear Model Predictive Controller for the 2D KS Equation.
+    Nonlinear Model Predictive Controller for the 2D KS Equation using Sparse FD.
     """
     
     def __init__(self, N, L, dt, centers, sigma, horizon,
@@ -47,7 +48,7 @@ class KSMPC2D:
             
         self.G_ca = ca.DM(self.G)
         
-        print(f"Building dynamics matrices for N={N} (Warning: N^2 x N^2 matrices can be LARGE!)...")
+        print(f"Building sparse dynamics matrices for N={N}...")
         self._build_dynamics_matrix()
         
         print("Building CasADi Opti MPC NLP...")
@@ -58,59 +59,45 @@ class KSMPC2D:
         N = self.N
         dx = self.dx
         dt = self.dt
-        L = self.L
         N2 = self.N2
         
-        kx = 2 * np.pi * np.fft.fftfreq(N, d=dx)
-        ky = 2 * np.pi * np.fft.fftfreq(N, d=dx)
-        KX, KY = np.meshgrid(kx, ky, indexing='ij')
+        # 1D operators
+        diagonals = [np.ones(N), -np.ones(N)]
+        D1 = sp.diags(diagonals, offsets=[1, -1], shape=(N, N)).tolil()
+        D1[0, -1] = -1
+        D1[-1, 0] =  1
+        D1 = D1.tocsr() / (2 * dx)
         
-        L_linear = (KX**2 + KY**2) - (KX**2 + KY**2)**2
-
-        denom = 1.0 - (dt / 2.0) * L_linear
-        num_A = 1.0 + (dt / 2.0) * L_linear
+        diagonals_lap = [np.ones(N), -2 * np.ones(N), np.ones(N)]
+        Lap1 = sp.diags(diagonals_lap, offsets=[1, 0, -1], shape=(N, N)).tolil()
+        Lap1[0, -1] = 1
+        Lap1[-1, 0] = 1
+        Lap1 = Lap1.tocsr() / (dx**2)
         
-        diag_A_hat = num_A / denom
-        diag_B_hat = dt / denom
-        diag_Dx_hat = 1j * KX
-        diag_Dy_hat = 1j * KY
-
-        self.A_dyn = np.zeros((N2, N2))
-        self.B_dyn = np.zeros((N2, N2))
-        self.D_x = np.zeros((N2, N2))
-        self.D_y = np.zeros((N2, N2))
-
-        t0 = time.time()
-        for i in range(N):
-            for j in range(N):
-                e_ij = np.zeros((N, N))
-                e_ij[i, j] = 1.0
-                
-                e_ij_hat = np.fft.fft2(e_ij)
-                
-                col = i * N + j
-                self.A_dyn[:, col] = np.fft.ifft2(diag_A_hat * e_ij_hat).real.flatten()
-                self.B_dyn[:, col] = np.fft.ifft2(diag_B_hat * e_ij_hat).real.flatten()
-                self.D_x[:, col]   = np.fft.ifft2(diag_Dx_hat * e_ij_hat).real.flatten()
-                self.D_y[:, col]   = np.fft.ifft2(diag_Dy_hat * e_ij_hat).real.flatten()
-                
-            if (i+1) % max(1, N//10) == 0:
-                print(f"  Matrix build progress: {i+1}/{N} row blocks ({(time.time()-t0):.2f}s)")
-
-        self.A_ca = ca.DM(self.A_dyn)
-        self.B_ca = ca.DM(self.B_dyn)
-        self.Dx_ca = ca.DM(self.D_x)
-        self.Dy_ca = ca.DM(self.D_y)
+        I1 = sp.eye(N)
         
-    def _dynamics_step(self, u, ctrl):
-        u_x = ca.mtimes(self.Dx_ca, u)
-        u_y = ca.mtimes(self.Dy_ca, u)
+        # 2D operators using kronecker products
+        Dx_sparse = sp.kron(D1, I1, format='csr')
+        Dy_sparse = sp.kron(I1, D1, format='csr')
         
-        # In 2D KS, the nonlinear term is -0.5 * (|grad u|^2) 
-        nonlinear_part = -0.5 * (u_x * u_x + u_y * u_y)
-        forcing_part = ca.mtimes(self.G_ca, ctrl)
+        Lap_x = sp.kron(Lap1, I1, format='csr')
+        Lap_y = sp.kron(I1, Lap1, format='csr')
+        Lap_sparse = Lap_x + Lap_y
         
-        return ca.mtimes(self.A_ca, u) + ca.mtimes(self.B_ca, nonlinear_part + forcing_part)
+        Bih_sparse = Lap_sparse.dot(Lap_sparse)
+        
+        # L = -Laplace - Biharmonic
+        L_linear_sparse = -Lap_sparse - Bih_sparse
+        
+        I_sp = sp.eye(N2, format='csr')
+        L_lhs_sp = I_sp - (dt / 2.0) * L_linear_sparse
+        L_rhs_sp = I_sp + (dt / 2.0) * L_linear_sparse
+        
+        # Convert to casadi DM
+        self.Dx_ca = ca.DM(Dx_sparse.tocsc())
+        self.Dy_ca = ca.DM(Dy_sparse.tocsc())
+        self.L_lhs_ca = ca.DM(L_lhs_sp.tocsc())
+        self.L_rhs_ca = ca.DM(L_rhs_sp.tocsc())
         
     def _build_mpc(self):
         self.opti = ca.Opti()
@@ -118,6 +105,7 @@ class KSMPC2D:
         N2 = self.N2
         H = self.horizon
         n_ctrl = self.n_controls
+        dt = self.dt
         
         self.U = self.opti.variable(N2, H + 1)
         self.A = self.opti.variable(n_ctrl, H)
@@ -139,10 +127,22 @@ class KSMPC2D:
         self.opti.subject_to(self.U[:, 0] == self.u0_param)
         
         for k in range(H):
-            u_k = self.U[:, k]
-            a_k = self.A[:, k]
-            u_kp1_pred = self._dynamics_step(u_k, a_k)
-            self.opti.subject_to(self.U[:, k+1] == u_kp1_pred)
+            u_k   = self.U[:, k]
+            u_kp1 = self.U[:, k+1]
+            a_k   = self.A[:, k]
+            
+            # Predictor implicit equation:
+            # (I - dt/2 * L)*u_kp1 = (I + dt/2 * L)*u_k + dt * f_nonlin
+            u_x = ca.mtimes(self.Dx_ca, u_k)
+            u_y = ca.mtimes(self.Dy_ca, u_k)
+            
+            nonlinear_term = -0.5 * (u_x * u_x + u_y * u_y)
+            forcing_term = ca.mtimes(self.G_ca, a_k)
+            
+            lhs = ca.mtimes(self.L_lhs_ca, u_kp1)
+            rhs = ca.mtimes(self.L_rhs_ca, u_k) + dt * (nonlinear_term + forcing_term)
+            
+            self.opti.subject_to(lhs == rhs)
         
         self.opti.subject_to(self.opti.bounded(self.u_min, self.A, self.u_max))
         
@@ -182,7 +182,6 @@ class KSMPC2D:
             temp_A = A_opt[:, 1:] if self.horizon > 1 else np.zeros((self.n_controls, 0))
             self.A_init = np.hstack([temp_A, A_opt[:, -1:]]) if self.horizon > 0 else A_opt
             
-            # Reshape next state to 2D
             u_next_opt_2d = U_opt[:, 1].reshape((self.N, self.N))
             
             return A_opt[:, 0], u_next_opt_2d, A_opt
