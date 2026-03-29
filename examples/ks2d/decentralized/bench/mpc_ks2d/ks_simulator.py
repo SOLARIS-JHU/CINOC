@@ -27,6 +27,11 @@ class KSSolverJAX2D:
         self.ky = 2 * jnp.pi * jnp.fft.rfftfreq(N, d=self.dx)
         
         KX, KY = jnp.meshgrid(self.kx, self.ky, indexing='ij')
+        
+        # Save KX, KY to pass to the solver
+        self.KX = KX
+        self.KY = KY
+        
         q_sq = KX**2 + KY**2
         self.L_linear = q_sq - q_sq**2
         
@@ -43,7 +48,7 @@ class KSSolverJAX2D:
         def _step(u_curr, u_hat_curr, u_control):
             u_hat_next, u_next = ks_spectral_step_etdrk4(
                 u_hat_curr, u_curr, self.centers, u_control, 
-                self.kx, self.ky, self.etdrk4_coeffs, self.dealias_mask,
+                self.KX, self.KY, self.etdrk4_coeffs, self.dealias_mask,
                 N=self.N, L=self.L, dt=self.dt, sigma=self.sigma
             )
             return u_next, u_hat_next
