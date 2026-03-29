@@ -32,6 +32,7 @@ from bench.models_rl import CentralizedActor
 from bench.models_marl import MARLActor
 from bench.models_ppo import CentralizedPPOActor
 from bench.models_mappo import MAPPOActorNS2D
+from bench.models_dpc import CentralizedMLPControlNetNS2D
 
 # --- 2. NS2D Config & Physics Constants ---
 data_dir = Path(__file__).parent.parent / 'data'
@@ -152,13 +153,13 @@ def load_params(filename, model, dummy_input):
 
 print("\nLoading Models...")
 
-# 1. DPC Model
-dpc_model = NS2DControlNet(features=(16, 32), v_max=PUSH_MAX)
-dpc_p = load_params('ns2d_params.msgpack', dpc_model, (jnp.zeros((Nx, Ny)), jnp.zeros((Nx, Ny)), xi_single))
-if dpc_p:
-    bench_registry['DPC'] = {
-        'apply': lambda p, smoke, target, xi: dpc_model.apply(p, smoke, target, xi), 
-        'params': dpc_p, 'color': 'blue'
+# 1. CINOC Model
+CINOC_model = NS2DControlNet(features=(16, 32), v_max=PUSH_MAX)
+CINOC_p = load_params('ns2d_params.msgpack', CINOC_model, (jnp.zeros((Nx, Ny)), jnp.zeros((Nx, Ny)), xi_single))
+if CINOC_p:
+    bench_registry['CINOC'] = {
+        'apply': lambda p, smoke, target, xi: CINOC_model.apply(p, smoke, target, xi), 
+        'params': CINOC_p, 'color': 'blue'
     }
 
 # 2. RL (Centralized TD3) Model
@@ -210,6 +211,42 @@ if mappo_p:
     bench_registry['MAPPO (CTDE)'] = {
         'apply': mappo_apply, 
         'params': mappo_p, 'color': 'cyan'
+    }
+
+
+# 6. Centralized DPC (MLP) Model
+dpc_model = CentralizedMLPControlNetNS2D(hidden_dim=256, n_agents=N_AGENTS)
+dpc_dummy_in = (jnp.zeros((Nx, Ny)), jnp.zeros((Nx, Ny)), jnp.zeros((N_AGENTS, 2)))
+dpc_path = 'bench/models/dpc_ns2d_params.msgpack'
+
+dpc_p = None
+if os.path.exists(dpc_path):
+    with open(dpc_path, 'rb') as f:
+        dpc_bytes = f.read()
+    
+    # Safely unpack the nested dictionary trap
+    raw_dict = msgpack_restore(dpc_bytes)
+    state_dict = raw_dict
+    if 'params' in state_dict:
+        state_dict = state_dict['params']
+    if 'params' in state_dict:
+        state_dict = state_dict['params']
+        
+    variables = dpc_model.init(jax.random.PRNGKey(0), *dpc_dummy_in)
+    
+    try:
+        # Re-wrap properly for loading
+        dpc_p = from_state_dict(variables, {'params': state_dict})
+        print("[+] Successfully loaded DPC")
+    except Exception as e:
+        print(f"[-] Failed to load DPC: {e}")
+else:
+    print(f"[-] {dpc_path} not found.")
+
+if dpc_p:
+    bench_registry['DPC (Centralized MLP)'] = {
+        'apply': lambda p, smoke, target, xi: dpc_model.apply(p, smoke, target, xi), 
+        'params': dpc_p, 'color': 'magenta'
     }
 
 # Uncontrolled Baseline

@@ -30,6 +30,7 @@ from examples.ks2d.decentralized.bench.models_rl import CentralizedActorKS2D
 from examples.ks2d.decentralized.bench.models_mappo import MAPPOActor2DKS
 from examples.ks2d.decentralized.bench.models_ppo import PPOActor2DKS
 from examples.ks2d.decentralized.bench.models_marl import MARLActor2DKS
+from examples.ks2d.decentralized.bench.models_dpc import CentralizedMLPControlNet2D_KS
 
 # 2D Specific Configuration
 N_grid = 64
@@ -76,11 +77,11 @@ x_lin = np.linspace(0, L_domain, grid_dim, endpoint=False) + (L_domain/grid_dim)
 xv, yv = np.meshgrid(x_lin, x_lin)
 xi_init = jnp.stack([xv.flatten(), yv.flatten()], axis=-1).astype(np.float32)
 
-# 1. DPC (Centralized)
-dpc_model = DecentralizedKS2DControlNet(features=(64, 128), domain_size=(L_domain, L_domain), u_max=10.0)
-dpc_p = load_params('ks2d_centralized_params.msgpack', dpc_model, (jnp.zeros((N_grid, N_grid)), jnp.zeros((N_grid, N_grid)), xi_init))
-if dpc_p:
-    bench_registry['DPC'] = {'apply': dpc_model.apply, 'params': dpc_p, 'color': 'blue'}
+# 1. CINOC (Centralized)
+CINOC_model = DecentralizedKS2DControlNet(features=(64, 128), domain_size=(L_domain, L_domain), u_max=10.0)
+CINOC_p = load_params('ks2d_centralized_params.msgpack', CINOC_model, (jnp.zeros((N_grid, N_grid)), jnp.zeros((N_grid, N_grid)), xi_init))
+if CINOC_p:
+    bench_registry['CINOC'] = {'apply': CINOC_model.apply, 'params': CINOC_p, 'color': 'blue'}
 
 # 2. MARL (Decentralized Multi-Agent TD3)
 marl_model = MARLActor2DKS()
@@ -142,6 +143,42 @@ if mappo_p:
         return mean.squeeze()
     
     bench_registry['MAPPO'] = {'apply': mappo_apply, 'params': mappo_p, 'color': 'magenta'}
+
+# 6. Centralized DPC (MLP)
+dpc_model = CentralizedMLPControlNet2D_KS(hidden_dim=256, n_agents=n_agents, u_max=5.0)
+dpc_dummy_inputs = (jnp.zeros((N_grid, N_grid)), jnp.zeros((N_grid, N_grid)), xi_init)
+dpc_path = bench_models_dir / 'dpc_ks2d_params.msgpack'
+
+dpc_p = None
+if os.path.exists(dpc_path):
+    with open(dpc_path, 'rb') as f:
+        dpc_bytes = f.read()
+    
+    # Safely unpack the double-nested dictionary trap
+    raw_dict = msgpack_restore(dpc_bytes)
+    state_dict = raw_dict
+    if 'params' in state_dict:
+        state_dict = state_dict['params']
+    if 'params' in state_dict:
+        state_dict = state_dict['params']
+        
+    variables = dpc_model.init(jax.random.PRNGKey(0), *dpc_dummy_inputs)
+    
+    try:
+        # Re-wrap properly for loading
+        dpc_p = from_state_dict(variables, {'params': state_dict})
+        print("[+] Successfully loaded DPC")
+    except Exception as e:
+        print(f"[-] Failed to load DPC: {e}")
+else:
+    print(f"[-] {dpc_path} not found.")
+
+if dpc_p:
+    def dpc_apply(p, u_curr, u_target, xi_fixed):
+        # DPC natively returns the forcing array for fixed actuators
+        return dpc_model.apply(p, u_curr, u_target, xi_fixed)
+    
+    bench_registry['DPC'] = {'apply': dpc_apply, 'params': dpc_p, 'color': 'black'}
 
 # 6. Uncontrolled Baseline
 bench_registry['Uncontrolled'] = {

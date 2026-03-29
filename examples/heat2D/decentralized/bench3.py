@@ -31,6 +31,9 @@ from examples.heat2D.decentralized.bench.models_ppo import PPOActor2D
 from examples.heat2D.decentralized.bench.models_mappo import MAPPOActor2D
 from examples.heat2D.decentralized.bench.models_rl import CentralizedActor2D
 
+# Added DPC Import
+from examples.heat2D.decentralized.bench.models_dpc import CentralizedMLPControlNet2D
+
 # 2D Specific Configuration
 N_grid = 32
 L_domain = 1.0
@@ -39,7 +42,6 @@ T_steps = 100 # Match test evaluation steps
 N_eval = 50
 ENV_MU = jnp.array([0.01]) 
 
-# CHANGED: Default d=128 to match training
 def get_2d_sinusoidal_encoding(p_2d, d=64, n=1000.0):
     pe_x = get_sinusoidal_encoding(p_2d[:, 0], d=d, n=n)
     pe_y = get_sinusoidal_encoding(p_2d[:, 1], d=d, n=n)
@@ -84,11 +86,11 @@ pos_1d = np.linspace(0.2, 0.8, n_side)
 X, Y = np.meshgrid(pos_1d, pos_1d)
 xi_init = jnp.stack([X.flatten(), Y.flatten()], axis=-1).astype(np.float32)
 
-# 1. DPC (Centralized / DeepONet)
-dpc_model = DecentralizedHeat2DControlNet(features=(16, 32))
-dpc_p = load_params('decentralized_params_heat2d.msgpack', dpc_model, (jnp.zeros((N_grid, N_grid)), jnp.zeros((N_grid, N_grid)), xi_init))
-if dpc_p:
-    bench_registry['DPC'] = {'apply': dpc_model.apply, 'params': dpc_p, 'color': 'blue'}
+# 1. CINOC (Centralized / DeepONet)
+CINOC_model = DecentralizedHeat2DControlNet(features=(16, 32))
+CINOC_p = load_params('decentralized_params_heat2d.msgpack', CINOC_model, (jnp.zeros((N_grid, N_grid)), jnp.zeros((N_grid, N_grid)), xi_init))
+if CINOC_p:
+    bench_registry['CINOC'] = {'apply': CINOC_model.apply, 'params': CINOC_p, 'color': 'blue'}
 
 # 2. MARL (Decentralized Multi-Agent DDPG/TD3)
 marl_model = MARLActor2D()
@@ -109,17 +111,12 @@ if marl_p:
 
 # 3. RL Centralized (DDPG/TD3)
 rl_model = CentralizedActor2D(n_agents=n_agents)
-
-# Create separate dummy inputs for z, z_target, and xi
 rl_dummy_z = jnp.zeros((N_grid, N_grid))
 rl_dummy_xi = jnp.zeros((n_agents, 2))
-
-# Pass all three as a tuple to match __call__(self, z, z_target, xi)
 rl_p = load_params(bench_models_dir / 'rl_heat2d_params.msgpack', rl_model, (rl_dummy_z, rl_dummy_z, rl_dummy_xi))
 
 if rl_p:
     def rl_apply(p, z, target, xi):
-        # Pass the unflattened arguments directly to the model
         action = rl_model.apply(p, z, target, xi)
         return action[:, 0], action[:, 1:3]
     bench_registry['RL'] = {'apply': rl_apply, 'params': rl_p, 'color': 'purple'}
@@ -131,9 +128,8 @@ ppo_dummy_xi = jnp.zeros((1, n_agents, 2))
 ppo_p = load_params(bench_models_dir / 'ppo_heat2d_params.msgpack', ppo_model, (ppo_dummy_z, ppo_dummy_z, ppo_dummy_xi))
 if ppo_p:
     def ppo_apply(p, z, target, xi):
-        # PPO model expects batch dimensions [None, ...]
         mean, _ = ppo_model.apply(p, z[None, ...], target[None, ...], xi[None, ...])
-        action = mean[0] # remove batch dim
+        action = mean[0]
         return action[:, 0], action[:, 1:3]
     bench_registry['PPO'] = {'apply': ppo_apply, 'params': ppo_p, 'color': 'green'}
 
@@ -149,14 +145,47 @@ if mappo_p:
         pe = get_2d_sinusoidal_encoding(xi/L_domain, d=128) 
         
         obs = jnp.concatenate([y, mu_broadcast, pe], axis=-1)
-        # MAPPO model expects batch dimension [None, ...]
         mean, _ = mappo_model.apply(p, obs[None, ...])
-        action = mean[0] # remove batch dim
+        action = mean[0]
         return action[:, 0], action[:, 1:3]
     
     bench_registry['MAPPO'] = {'apply': mappo_apply, 'params': mappo_p, 'color': 'cyan'}
 
-# 6. Uncontrolled Baseline
+
+# 6. Centralized DPC (MLP)
+dpc_model = CentralizedMLPControlNet2D(hidden_dim=256, n_agents=n_agents)
+dpc_dummy_inputs = (jnp.zeros((N_grid, N_grid)), jnp.zeros((N_grid, N_grid)), jnp.zeros((n_agents, 2)))
+dpc_path = bench_models_dir / 'dpc_heat2d_params.msgpack'
+
+dpc_p = None
+if os.path.exists(dpc_path):
+    with open(dpc_path, 'rb') as f:
+        dpc_bytes = f.read()
+    
+    # Safely restore and map keys to handle dict wrappers
+    raw_dict = msgpack_restore(dpc_bytes)
+    state_dict = raw_dict['params'] if 'params' in raw_dict else raw_dict
+    state_dict = state_dict['dcp'] if 'dcp' in state_dict else state_dict
+        
+    variables = dpc_model.init(jax.random.PRNGKey(0), *dpc_dummy_inputs)
+    
+    try:
+        dpc_p = from_state_dict(variables, state_dict)
+        print("[+] Successfully loaded DPC")
+    except Exception as e:
+        print(f"[-] Failed to load DPC: {e}")
+else:
+    print(f"[-] {dpc_path} not found.")
+
+if dpc_p:
+    def dpc_apply(p, z, target, xi):
+        # DPC Model returns (u, v) natively
+        return dpc_model.apply(p, z, target, xi)
+    
+    bench_registry['DPC'] = {'apply': dpc_apply, 'params': dpc_p, 'color': 'magenta'}
+
+
+# 7. Uncontrolled Baseline
 bench_registry['Uncontrolled'] = {
     'apply': lambda p, z, t, xi: (jnp.zeros(n_agents), jnp.zeros((n_agents, 2))), 
     'params': None, 'color': 'red'
@@ -223,7 +252,7 @@ for name in bench_registry:
     plt.colorbar(label='Temperature')
     
     plt.tight_layout()
-    plt.savefig(output_dir / f"field_{name.lower()}.pdf")
+    plt.savefig(output_dir / f"field_{name.lower().replace(' ', '_')}.pdf")
     plt.close()
 
 # --- 6. Plotting Trendlines ---

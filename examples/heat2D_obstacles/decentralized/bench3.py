@@ -33,6 +33,7 @@ from examples.heat2D_obstacles.decentralized.bench.models_marl import MARLActor2
 from examples.heat2D_obstacles.decentralized.bench.models_rl import CentralizedActor2D
 from examples.heat2D_obstacles.decentralized.bench.models_mappo import MAPPOActor2D
 from examples.heat2D_obstacles.decentralized.bench.models_ppo import PPOActor2D
+from examples.heat2D_obstacles.decentralized.bench.models_dpc import CentralizedMLPControlNet2D
 
 # 2D Specific Configuration
 N_grid = 32
@@ -79,11 +80,11 @@ pos_1d = np.linspace(0.2, 0.8, n_side)
 X, Y = np.meshgrid(pos_1d, pos_1d)
 xi_init = jnp.stack([X.flatten(), Y.flatten()], axis=-1).astype(np.float32)
 
-# 1. DPC (Loaded with _obstacles suffix)
-dpc_model = DecentralizedHeat2DControlNet(features=(16, 32))
-dpc_p = load_params('decentralized_params_heat2d_obstacles.msgpack', dpc_model, (jnp.zeros((N_grid, N_grid)), jnp.zeros((N_grid, N_grid)), xi_init))
-if dpc_p:
-    bench_registry['DPC'] = {'apply': dpc_model.apply, 'params': dpc_p, 'color': 'blue'}
+# 1. CINOC (Loaded with _obstacles suffix)
+CINOC_model = DecentralizedHeat2DControlNet(features=(16, 32))
+CINOC_p = load_params('decentralized_params_heat2d_obstacles.msgpack', CINOC_model, (jnp.zeros((N_grid, N_grid)), jnp.zeros((N_grid, N_grid)), xi_init))
+if CINOC_p:
+    bench_registry['CINOC'] = {'apply': CINOC_model.apply, 'params': CINOC_p, 'color': 'blue'}
 
 # 2. MARL (TD3) - PE_D = 64 -> 128 PE + 101 Obs = 229
 marl_model = MARLActor2D()
@@ -99,16 +100,14 @@ if marl_p:
         return action[:, 0], action[:, 1:3]
     bench_registry['MARL'] = {'apply': marl_apply, 'params': marl_p, 'color': 'orange'}
 
-# 5. RL Centralized
+# 3. RL Centralized
 rl_model = CentralizedActor2D(n_agents=n_agents)
-
 rl_dummy_z = jnp.zeros((N_grid, N_grid))
 rl_dummy_xi = jnp.zeros((n_agents, 2))
 rl_p = load_params(bench_models_dir / 'rl_heat2d_params.msgpack', rl_model, (rl_dummy_z, rl_dummy_z, rl_dummy_xi))
 
 if rl_p:
     def rl_apply(p, z, target, xi):
-        # Pass the unflattened arguments directly to the model
         action = rl_model.apply(p, z, target, xi)
         return action[:, 0], action[:, 1:3]
     bench_registry['RL'] = {'apply': rl_apply, 'params': rl_p, 'color': 'purple'}
@@ -127,7 +126,7 @@ if ppo_p:
     bench_registry['PPO'] = {'apply': ppo_apply, 'params': ppo_p, 'color': 'green'}
 
 
-# 3. MAPPO - PE_D = 128 -> 256 PE + 101 Obs = 357
+# 5. MAPPO - PE_D = 128 -> 256 PE + 101 Obs = 357
 mappo_model = MAPPOActor2D(n_agents=n_agents)
 mappo_dummy_input = jnp.zeros((1, n_agents, 357))
 mappo_p = load_params(bench_models_dir / 'mappo_heat2d_params.msgpack', mappo_model, (mappo_dummy_input,))
@@ -142,7 +141,37 @@ if mappo_p:
         return action[:, 0], action[:, 1:3]
     bench_registry['MAPPO'] = {'apply': mappo_apply, 'params': mappo_p, 'color': 'brown'}
 
-# 6. Uncontrolled Baseline
+# 6. Centralized DPC (MLP) for Obstacles
+dpc_model = CentralizedMLPControlNet2D(hidden_dim=256, n_agents=n_agents)
+dpc_dummy_inputs = (jnp.zeros((N_grid, N_grid)), jnp.zeros((N_grid, N_grid)), jnp.zeros((n_agents, 2)))
+dpc_path = bench_models_dir / 'dpc_heat2d_obstacles_params.msgpack'
+
+dpc_p = None
+if os.path.exists(dpc_path):
+    with open(dpc_path, 'rb') as f:
+        dpc_bytes = f.read()
+    
+    raw_dict = msgpack_restore(dpc_bytes)
+    state_dict = raw_dict['params'] if 'params' in raw_dict else raw_dict
+    state_dict = state_dict['dcp'] if 'dcp' in state_dict else state_dict
+        
+    variables = dpc_model.init(jax.random.PRNGKey(0), *dpc_dummy_inputs)
+    
+    try:
+        dpc_p = from_state_dict(variables, state_dict)
+        print("[+] Successfully loaded DPC")
+    except Exception as e:
+        print(f"[-] Failed to load DPC: {e}")
+else:
+    print(f"[-] {dpc_path} not found.")
+
+if dpc_p:
+    def dpc_apply(p, z, target, xi):
+        return dpc_model.apply(p, z, target, xi)
+    
+    bench_registry['DPC'] = {'apply': dpc_apply, 'params': dpc_p, 'color': 'magenta'}
+
+# 7. Uncontrolled Baseline
 bench_registry['Uncontrolled'] = {
     'apply': lambda p, z, t, xi: (jnp.zeros(n_agents), jnp.zeros((n_agents, 2))), 
     'params': None, 'color': 'red'
@@ -221,7 +250,7 @@ for name in bench_registry:
     add_obstacles(ax3)
     
     plt.tight_layout()
-    plt.savefig(output_dir / f"field_{name.lower()}.pdf")
+    plt.savefig(output_dir / f"field_{name.lower().replace(' ', '_')}.pdf")
     plt.close()
 
 # --- 6. Plotting Trendlines ---

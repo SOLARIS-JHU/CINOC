@@ -36,6 +36,7 @@ from examples.turbulence2d.decentralized.bench.models_marl import MARLActor2DKS
 from examples.turbulence2d.decentralized.bench.models_mappo import MAPPOActorTurb
 from examples.turbulence2d.decentralized.bench.models_rl import FCNActor
 from examples.turbulence2d.decentralized.bench.models_ppo import FCNActorPPO
+from examples.turbulence2d.decentralized.bench.models_dpc import CentralizedFCNControlNet2D_Turb
 
 
 # 2D Specific Configuration
@@ -89,13 +90,13 @@ xv, yv = np.meshgrid(x_lin, x_lin)
 xi_init = jnp.stack([xv.flatten(), yv.flatten()], axis=-1).astype(np.float32)
 target_state = jnp.zeros((N_grid, N_grid))
 
-# 1. DPC (Centralized)
-dpc_model = DecentralizedTurbulenceNet(features=(32, 64), patch_size=16, domain_size=(L_domain, L_domain), u_max=40.0)
-dpc_p = load_params('bench/models/turbulence_params.msgpack', dpc_model, (xi_init, jnp.zeros((1, N_grid, N_grid))))
-if dpc_p:
-    def dpc_apply_wrapped(p, xi_fixed, obs):
-        return dpc_model.apply(p, xi_fixed, obs)
-    bench_registry['DPC'] = {'apply': dpc_apply_wrapped, 'params': dpc_p, 'color': 'blue'}
+# 1. CINOC
+CINOC_model = DecentralizedTurbulenceNet(features=(32, 64), patch_size=16, domain_size=(L_domain, L_domain), u_max=40.0)
+CINOC_p = load_params('turbulence_params.msgpack', CINOC_model, (xi_init, jnp.zeros((1, N_grid, N_grid))))
+if CINOC_p:
+    def CINOC_apply_wrapped(p, xi_fixed, obs):
+        return CINOC_model.apply(p, xi_fixed, obs)
+    bench_registry['CINOC'] = {'apply': CINOC_apply_wrapped, 'params': CINOC_p, 'color': 'blue'}
 
 # --- MARL Patch Extraction Helpers ---
 @partial(jax.jit, static_argnames=['n_grid', 'p_size'])
@@ -220,9 +221,65 @@ if mappo_p:
         env_action = jnp.tanh(mean_raw) * 75.0
         return env_action.squeeze().astype(jnp.float64)
 
-    bench_registry['MAPPO'] = {'apply': mappo_apply, 'params': mappo_p, 'color': 'purple'}
+    bench_registry['MAPPO'] = {'apply': mappo_apply, 'params': mappo_p, 'color': 'cyan'}
 
-# 6. Uncontrolled Baseline
+
+# --- 6. Centralized DPC (FCN) ---
+dpc_model = CentralizedFCNControlNet2D_Turb(u_max=75.0)
+dpc_dummy_xi = jnp.zeros((n_agents, 2))
+dpc_dummy_obs = jnp.zeros((N_grid, N_grid))
+
+dpc_path = Path('bench/models/dpc_turb_params.msgpack')
+
+dpc_p = None
+if dpc_path.exists():
+    with open(dpc_path, 'rb') as f:
+        dpc_bytes = f.read()
+    
+    variables = dpc_model.init(jax.random.PRNGKey(0), dpc_dummy_xi, dpc_dummy_obs)
+    raw_dict = msgpack_restore(dpc_bytes)
+    
+    # --- HYPER-SPECIFIC RECURSIVE SEARCH ---
+    # Digs through any amount of nesting to find the actual FCN neural network layers
+    def find_model_root(d):
+        if isinstance(d, dict):
+            # We specifically check for Conv_3, which proves this is the 4-layer FCN
+            if 'Conv_3' in d and 'LayerNorm_2' in d:
+                return d
+            # Otherwise, keep digging deeper
+            for k, v in d.items():
+                res = find_model_root(v)
+                if res is not None:
+                    return res
+        return None
+    
+    model_root = find_model_root(raw_dict)
+    
+    if model_root is not None:
+        try:
+            # We found the correct layers! Wrap them exactly once for Flax.
+            dpc_p = from_state_dict(variables, {'params': model_root})
+            print(f"[+] Successfully loaded DPC from {dpc_path} (Smart Search)")
+        except Exception as e:
+            print(f"[-] DPC Mismatch Error during final load: {e}")
+    else:
+        # If we reach here, the file physically does not contain DPC FCN weights
+        print(f"[-] CRITICAL: {dpc_path} does NOT contain the FCN DPC layers (missing Conv_3)!")
+        print("    You accidentally trained the DecentralizedTurbulenceNet in train_dpc.py.")
+        print("    Please update train_dpc.py to use CentralizedFCNControlNet2D_Turb and retrain.")
+else:
+    print(f"[-] {dpc_path} not found.")
+
+if dpc_p:
+    def dpc_apply(p, xi_fixed, obs):
+        # DPC FCN directly accepts the 2D field and returns the spatial grid of controls
+        action = dpc_model.apply(p, xi_fixed, obs)
+        return action
+    
+    bench_registry['DPC'] = {'apply': dpc_apply, 'params': dpc_p, 'color': 'brown'}
+
+    
+# 7. Uncontrolled Baseline
 bench_registry['Uncontrolled'] = {
     'apply': lambda p, xi_fixed, obs: jnp.zeros(n_agents), 
     'params': None, 'color': 'red'

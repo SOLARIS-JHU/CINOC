@@ -208,14 +208,14 @@ def parallel_marl_physics_step(z_batch, xi_batch, target_batch, actions, key):
     local_mse = jnp.square(local_z - local_target)
     global_mse = jnp.mean(jnp.square(safe_z - target_batch), axis=1)[:, None]
     
-    r_track_combined = -10.0 * local_mse - 10.0 * global_mse 
+    r_track_combined = -50.0 * local_mse - 10.0 * global_mse 
 
     # 2. Effort Penalty
     r_effort = -0.001 * (jnp.square(u_batch) + 0.1 * jnp.square(v_batch))
     
     # 3. Boundary Margin Penalty
     margin = 0.02
-    r_bound = -100.0 * (jnp.maximum(0.0, margin - safe_xi)**2 + jnp.maximum(0.0, safe_xi - (1.0 - margin))**2)
+    r_bound = -10.0 * (jnp.maximum(0.0, margin - safe_xi)**2 + jnp.maximum(0.0, safe_xi - (1.0 - margin))**2)
     
     # 4. Collision Penalty
     R_safe = 0.02 
@@ -442,6 +442,6 @@ for update in trange(num_updates):
 
 # Save output
 actor_state_final, critic_state_final = runner_state[0], runner_state[1]
-with open('models/mappo_fkpp_params.msgpack', 'wb') as f:
+with open('models/mappo_fkpp_params2.msgpack', 'wb') as f:
     f.write(flax.serialization.to_bytes({'actor': actor_state_final.params, 'critic': critic_state_final.params}))
 print(f"Training finished in {time.time()-start_time:.1f}s. Weights saved.")

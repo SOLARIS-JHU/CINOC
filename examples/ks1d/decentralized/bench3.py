@@ -28,6 +28,7 @@ from examples.ks1d.decentralized.bench.models_marl import MARLActor
 from examples.ks1d.decentralized.bench.models_rl import CentralizedActor
 from examples.ks1d.decentralized.bench.models_ppo import PPOActor1D
 from examples.ks1d.decentralized.bench.models_mappo import MAPPOActor1D
+from examples.ks1d.decentralized.bench.models_dpc import CentralizedMLPControlNet1D_KS
 
 # KS Specific Settings
 N_grid, L_domain, n_agents = 128, 22.0, 8
@@ -76,18 +77,16 @@ print("Loading Models...")
 
 xi_single = jnp.linspace(0.0, L_domain, n_agents, endpoint=False) + (L_domain/n_agents)/2
 
-# 1. DPC (Centralized Training Output)
-dpc_model = DecentralizedControlNet(features=(64, 64), L_domain=L_domain)
-dpc_p = load_params('ks_centralized_params.msgpack', dpc_model, (jnp.zeros(N_grid), jnp.zeros(N_grid), xi_single))
-if dpc_p:
-    bench_registry['DPC'] = {'apply': dpc_model.apply, 'params': dpc_p, 'color': 'blue'}
+# 1. CINOC (Centralized Training Output)
+CINOC_model = DecentralizedControlNet(features=(64, 64), L_domain=L_domain)
+CINOC_p = load_params('ks_centralized_params.msgpack', CINOC_model, (jnp.zeros(N_grid), jnp.zeros(N_grid), xi_single))
+if CINOC_p:
+    bench_registry['CINOC'] = {'apply': CINOC_model.apply, 'params': CINOC_p, 'color': 'blue'}
 
 # 2. MARL 
 marl_model = MARLActor()
 marl_mu_val = jnp.array([L_domain, 0.05]) 
-# CHANGED: d=64 to match your new training config
 marl_pe_val = get_sinusoidal_encoding(xi_single, d=64)
-# CHANGED: 106 input dims (40 patch + 2 mu + 64 pe)
 marl_p = load_params(bench_models_dir / 'marl_standard_params.msgpack', marl_model, (jnp.zeros((n_agents, 106)),))
 
 if marl_p:
@@ -116,26 +115,62 @@ if ppo_p:
         return mean
     bench_registry['PPO'] = {'apply': ppo_apply, 'params': ppo_p, 'color': 'cyan'}
 
-# 5. MAPPO (Newly Added)
+# 5. MAPPO
 mappo_model = MAPPOActor1D(n_agents=n_agents)
 dummy_mappo_obs = jnp.zeros((n_agents, N_grid + 1))
 mappo_p = load_params(bench_models_dir / 'mappo_ks1d_params.msgpack', mappo_model, (dummy_mappo_obs,))
 
 if mappo_p:
     def mappo_apply(p, u, target, xi):
-        # Normalize states
         u_norm = u / STATE_NORM_FACTOR
         u_tiled = jnp.tile(u_norm, (n_agents, 1))
         xi_tiled = jnp.expand_dims(xi / L_domain, axis=-1)
         
-        # Build observation and apply model
         obs = jnp.concatenate([u_tiled, xi_tiled], axis=-1)
         mean, _ = mappo_model.apply(p, obs)
-        
-        # Squeeze the (n_agents, 1) output down to (n_agents,)
         return mean.squeeze(-1)
-    bench_registry['MAPPO'] = {'apply': mappo_apply, 'params': mappo_p, 'color': 'magenta'}
+    bench_registry['MAPPO'] = {'apply': mappo_apply, 'params': mappo_p, 'color': 'brown'}
 
+# 6. Centralized DPC (MLP)
+dpc_model = CentralizedMLPControlNet1D_KS(hidden_dim=256, n_agents=n_agents, u_max=1.0)
+dpc_dummy_inputs = (jnp.zeros(N_grid), jnp.zeros(N_grid), xi_single)
+dpc_path = bench_models_dir / 'dpc_ks1d_params.msgpack'
+
+dpc_p = None
+if os.path.exists(dpc_path):
+    with open(dpc_path, 'rb') as f:
+        dpc_bytes = f.read()
+    
+    # 1. Restore the raw dictionary
+    raw_dict = msgpack_restore(dpc_bytes)
+    
+    # 2. Peel back the nested wrappers to get to the raw Dense layers
+    state_dict = raw_dict
+    if 'params' in state_dict:
+        state_dict = state_dict['params']
+    if 'params' in state_dict:  # Catch the double-nesting trap!
+        state_dict = state_dict['params']
+        
+    # 3. Initialize variables to get the target structure
+    variables = dpc_model.init(jax.random.PRNGKey(0), *dpc_dummy_inputs)
+    
+    # 4. Safely load the unwrapped dictionary into the initialized structure
+    try:
+        # Re-wrap with exactly one 'params' key so Flax is happy
+        dpc_p = from_state_dict(variables, {'params': state_dict})
+        print("[+] Successfully loaded DPC")
+    except Exception as e:
+        print(f"[-] Failed to load DPC: {e}")
+else:
+    print(f"[-] {dpc_path} not found.")
+
+if dpc_p:
+    def dpc_apply(p, u, target, xi):
+        # DPC Model returns u_out directly for the fixed actuators
+        return dpc_model.apply(p, u, target, xi)
+    bench_registry['DPC'] = {'apply': dpc_apply, 'params': dpc_p, 'color': 'magenta'}
+
+    
 # Uncontrolled
 bench_registry['Uncontrolled'] = {
     'apply': lambda p, u, t, xi: jnp.zeros((n_agents,)), 
@@ -195,7 +230,7 @@ for name in bench_registry:
     plt.xlabel('Time (s)')
     plt.ylabel('Space (x)')
     plt.tight_layout()
-    plt.savefig(output_dir / f"state_{name.lower()}.pdf")
+    plt.savefig(output_dir / f"state_{name.lower().replace(' ', '_')}.pdf")
     plt.close()
 
 plt.figure(figsize=(18, 8))

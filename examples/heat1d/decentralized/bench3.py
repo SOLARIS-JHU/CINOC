@@ -25,13 +25,12 @@ from examples.heat1d.decentralized.dynamics_dual import PDEDynamics
 from examples.heat1d.decentralized.data_utils import generate_grf
 from examples.heat1d.decentralized.bench.utils_hypemarl import get_sinusoidal_encoding
 
-# --- IMPORT MODELS DIRECTLY ---
 from models.policy import DecentralizedControlNet
 from examples.heat1d.decentralized.bench.models_marl import MARLActor
-from examples.heat1d.decentralized.bench.models_hypemarl import HyperActor
 from examples.heat1d.decentralized.bench.models_rl import CentralizedActor
 from examples.heat1d.decentralized.bench.models_ppo import PPOActor
 from examples.heat1d.decentralized.bench.models_mappo import MAPPOActor
+from examples.heat1d.decentralized.bench.models_dpc import CentralizedMLPControlNet
 
 N_grid, L_domain, n_agents = 100, 1.0, 8
 T_steps, N_eval = 300, 50
@@ -80,11 +79,11 @@ def load_params(filename, model, dummy_input):
 print("Loading Models...")
 xi_init = jnp.linspace(0.2, 0.8, n_agents)
 
-# 1. DPC
-dpc_model = DecentralizedControlNet(features=(64, 64))
-dpc_p = load_params('decentralized_params.msgpack', dpc_model, (jnp.zeros(N_grid), jnp.zeros(N_grid), xi_init))
-if dpc_p:
-    bench_registry['DPC'] = {'apply': dpc_model.apply, 'params': dpc_p, 'color': 'blue'}
+# 1. CINOC
+CINOC_model = DecentralizedControlNet(features=(64, 64))
+CINOC_p = load_params('decentralized_params.msgpack', CINOC_model, (jnp.zeros(N_grid), jnp.zeros(N_grid), xi_init))
+if CINOC_p:
+    bench_registry['CINOC'] = {'apply': CINOC_model.apply, 'params': CINOC_p, 'color': 'blue'}
 
 
 # 2. MARL (TD3)
@@ -135,23 +134,7 @@ if mappo_p:
     bench_registry['MAPPO'] = {'apply': mappo_apply, 'params': mappo_p, 'color': 'cyan'}
 
 
-# # 5. HypeMARL
-# hypemarl_model = HyperActor()
-# hypemarl_dummy_input = (jnp.zeros((2048,)), jnp.zeros((40,)))
-# hypemarl_p = load_params(bench_models_dir / 'hypemarl_heat_params.msgpack', hypemarl_model, hypemarl_dummy_input)
-
-# if hypemarl_p:
-#     def hypemarl_apply(p, z, target, xi):
-#         y = extract_patches_jit(z, target, xi/L_domain, window_size=8)
-#         pe = get_sinusoidal_encoding(xi, d=2048)
-#         vmap_actor = jax.vmap(hypemarl_model.apply, in_axes=(None, 0, 0))
-#         action = vmap_actor(p, pe, y)
-#         return action[:, 0], action[:, 1]
-    
-#     bench_registry['HypeMARL'] = {'apply': hypemarl_apply, 'params': hypemarl_p, 'color': 'green'}
-
-
-# 6. RL Centralized (Centralized global state inputs: z, target, xi)
+# 5. RL Centralized (Centralized global state inputs: z, target, xi)
 rl_model = CentralizedActor(n_agents=n_agents)
 rl_dummy_input = (jnp.zeros(N_grid), jnp.zeros(N_grid), jnp.zeros(n_agents))
 rl_p = load_params(bench_models_dir / 'rl_heat_params.msgpack', rl_model, rl_dummy_input)
@@ -161,6 +144,38 @@ if rl_p:
         action = rl_model.apply(p, z, target, xi)
         return action[:, 0], action[:, 1]
     bench_registry['Centralized RL'] = {'apply': rl_apply, 'params': rl_p, 'color': 'purple'}
+
+
+# 6. Centralized DPC (MLP)
+dpc_model = CentralizedMLPControlNet(hidden_dim=256, n_agents=n_agents)
+dpc_dummy_inputs = (jnp.zeros(N_grid), jnp.zeros(N_grid), xi_init)
+dpc_path = bench_models_dir / 'dpc_heat_params.msgpack'
+
+dpc_p = None
+if os.path.exists(dpc_path):
+    with open(dpc_path, 'rb') as f:
+        dpc_bytes = f.read()
+    
+    # Safely restore and map keys to handle dict wrappers
+    raw_dict = msgpack_restore(dpc_bytes)
+    state_dict = raw_dict['params'] if 'params' in raw_dict else raw_dict
+    state_dict = state_dict['dcp'] if 'dcp' in state_dict else state_dict
+        
+    variables = dpc_model.init(jax.random.PRNGKey(0), *dpc_dummy_inputs)
+    
+    try:
+        dpc_p = from_state_dict(variables, state_dict)
+        print("[+] Successfully loaded DPC")
+    except Exception as e:
+        print(f"[-] Failed to load DPC: {e}")
+else:
+    print(f"[-] {dpc_path} not found.")
+
+if dpc_p:
+    def dpc_apply(p, z, target, xi):
+        return dpc_model.apply(p, z, target, xi)
+    
+    bench_registry['DPC'] = {'apply': dpc_apply, 'params': dpc_p, 'color': 'brown'}
 
 
 # 7. Uncontrolled Baseline
