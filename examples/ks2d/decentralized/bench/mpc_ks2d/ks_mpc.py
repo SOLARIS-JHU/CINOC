@@ -1,27 +1,30 @@
 """
 Nonlinear MPC Controller for 2D Kuramoto-Sivashinsky Equation using CasADi + IPOPT
-
-The controller uses exact sparse finite-difference spatial matrices 
-(Implicit Crank-Nicolson) to model KS dynamics natively in CasADi iteratively for N*N.
+Dual-Grid Architecture: Compresses the N_sim grid into N_mpc to solve natively in IPOPT.
 """
 
 import casadi as ca
 import numpy as np
 import scipy.sparse as sp
 import time
+from scipy.ndimage import zoom
 
 class KSMPC2D:
     """
-    Nonlinear Model Predictive Controller for the 2D KS Equation using Sparse FD.
+    Nonlinear Model Predictive Controller for the 2D KS Equation using Sparse FD on a Coarse Grid.
     """
     
-    def __init__(self, N, L, dt, centers, sigma, horizon,
+    def __init__(self, N_sim, N_mpc, L, dt, centers, sigma, horizon,
                  Q=1.0, R=0.01, u_min=-50, u_max=50, terminal_weight=10.0):
-        self.N = N
-        self.N2 = N * N
+        self.N_sim = N_sim
+        self.N_mpc = N_mpc
+        
+        self.N = N_mpc
+        self.N2 = N_mpc * N_mpc
         self.L = L
         self.dt = dt
-        self.dx = L / N
+        self.dx = L / self.N_mpc
+        
         self.centers = np.array(centers)
         self.sigma = sigma
         self.n_controls = len(centers)
@@ -32,11 +35,11 @@ class KSMPC2D:
         self.u_min = u_min
         self.u_max = u_max
         
-        self.x = np.linspace(0, L, N, endpoint=False)
-        self.y = np.linspace(0, L, N, endpoint=False)
+        self.x = np.linspace(0, L, self.N_mpc, endpoint=False)
+        self.y = np.linspace(0, L, self.N_mpc, endpoint=False)
         self.X, self.Y = np.meshgrid(self.x, self.y, indexing='ij')
         
-        print("Building forcing matrix G...")
+        print(f"Building forcing matrix G for N_mpc={N_mpc}...")
         self.G = np.zeros((self.N2, self.n_controls))
         for j, c in enumerate(self.centers):
             dx_dist = np.abs(self.X - c[0])
@@ -48,7 +51,7 @@ class KSMPC2D:
             
         self.G_ca = ca.DM(self.G)
         
-        print(f"Building sparse dynamics matrices for N={N}...")
+        print(f"Building sparse dynamics matrices for N_mpc={N_mpc}...")
         self._build_dynamics_matrix()
         
         print("Building CasADi Opti MPC NLP...")
@@ -153,8 +156,13 @@ class KSMPC2D:
         self.A_init = None
         
     def solve(self, u0_2d, u_ref_2d, warm_start=True):
-        u0 = u0_2d.flatten()
-        u_ref = u_ref_2d.flatten()
+        # Downsample the initial condition and reference grid to the internal MPC resolution
+        scale_factor = self.N_mpc / self.N_sim
+        u0_2d_coarse = zoom(u0_2d, scale_factor, order=3, mode='wrap')
+        u_ref_2d_coarse = zoom(u_ref_2d, scale_factor, order=3, mode='wrap')
+        
+        u0 = u0_2d_coarse.flatten()
+        u_ref = u_ref_2d_coarse.flatten()
         
         self.opti.set_value(self.u0_param, u0)
         self.opti.set_value(self.u_ref_param, u_ref)
@@ -182,7 +190,10 @@ class KSMPC2D:
             temp_A = A_opt[:, 1:] if self.horizon > 1 else np.zeros((self.n_controls, 0))
             self.A_init = np.hstack([temp_A, A_opt[:, -1:]]) if self.horizon > 0 else A_opt
             
-            u_next_opt_2d = U_opt[:, 1].reshape((self.N, self.N))
+            u_next_opt_mpc = U_opt[:, 1].reshape((self.N_mpc, self.N_mpc))
+            
+            # Upsample back to full scale for external physics plotting
+            u_next_opt_2d = zoom(u_next_opt_mpc, self.N_sim / self.N_mpc, order=3, mode='wrap')
             
             return A_opt[:, 0], u_next_opt_2d, A_opt
             

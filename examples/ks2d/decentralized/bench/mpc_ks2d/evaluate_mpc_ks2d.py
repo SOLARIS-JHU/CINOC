@@ -81,7 +81,7 @@ def timed_mpc_rollout(mpc, solver, u0, u_hat0, u_target, T_sim, mpc_substeps=1, 
         
         if t % mpc_substeps == 0:
             solve_start = time.perf_counter()
-            current_control, _, _ = mpc.solve(u, u_target)
+            current_control, _, _ = mpc.solve(u, u_target, warm_start=True)
             solve_end = time.perf_counter()
             solve_times.append(solve_end - solve_start)
         
@@ -125,8 +125,8 @@ def main(args):
     print(f"Initializing solver (N={N_grid}, dt={dt})...")
     solver = KSSolverJAX2D(N_grid, L_domain, dt, sigma, centers)
     
-    print(f"Building MPC NLP (H={horizon})... This may take a large amount of memory!")
-    mpc = KSMPC2D(N_grid, L_domain, dt, centers, sigma, horizon, 
+    print(f"Building MPC NLP Dual-Grid (H={horizon}, N_mpc=32)...")
+    mpc = KSMPC2D(N_sim=N_grid, N_mpc=32, L=L_domain, dt=dt, centers=centers, sigma=sigma, horizon=horizon, 
                   Q=Q, R=R, u_min=u_min, u_max=u_max, terminal_weight=terminal_weight)
     
     num_samples = args.num_samples
