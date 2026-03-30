@@ -38,6 +38,9 @@ from examples.turbulence2d.decentralized.bench.models_rl import FCNActor
 from examples.turbulence2d.decentralized.bench.models_ppo import FCNActorPPO
 from examples.turbulence2d.decentralized.bench.models_dpc import CentralizedFCNControlNet2D_Turb
 
+# DeepONet Imports
+from examples.turbulence2d.decentralized.bench.models_deeponet_matd3_ import DeepONetActor
+from examples.turbulence2d.decentralized.bench.models_deeponet_mappo import DeepONetMAPPOActor
 
 # 2D Specific Configuration
 N_grid = 64
@@ -156,8 +159,6 @@ if rl_p:
         obs_norm = jnp.clip(obs_squeeze / STATE_NORM_FACTOR, -5.0, 5.0).astype(jnp.float32)
         
         act_norm = rl_model.apply(p, obs_norm[None, ...])
-        
-        # Scale by U_MAX_RL before passing to the physics solver (TD3 specific)
         action = (act_norm * U_MAX_RL).squeeze().astype(jnp.float64) 
         
         return action
@@ -178,10 +179,7 @@ if ppo_p:
         obs_squeeze = obs.squeeze()
         obs_norm = jnp.clip(obs_squeeze / STATE_NORM_FACTOR, -5.0, 5.0).astype(jnp.float32)
         
-        # PPO actor returns (mean, log_std). We only extract the mean for deterministic eval.
         mean, _ = ppo_model.apply(p, obs_norm[None, ...])
-        
-        # PPO natively scales the output to U_MAX via its final layer
         action = mean.squeeze(0).astype(jnp.float64) 
         
         return action
@@ -204,20 +202,10 @@ if mappo_p:
     def mappo_apply(p, xi_fixed, obs):
         w_phys = obs.squeeze()
         xi_norm = xi_fixed / L_domain
-        grads = jnp.gradient(w_phys)
-        grad_y, grad_x = grads[0], grads[1]
-
-        def get_local_obs(xi_single):
-            p_w  = extract_local_patch(w_phys, xi_single, N_grid, 20)
-            p_gx = extract_local_patch(grad_x, xi_single, N_grid, 20)
-            p_gy = extract_local_patch(grad_y, xi_single, N_grid, 20)
-            return jnp.stack([p_w, p_gx, p_gy], axis=-1)
-
-        patches = jax.vmap(get_local_obs)(xi_norm)
-        patches_norm = (patches / 50.0).astype(jnp.float32)
+        patches = get_marl_obs(w_phys, xi_norm)
         pe = get_2d_sinusoidal_encoding(xi_norm, d=64).astype(jnp.float32)
         
-        mean_raw, _ = mappo_model.apply(p, patches_norm[None, ...], pe[None, ...])
+        mean_raw, _ = mappo_model.apply(p, patches[None, ...], pe[None, ...])
         env_action = jnp.tanh(mean_raw) * 75.0
         return env_action.squeeze().astype(jnp.float64)
 
@@ -228,25 +216,19 @@ if mappo_p:
 dpc_model = CentralizedFCNControlNet2D_Turb(u_max=75.0)
 dpc_dummy_xi = jnp.zeros((n_agents, 2))
 dpc_dummy_obs = jnp.zeros((N_grid, N_grid))
-
 dpc_path = Path('bench/models/dpc_turb_params.msgpack')
 
 dpc_p = None
 if dpc_path.exists():
     with open(dpc_path, 'rb') as f:
         dpc_bytes = f.read()
-    
     variables = dpc_model.init(jax.random.PRNGKey(0), dpc_dummy_xi, dpc_dummy_obs)
     raw_dict = msgpack_restore(dpc_bytes)
     
-    # --- HYPER-SPECIFIC RECURSIVE SEARCH ---
-    # Digs through any amount of nesting to find the actual FCN neural network layers
     def find_model_root(d):
         if isinstance(d, dict):
-            # We specifically check for Conv_3, which proves this is the 4-layer FCN
             if 'Conv_3' in d and 'LayerNorm_2' in d:
                 return d
-            # Otherwise, keep digging deeper
             for k, v in d.items():
                 res = find_model_root(v)
                 if res is not None:
@@ -254,38 +236,71 @@ if dpc_path.exists():
         return None
     
     model_root = find_model_root(raw_dict)
-    
     if model_root is not None:
         try:
-            # We found the correct layers! Wrap them exactly once for Flax.
             dpc_p = from_state_dict(variables, {'params': model_root})
-            print(f"[+] Successfully loaded DPC from {dpc_path} (Smart Search)")
         except Exception as e:
-            print(f"[-] DPC Mismatch Error during final load: {e}")
-    else:
-        # If we reach here, the file physically does not contain DPC FCN weights
-        print(f"[-] CRITICAL: {dpc_path} does NOT contain the FCN DPC layers (missing Conv_3)!")
-        print("    You accidentally trained the DecentralizedTurbulenceNet in train_dpc.py.")
-        print("    Please update train_dpc.py to use CentralizedFCNControlNet2D_Turb and retrain.")
-else:
-    print(f"[-] {dpc_path} not found.")
+            pass
 
 if dpc_p:
     def dpc_apply(p, xi_fixed, obs):
-        # DPC FCN directly accepts the 2D field and returns the spatial grid of controls
         action = dpc_model.apply(p, xi_fixed, obs)
         return action
     
     bench_registry['DPC'] = {'apply': dpc_apply, 'params': dpc_p, 'color': 'brown'}
 
+# --- 7. DeepONet MATD3 ---
+d_matd3_model = DeepONetActor(u_max=40.0)
+d_matd3_dummy_patches = jnp.zeros((n_agents, 20, 20, 3), dtype=jnp.float32)
+d_matd3_dummy_xi = jnp.zeros((n_agents, 2), dtype=jnp.float32)
+
+d_matd3_p = load_params(bench_models_dir / 'deeponet_matd3_params.msgpack', d_matd3_model, (d_matd3_dummy_patches, d_matd3_dummy_xi))
+if not d_matd3_p:
+    d_matd3_p = load_params(Path('models/deeponet_matd3_params.msgpack'), d_matd3_model, (d_matd3_dummy_patches, d_matd3_dummy_xi))
+
+if d_matd3_p:
+    @jax.jit
+    def d_matd3_apply(p, xi_fixed, obs):
+        w_phys = obs.squeeze()
+        xi_norm = (xi_fixed / L_domain).astype(jnp.float32)
+        patches = get_marl_obs(w_phys, xi_norm)
+        action = d_matd3_model.apply(p, patches, xi_norm)
+        return action.squeeze(-1).astype(jnp.float64)
     
-# 7. Uncontrolled Baseline
+    bench_registry['D-MATD3'] = {'apply': d_matd3_apply, 'params': d_matd3_p, 'color': 'purple'}
+
+# --- 8. DeepONet MAPPO ---
+d_mappo_model = DeepONetMAPPOActor(n_agents=n_agents, u_max=75.0)
+d_mappo_dummy_patches = jnp.zeros((1, n_agents, 20, 20, 3), dtype=jnp.float32)
+d_mappo_dummy_xi = jnp.zeros((1, n_agents, 2), dtype=jnp.float32)
+
+d_mappo_p = load_params(bench_models_dir / 'deeponet_mappo_turb_params.msgpack', d_mappo_model, (d_mappo_dummy_patches, d_mappo_dummy_xi))
+if not d_mappo_p:
+    d_mappo_p = load_params(Path('models/deeponet_mappo_turb_params.msgpack'), d_mappo_model, (d_mappo_dummy_patches, d_mappo_dummy_xi))
+
+if d_mappo_p:
+    @jax.jit
+    def d_mappo_apply(p, xi_fixed, obs):
+        w_phys = obs.squeeze()
+        xi_norm = (xi_fixed / L_domain).astype(jnp.float32)
+        patches = get_marl_obs(w_phys, xi_norm)
+        
+        # MAPPO requires an explicit batch dimension for both inputs
+        mean_raw, _ = d_mappo_model.apply(p, patches[None, ...], xi_norm[None, ...])
+        
+        env_action = jnp.tanh(mean_raw) * 75.0
+        return env_action.squeeze().astype(jnp.float64)
+
+    bench_registry['D-MAPPO'] = {'apply': d_mappo_apply, 'params': d_mappo_p, 'color': 'teal'}
+
+# --- 9. Uncontrolled Baseline ---
 bench_registry['Uncontrolled'] = {
     'apply': lambda p, xi_fixed, obs: jnp.zeros(n_agents), 
     'params': None, 'color': 'red'
 }
 
-# --- 2. Simulation ---
+
+# --- Simulation ---
 print(f"Loading Turbulence Spectral Data and Running Simulations...")
 
 data_dir = Path('../../data')
@@ -329,7 +344,7 @@ for name in bench_registry:
     w_phys_res = batched_sim(w_hat_pool, xi_batch)
     bench_registry[name]['data'] = w_phys_res
 
-# --- 3. Metrics & Results Printing ---
+# --- Metrics & Results Printing ---
 print("\n" + "="*70)
 print(f"{'Method':<15} | {'Final Enstrophy':<20} | {'2-Sigma':<20}")
 print("-" * 70)
@@ -340,7 +355,7 @@ for name in bench_registry:
     print(f"{name:<15} | {mean_val:.6f}             | ±{2*std_val:.6f}")
 print("="*70)
 
-# --- 4. Individual Field Plots (PDF Export) ---
+# --- Individual Field Plots (PDF Export) ---
 print("Saving individual state plots to PDF...")
 for name in bench_registry:
     fig = plt.figure(figsize=(10, 5))
@@ -364,7 +379,7 @@ for name in bench_registry:
     plt.savefig(output_dir / f"state_{name.replace(' ', '_').lower()}.pdf")
     plt.close()
 
-# --- 5. Plotting Trendlines ---
+# --- Plotting Trendlines ---
 plt.figure(figsize=(18, 8))
 
 plt.subplot(1, 2, 1)
@@ -374,6 +389,7 @@ plt.yscale('log')
 plt.title('Final System Enstrophy (Log Scale)')
 plt.ylabel('Mean L2 Vorticity')
 plt.grid(True, alpha=0.3)
+plt.xticks(rotation=45) # Added rotation for cleaner labels
 
 plt.subplot(1, 2, 2)
 time_axis = jnp.arange(T_steps) * substeps * dt
