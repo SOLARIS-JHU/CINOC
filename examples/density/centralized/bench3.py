@@ -175,7 +175,7 @@ if rl_p:
 
 # 3. MARL (MATD3) Model
 marl_model = MARLActor(n_agents=N_AGENTS)
-marl_p = load_params('bench/models/marl_matd3_ns2d_params.msgpack', marl_model, rl_dummy_in)
+marl_p = load_params('bench/models/marl_matd3_ns2d_params_new.msgpack', marl_model, rl_dummy_in)
 
 if marl_p:
     bench_registry['MARL (MATD3)'] = {

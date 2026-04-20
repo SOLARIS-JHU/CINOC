@@ -41,8 +41,8 @@ CONFIG = {
     'epochs': 50,
     'pool_size': 500,      
     'ic_filename': 'turbulence_chaotic_ics_64_more.pkl',
-    'save_dir': Path("figures/turb_scaling"),
-    'model_name': 'turbulence_policy_n64.msgpack'
+    'save_dir': Path("./"),
+    'model_name': 'turbulence_params.msgpack'
 }
 
 CONFIG['save_dir'].mkdir(parents=True, exist_ok=True)
