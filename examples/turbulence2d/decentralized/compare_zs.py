@@ -1,5 +1,5 @@
 """
-Turbulence Zero-Shot Scaling Ablation Script (CINOC + DeepONet MAPPO + DeepONet MATD3).
+Turbulence Zero-Shot Scaling Ablation Script (Ours + DeepONet MAPPO + DeepONet MATD3).
 """
 
 import jax
@@ -163,17 +163,17 @@ def main():
     if jnp.iscomplexobj(w_init_pool):
         w_init_pool = jnp.fft.ifft2(w_init_pool).real.astype(jnp.float64)
 
-    # 2. Setup CINOC Model
-    CINOC_model = DecentralizedTurbulenceNet(
+    # 2. Setup Ours Model
+    Ours_model = DecentralizedTurbulenceNet(
         features=(32, 64), patch_size=16,
         domain_size=(CONFIG['L_domain'], CONFIG['L_domain']), u_max=40.0
     )
-    dynamics = PDEDynamics2D(policy_apply_fn=CINOC_model.apply)
+    dynamics = PDEDynamics2D(policy_apply_fn=Ours_model.apply)
     
     dummy_xi = get_grid_xi(CONFIG['n_agents_train'], CONFIG['L_domain'])
     dummy_obs = jnp.zeros((1, CONFIG['N_grid'], CONFIG['N_grid']))
     key, init_key = jax.random.split(key)
-    init_params_base = CINOC_model.init(init_key, dummy_xi, dummy_obs)
+    init_params_base = Ours_model.init(init_key, dummy_xi, dummy_obs)
 
     # Setup DeepONet Models
     dummy_patches = jnp.zeros((1, CONFIG['n_agents_train'], CONFIG['patch_size'], CONFIG['patch_size'], 3), dtype=jnp.float32)
@@ -190,9 +190,9 @@ def main():
     try:
         with open(MODEL_PATH_BASE, 'rb') as f:
             params_base = flax.serialization.from_bytes(init_params_base, f.read())
-        print(f"[OK] CINOC loaded from {MODEL_PATH_BASE}")
+        print(f"[OK] Ours loaded from {MODEL_PATH_BASE}")
     except:
-        print(f"[Warning] CINOC not found. Using random init.")
+        print(f"[Warning] Ours not found. Using random init.")
         params_base = init_params_base
 
     try:
@@ -247,10 +247,10 @@ def main():
         for i in range(n_test):
             w_init = w_init_test[i]
             
-            # ---> FIX: Cast to spectral domain for the CINOC! <---
+            # ---> FIX: Cast to spectral domain for the Ours! <---
             w_hat_init = jnp.fft.fft2(w_init)
             
-            # --- 4A. CINOC Eval ---
+            # --- 4A. Ours Eval ---
             w_traj_b, u_ctrl_traj_b = dynamics.unroll_controlled(
                 w_hat_init, xi_eval, params_base, t_steps=CONFIG['T_steps'], N_grid=CONFIG['N_grid'],
                 L=CONFIG['L_domain'], dt=CONFIG['dt'], substeps=CONFIG['substeps'], 
@@ -283,7 +283,7 @@ def main():
         
         print(f"N={n:3d} | Base: {avg_base:.5f} | MAPPO: {avg_map:.5f} | MATD3: {avg_mat:.5f}")
         
-        results.append({"n_agents": n, "model": "CINOC", "enstrophy": avg_base, "effort": np.mean(eff_base_list)})
+        results.append({"n_agents": n, "model": "Ours", "enstrophy": avg_base, "effort": np.mean(eff_base_list)})
         results.append({"n_agents": n, "model": "MAPPO", "enstrophy": avg_map, "effort": np.mean(eff_mappo_list)})
         results.append({"n_agents": n, "model": "MATD3", "enstrophy": avg_mat, "effort": np.mean(eff_matd3_list)})
 
@@ -301,37 +301,39 @@ def main():
     df.to_csv(CSV_PATH, index=False)
 
     plt.style.use('seaborn-v0_8-paper')
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    # CHANGED: Use a single subplot instead of 1x2 
+    # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    fig, ax1 = plt.subplots(1, 1, figsize=(7, 5))
     
-    colors = {"CINOC": "#e74c3c", "MAPPO": "#3498db", "MATD3": "#2ecc71"}
-    markers = {"CINOC": "o", "MAPPO": "s", "MATD3": "^"}
+    colors = {"Ours": "#e74c3c", "MAPPO": "#3498db", "MATD3": "#2ecc71"}
+    markers = {"Ours": "o", "MAPPO": "s", "MATD3": "^"}
     
     for model in df['model'].unique():
         sub_df = df[df['model'] == model]
         # Absolute Plot
         ax1.plot(sub_df['n_agents'], sub_df['enstrophy'], marker=markers[model], 
                  linestyle='-', color=colors[model], linewidth=2, markersize=8, label=model)
-        # Relative Plot
-        ax2.plot(sub_df['n_agents'], sub_df['relative_error'], marker=markers[model], 
-                 linestyle='-', color=colors[model], linewidth=2, markersize=8, label=model)
+        # Relative Plot (Commented Out)
+        # ax2.plot(sub_df['n_agents'], sub_df['relative_error'], marker=markers[model], 
+        #          linestyle='-', color=colors[model], linewidth=2, markersize=8, label=model)
 
     # Decorate ax1 (Absolute)
     ax1.axvline(x=CONFIG['n_agents_train'], color='gray', linestyle='--', alpha=0.8, label=f'Train Size (N={CONFIG["n_agents_train"]})')
-    ax1.set_xlabel("Number of Agents (N)", fontsize=10)
+    ax1.set_xlabel("Number of Agents (M)", fontsize=10)
     ax1.set_ylabel("Absolute Enstrophy", fontsize=10)
     ax1.set_title("Absolute Scalability (Zero-Shot)", fontsize=12, fontweight='bold')
     ax1.grid(True, which="both", ls="--", alpha=0.3)
     ax1.legend()
 
-    # Decorate ax2 (Relative)
-    ax2.axvline(x=CONFIG['n_agents_train'], color='gray', linestyle='--', alpha=0.8, label=f'Train Size (N={CONFIG["n_agents_train"]})')
-    ax2.axhline(y=100, color='gray', linestyle=':', alpha=0.5)
-    ax2.set_xlabel("Number of Agents (N)", fontsize=10)
-    ax2.set_ylabel("Relative Enstrophy (%)", fontsize=10)
-    ax2.yaxis.set_major_formatter(PercentFormatter())
-    ax2.set_title("Relative Scalability (Zero-Shot)", fontsize=12, fontweight='bold')
-    ax2.grid(True, which="both", ls="--", alpha=0.3)
-    ax2.legend()
+    # Decorate ax2 (Relative) - Commented Out
+    # ax2.axvline(x=CONFIG['n_agents_train'], color='gray', linestyle='--', alpha=0.8, label=f'Train Size (N={CONFIG["n_agents_train"]})')
+    # ax2.axhline(y=100, color='gray', linestyle=':', alpha=0.5)
+    # ax2.set_xlabel("Number of Agents (N)", fontsize=10)
+    # ax2.set_ylabel("Relative Enstrophy (%)", fontsize=10)
+    # ax2.yaxis.set_major_formatter(PercentFormatter())
+    # ax2.set_title("Relative Scalability (Zero-Shot)", fontsize=12, fontweight='bold')
+    # ax2.grid(True, which="both", ls="--", alpha=0.3)
+    # ax2.legend()
     
     plt.tight_layout()
     fig.savefig(PLOT_PATH)
