@@ -82,3 +82,7 @@ TODO*
 .jax_cache
 
 *flops.py
+*_test
+pdf2png.py
+
+*.npz
