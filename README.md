@@ -69,6 +69,16 @@ python3 train.py
 python3 visualize_paper.py
 ```
 
+---
+## Tutorials
+
+Looking to learn more? We have a collection of step-by-step guides and examples to help you get started. 
+
+Check out the **[Tutorials directory](./tutorials)** for more information.
+
+---
+## Repository Structure
+
 The structure of this repository is the following:
 ```text
 CINOC/
