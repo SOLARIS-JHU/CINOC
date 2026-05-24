@@ -7,7 +7,7 @@
 > — **Isaac Asimov**, *Foundation and Earth*
 
 <!-- [TODO]: ricontrolla nome e ricontrolla link per paper -->
-Implementation of [Cardinality-Invariant Neural Operator Policies for Scalable PDE Control]() by [Pietro Zanotta](https://github.com/PietroZanotta)<sup>1, 2</sup>, [Dibakar Roy](https://github.com/RoyDibs)<sup>1, 2</sup>, [Honghui Zheng](https://github.com/Honghui-Zheng)<sup>1, 2</sup>, [Somdatta Goswami](https://github.com/somdattagoswami)<sup>2</sup>, [Ján Drgoňa](https://github.com/drgona)<sup>2</sup>.
+Implementation of [Cardinality-Invariant Neural Operator Policies for Scalable PDE Control]() by [Pietro Zanotta](https://github.com/PietroZanotta)<sup>1, 2</sup>, [Dibakar Roy Sarkar](https://github.com/RoyDibs)<sup>1, 2</sup>, [Honghui Zheng](https://github.com/Honghui-Zheng)<sup>1, 2</sup>, [Somdatta Goswami](https://github.com/somdattagoswami)<sup>2</sup>, [Ján Drgoňa](https://github.com/drgona)<sup>2</sup>.
 
 <sup>1</sup>: Equal contribution
 <sup>2</sup>: Department of Civil and System Engineering, Johns Hopkins University, Baltimore, USA
