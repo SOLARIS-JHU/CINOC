@@ -28,7 +28,7 @@ Controlling complex physical systems governed by partial differential equations 
 * **Cardinality Invariance (Zero-Shot Scalability):** Policies trained on small swarms can be deployed zero-shot onto significantly larger populations without requiring any fine-tuning.
 * **Stigmergic Coordination:** Decentralized agents share a common policy and coordinate implicitly through their shared physical environment. This drives an emergent self-normalization effect, where individual agents automatically scale back their control efforts as the swarm size increases.
 * **Theoretical Guarantees:** Grounded in mean-field theory, we proove that policy gradients computed from finite-agent systems reliably converge to the exact gradients of the continuous control limit.
-* **Versatile PDE Benchmarks:** The framework is empirically validated on diverse tasks—including trajectory tracking, chaotic stabilization, and density transport—across linear, nonlinear, chaotic, and turbulent PDE regimes.
+* **Versatile PDE Benchmarks:** The framework is empirically validated on diverse tasks—including trajectory tracking, chaotic stabilization, and density transport, across linear, nonlinear, chaotic, and turbulent PDE regimes.
 * **High Robustness:** Learned operators exhibit graceful degradation and robustness to partial agent failures, sensor noise, changes in grid resolution, and minor parametric shifts in the underlying physics.
  
 ---
@@ -146,7 +146,7 @@ CINOC/
 │   └── ...
 │
 ├── tutorials/                      # Pedagogical Jupiter Notebooks         
-│   ├── fkpp1d/             
+│   ├── ks1d/             
 │   ├── tutorial.ipynb   
 │   ├── heat2d/             
 │   └── tutorial.ipynb            
