@@ -74,7 +74,9 @@ python3 visualize_paper.py
 
 Looking to learn more? We have a collection of step-by-step guides and examples to help you get started. 
 
-Check out the **[Tutorials directory](./tutorials)** for more information.
+Check out the **[Tutorials directory](./tutorials)** for more information:
+1. Stabilizing the KS1D equation: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/SOLARIS-JHU/CINOC/blob/main/tutorials/ks1d/tutorial.ipynb)
+2. Trjectory tracking with constraints for the Heat2D equation: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/SOLARIS-JHU/CINOC/blob/main/tutorials/heat2d/tutorial.ipynb)
 
 ---
 ## Repository Structure
