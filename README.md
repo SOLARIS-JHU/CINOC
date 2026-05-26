@@ -1,13 +1,19 @@
 # CINOC: Cardinality-Invariant Neural Operator Policies for Scalable PDE Control
 
+<div align="center">
+
+[![Website](https://img.shields.io/badge/Website-CINOC-blue.svg)](https://solaris-jhu.github.io/CINOC-website/)
+[![arXiv](https://img.shields.io/badge/arXiv-2605.25867-b31b1b.svg)](https://arxiv.org/pdf/2605.25867)
+
+</div>
+
 > "You speak for the whole planet, do you? For the common consciousness of every dewdrop, of every pebble, of even the liquid central core of the planet?"
 > 
 > "I do, and so can any portion of the planet in which the intensity of the common consciousness is great enough."
 >
 > — **Isaac Asimov**, *Foundation and Earth*
 
-<!-- [TODO]: ricontrolla nome e ricontrolla link per paper -->
-Implementation of [Cardinality-Invariant Neural Operator Policies for Scalable PDE Control]() by [Pietro Zanotta](https://github.com/PietroZanotta)<sup>1, 2</sup>, [Dibakar Roy Sarkar](https://github.com/RoyDibs)<sup>1, 2</sup>, [Honghui Zheng](https://github.com/Honghui-Zheng)<sup>1, 2</sup>, [Somdatta Goswami](https://github.com/somdattagoswami)<sup>2</sup>, [Ján Drgoňa](https://github.com/drgona)<sup>2</sup>.
+Implementation of [Cardinality-Invariant Neural Operator Policies for Scalable PDE Control](https://arxiv.org/pdf/2605.25867) by [Pietro Zanotta](https://github.com/PietroZanotta)<sup>1, 2</sup>, [Dibakar Roy Sarkar](https://github.com/RoyDibs)<sup>1, 2</sup>, [Honghui Zheng](https://github.com/Honghui-Zheng)<sup>1, 2</sup>, [Somdatta Goswami](https://github.com/somdattagoswami)<sup>2</sup>, [Ján Drgoňa](https://github.com/drgona)<sup>2</sup>.
 
 <sup>1</sup>: Equal contribution
 <sup>2</sup>: Department of Civil and System Engineering, Johns Hopkins University, Baltimore, USA
