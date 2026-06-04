@@ -88,3 +88,4 @@ pdf2png.py
 *.npz
 !/tutorials/heat2d/heat2d_dataset_32x32_tutorial.npz
 !/tutorials/heat2d/decentralized_params_heat2d.msgpack
+!/tutorials/ks1d/decentralized_params_ks1d.msgpack
