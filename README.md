@@ -175,3 +175,16 @@ CINOC/
 - **Hardware Acceleration:** CUDA backend with NVIDIA driver v581.57
 
 ---
+
+## Citation
+
+If you find CINOC useful in your research, please cite our work:
+
+```bibtex
+@inproceedings{zanotta2026cinoc,
+  title     = {{CINOC}: Cardinality-Invariant Neural Operator Policies for Scalable {PDE} Control},
+  author    = {Pietro Zanotta and Dibakar Roy Sarkar and Honghui Zheng and Somdatta Goswami and J{\'a}n Drgo{\v{n}}a},
+  booktitle = {Forty-third International Conference on Machine Learning},
+  year      = {2026},
+  url       = {https://openreview.net/forum?id=XWYU5FTRxM}
+}
